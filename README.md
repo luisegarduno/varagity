@@ -9,7 +9,6 @@ Full Stack RAG application
 
 Project ToDo's:
 - [ ] Create pre-commit rules
-- [ ] 
 
 Stack ToDo's:
 - [ ] Add: Qdrant-GPU
