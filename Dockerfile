@@ -1,5 +1,5 @@
-# To build this image : docker build -t varag . --progress=plain
-# To run:             : docker run --rm varag  
+# To build this image : docker build -t varagity-app . --progress=plain
+# To run:             : docker run --rm varagity-app  
 
 # Use a Python image with uv pre-installed
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
