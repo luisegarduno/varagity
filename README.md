@@ -25,3 +25,11 @@ RAG ToDo's:
 
 
 
+-----------------------------
+
+Currently the project can be executed with:
+```bash
+docker run --rm (docker build -q .)
+```
+
+
