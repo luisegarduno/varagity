@@ -22,13 +22,13 @@ services:
       INFINITY_API_KEY: ${secret_infinity_key}
       INFINITY_ANONYMOUS_USAGE_STATS: '0'
       INFINITY_URL_PREFIX: '/v1'
-      INFINITY_MODEL_ID: '/models/multilingual-e5-large-instruct;/models/harrier-oss-v1-0.6b'
-      INFINITY_SERVED_MODEL_NAME: 'infloat/multilingual-e5-large-instruct;infloat/harrier-oss-v1-0.6b'
+      INFINITY_MODEL_ID: '/models/multilingual-e5-large-instruct'
+      INFINITY_SERVED_MODEL_NAME: 'infloat/multilingual-e5-large-instruct'
       INFINITY_DEVICE: cuda
       INFINITY_DEVICE_ID: '1'
       INFINITY_ENGINE: 'optimum'
-    command: 
-      - v2 && pip install -U transformers sentence-transformers==5.1.0
+    command:
+      - v2
     restart: always
 
   app:
