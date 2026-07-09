@@ -93,9 +93,10 @@ Add dependencies by editing `pyproject.toml` dependencies array, then run `uv sy
 
 ## Planned Features
 
-The project roadmap includes:
-- Qdrant-GPU for vector storage
-- FastEmbed integration
+The full system design lives in [`spec.md`](spec.md). The roadmap includes:
+- PostgreSQL + pgvector for vector storage
+- Elasticsearch for contextual BM25 search
+- llama.cpp server for self-hosted LLM inference
 - Prefect for workflow orchestration
 - Prefect-Prometheus-Exporter for monitoring
 - Model loader implementation

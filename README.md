@@ -2,6 +2,8 @@
 
 Full Stack RAG application
 
+> 📄 See [`spec.md`](spec.md) for the full system design & architecture.
+
 
 ## ToDo
 
@@ -9,8 +11,9 @@ Project ToDo's:
 - [ ] Create pre-commit rules
 
 Stack ToDo's:
-- [ ] Add: Qdrant-GPU
-- [ ] Add: FastEmbed
+- [ ] Add: PostgreSQL + pgvector
+- [ ] Add: Elasticsearch (contextual BM25)
+- [ ] Add: llama.cpp server (self-hosted LLM)
 - [ ] Add: Prefect
 - [ ] Add: Prefect-Prometheus-Exporter
 
