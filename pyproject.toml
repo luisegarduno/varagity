@@ -1,8 +1,53 @@
 [project]
 name = "varagity"
 version = "0.1.0"
-description = "Add your description here"
+description = "Full-stack RAG application with Contextual Retrieval — self-hosted, GPU-accelerated"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "pydantic-settings>=2.14.2",
+    "rich>=15.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.7.6",
+    "mkdocstrings[python]>=1.0.4",
+    "mypy>=2.2.0",
+    "pre-commit>=4.6.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.15.21",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# E/W/F = pycodestyle + Pyflakes (flake8 parity), I = isort, B = bugbear,
+# SIM = simplify, UP = pyupgrade, D = pydocstyle (docstring enforcement).
+select = ["E", "W", "F", "I", "B", "SIM", "UP", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests don't need docstrings on every function/module.
+"tests/**" = ["D1"]
+
+[tool.mypy]
+python_version = "3.12"
+disallow_untyped_defs = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs real backing services via testcontainers (Docker)",
+    "e2e: full ingest→query pipeline over the fixtures corpus (Docker)",
+]
+# Default run is unit-only; select the other layers with `-m integration` / `-m e2e`.
+# No coverage floor yet — enforced in Phase 10.
+addopts = "--cov=varagity --cov-report=term-missing -m 'not integration and not e2e'"
