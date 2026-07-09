@@ -1,0 +1,42 @@
+site_name: Varagity
+site_description: Self-hosted, GPU-accelerated RAG with Contextual Retrieval
+repo_url: https://github.com/luisegarduno/varagity
+repo_name: luisegarduno/varagity
+
+# ⚠️ Do NOT change this to the MkDocs default (`docs/`): in this repository
+# `docs/` is the *gitignored ingest corpus* the RAG system indexes. The
+# architecture documentation rendered by this site lives in `golden-docs/`.
+docs_dir: golden-docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: google
+            show_root_heading: true
+            show_source: true
+
+nav:
+  - Home: index.md
+  - Reference:
+      - API: reference/api.md

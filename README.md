@@ -57,7 +57,7 @@ RAG ToDo's:
         ```bash
         sudo nvidia-ctk runtime configure --runtime=docker
         ```
-    
+
     4. Lastly, restart docker daemon
         ```bash
         sudo systemctl restart docker
@@ -66,7 +66,7 @@ RAG ToDo's:
 
 ## Running Varagity
 
-1. Build & Run: 
+1. Build & Run:
     ```bash
     docker compose up
     ```
