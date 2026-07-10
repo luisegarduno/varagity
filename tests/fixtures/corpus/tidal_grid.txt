@@ -1,0 +1,14 @@
+The Corvo Tidal Grid is a fictional renewable-energy project off the coast
+of the Azores. It consists of 87 underwater turbines arranged in three
+crescent-shaped arrays named Alba, Bruma, and Cinza.
+
+The grid reached full operation on 14 February 2023. At spring tide it
+delivers 310 megawatt-hours per day into the island interconnector, roughly
+enough for 42,000 homes. Its turbines are rated for a 25-year service life
+and are inspected by a crawler robot called "Limpet" every 180 days.
+
+The project's chief engineer is Rosa Andrade Peixoto. Her team of 23
+operates from a control room in the village of Ponta do Baleal. The grid's
+most unusual feature is a "kelp corridor": a 1.8-kilometer strip of
+cultivated kelp planted to dampen turbulence between the Bruma and Cinza
+arrays, which raised overall efficiency by 6 percent.
