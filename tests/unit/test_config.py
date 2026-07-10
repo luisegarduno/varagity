@@ -11,6 +11,15 @@ SETTINGS_ENV_VARS = (
     "LOG_LEVEL",
     "DEFAULT_VERBOSE",
     "DOCS_PATH",
+    "ALLOWED_EXTENSIONS",
+    "CHUNKING_STRATEGY",
+    "CHUNK_SIZE",
+    "CHUNK_OVERLAP",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_API_URL",
+    "EMBEDDING_API_KEY",
+    "EMBEDDING_DIM",
+    "EMBEDDING_BATCH_SIZE",
     "BASE_MODEL",
     "POSTGRES_HOST",
     "POSTGRES_PORT",
@@ -38,6 +47,39 @@ def test_defaults_load() -> None:
     assert settings.POSTGRES_PORT == 5432
     assert settings.POSTGRES_DB == "varagity"
     assert settings.POSTGRES_USER == "varagity"
+    assert settings.ALLOWED_EXTENSIONS == ".pdf,.txt,.md"
+    assert settings.CHUNKING_STRATEGY == "recursive_character"
+    assert settings.CHUNK_SIZE == 400  # characters, not tokens
+    assert settings.CHUNK_OVERLAP == 50
+    assert settings.EMBEDDING_MODEL == "infloat/multilingual-e5-large-instruct"
+    assert settings.EMBEDDING_API_URL == "http://infinity-embeddings:8081/v1"
+    assert settings.EMBEDDING_DIM == 1024
+    assert settings.EMBEDDING_BATCH_SIZE == 32
+
+
+class TestAllowedExtensionSet:
+    def test_parses_and_normalizes(self) -> None:
+        settings = Settings(_env_file=None, ALLOWED_EXTENSIONS=" .TXT, md ,.pdf,")
+        assert settings.allowed_extension_set == frozenset({".txt", ".md", ".pdf"})
+
+    def test_empty_whitelist_fails_fast(self) -> None:
+        with pytest.raises(ValidationError, match="ALLOWED_EXTENSIONS"):
+            Settings(_env_file=None, ALLOWED_EXTENSIONS=" , ,")
+
+
+class TestSizeValidation:
+    def test_overlap_must_be_smaller_than_chunk_size(self) -> None:
+        with pytest.raises(ValidationError, match="CHUNK_OVERLAP"):
+            Settings(_env_file=None, CHUNK_SIZE=100, CHUNK_OVERLAP=100)
+
+    def test_negative_overlap_fails(self) -> None:
+        with pytest.raises(ValidationError, match="CHUNK_OVERLAP"):
+            Settings(_env_file=None, CHUNK_OVERLAP=-1)
+
+    @pytest.mark.parametrize("field", ["CHUNK_SIZE", "EMBEDDING_DIM", "EMBEDDING_BATCH_SIZE"])
+    def test_positive_sizes_enforced(self, field: str) -> None:
+        with pytest.raises(ValidationError, match=field):
+            Settings(_env_file=None, **{field: 0})
 
 
 def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

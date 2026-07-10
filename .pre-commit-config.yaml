@@ -29,6 +29,13 @@ repos:
         additional_dependencies:
           - pydantic-settings
           - rich
+          - openai
+          - tenacity
+          - langchain-core
+          - langchain-text-splitters
+          - psycopg
+          - pgvector
+          - tiktoken
 
   - repo: local
     hooks:

@@ -8,7 +8,7 @@ validated, and mockable in tests.
 
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +28,19 @@ class Settings(BaseSettings):
             ``0`` = off, ``1`` = low (names, counts), ``2`` = high (full
             metadata, panels).
         DOCS_PATH: Directory scanned for the ingest corpus.
+        ALLOWED_EXTENSIONS: Comma-separated whitelist of ingestable file
+            extensions (v1: ``.pdf``, ``.txt``, ``.md``).
+        CHUNKING_STRATEGY: Registry name of the chunking strategy
+            (see ``varagity.chunking``).
+        CHUNK_SIZE: Chunk size in **characters** — not tokens —
+            (``RecursiveCharacterTextSplitter`` counts characters, spec §9.3).
+        CHUNK_OVERLAP: Overlap between consecutive chunks, in characters.
+        EMBEDDING_MODEL: Served model name passed to the embeddings API (the
+            infinity ``INFINITY_SERVED_MODEL_NAME`` string, verbatim).
+        EMBEDDING_API_URL: OpenAI-compatible base URL of the infinity server.
+        EMBEDDING_API_KEY: Bearer token for the infinity server.
+        EMBEDDING_DIM: Embedding dimensionality (1024 for e5-large-instruct).
+        EMBEDDING_BATCH_SIZE: Number of passages sent per embeddings request.
         BASE_MODEL: Filename of the llama.cpp ``.gguf`` model, relative to the
             bind-mounted ``${models_volume}`` directory.
         POSTGRES_HOST: PostgreSQL host (service name in-container).
@@ -43,6 +56,18 @@ class Settings(BaseSettings):
     DEFAULT_VERBOSE: int = 1
 
     DOCS_PATH: str = "./docs"
+    ALLOWED_EXTENSIONS: str = ".pdf,.txt,.md"
+
+    CHUNKING_STRATEGY: str = "recursive_character"
+    CHUNK_SIZE: int = 400  # characters, not tokens (spec §9.3)
+    CHUNK_OVERLAP: int = 50
+
+    EMBEDDING_MODEL: str = "infloat/multilingual-e5-large-instruct"
+    EMBEDDING_API_URL: str = "http://infinity-embeddings:8081/v1"
+    EMBEDDING_API_KEY: str = "change-me"
+    EMBEDDING_DIM: int = 1024
+    EMBEDDING_BATCH_SIZE: int = 32
+
     BASE_MODEL: str = "Qwythos-9B-Claude-Mythos-5-1M-Q8_0.gguf"
 
     POSTGRES_HOST: str = "postgres"
@@ -50,6 +75,67 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "varagity"
     POSTGRES_USER: str = "varagity"
     POSTGRES_PASSWORD: str = "change-me"
+
+    @property
+    def allowed_extension_set(self) -> frozenset[str]:
+        """Parsed ``ALLOWED_EXTENSIONS`` as a normalized set.
+
+        Entries are lowercased, stripped, and guaranteed to start with a dot
+        (``"md"`` and ``".md"`` are equivalent in the env value).
+
+        Returns:
+            The allowed extensions, e.g. ``frozenset({".pdf", ".txt", ".md"})``.
+        """
+        extensions = set()
+        for raw in self.ALLOWED_EXTENSIONS.split(","):
+            ext = raw.strip().lower()
+            if not ext:
+                continue
+            extensions.add(ext if ext.startswith(".") else f".{ext}")
+        return frozenset(extensions)
+
+    @field_validator("ALLOWED_EXTENSIONS")
+    @classmethod
+    def _validate_allowed_extensions(cls, value: str) -> str:
+        """Reject an extension whitelist with no usable entries.
+
+        Args:
+            value: The configured ``ALLOWED_EXTENSIONS`` value.
+
+        Returns:
+            The validated value, unchanged.
+
+        Raises:
+            ValueError: If no non-empty extension remains after splitting.
+        """
+        if not any(part.strip() for part in value.split(",")):
+            raise ValueError("ALLOWED_EXTENSIONS must list at least one extension, e.g. '.txt,.md'")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_sizes(self) -> "Settings":
+        """Reject size parameters that cannot produce a valid pipeline run.
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If ``CHUNK_SIZE``, ``EMBEDDING_DIM``, or
+                ``EMBEDDING_BATCH_SIZE`` is not positive, if ``CHUNK_OVERLAP``
+                is negative, or if ``CHUNK_OVERLAP`` is not smaller than
+                ``CHUNK_SIZE``.
+        """
+        for name in ("CHUNK_SIZE", "EMBEDDING_DIM", "EMBEDDING_BATCH_SIZE"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive; got {getattr(self, name)}")
+        if self.CHUNK_OVERLAP < 0:
+            raise ValueError(f"CHUNK_OVERLAP must be non-negative; got {self.CHUNK_OVERLAP}")
+        if self.CHUNK_OVERLAP >= self.CHUNK_SIZE:
+            raise ValueError(
+                f"CHUNK_OVERLAP ({self.CHUNK_OVERLAP}) must be smaller than "
+                f"CHUNK_SIZE ({self.CHUNK_SIZE})"
+            )
+        return self
 
     @field_validator("DEFAULT_VERBOSE")
     @classmethod
