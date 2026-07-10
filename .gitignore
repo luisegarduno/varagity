@@ -2,6 +2,9 @@
 .serena/
 .webui_secret_key
 
+# Ingest corpus (the DOCS_PATH input directory — NOT golden-docs/, which is tracked)
+/docs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

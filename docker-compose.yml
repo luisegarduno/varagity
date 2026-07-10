@@ -1,8 +1,41 @@
 services:
 
+  llamacpp:
+    container_name: llamacpp
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1              # first GPU (device 0) — infinity is pinned to device 1
+              capabilities: [gpu]
+    volumes:
+      - ${models_volume}:/models:ro           # no copy — model stays on host disk
+    ports:
+      - "8080:8080"
+    command: >
+      -m /models/${BASE_MODEL}
+      --host 0.0.0.0 --port 8080
+      --jinja -ngl 99 --threads -1 --ctx-size 16384
+      --temp 0.6 --min-p 0.0 --top-p 0.95 --top-k 20 --repeat-penalty 1.05
+      -ot ".ffn_(up|down)_exps.=CPU"
+      --no-webui
+    healthcheck:
+      # /health returns 503 while the model loads; generous retries cover it.
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    networks:
+      - varagity-net
+    restart: unless-stopped
+
   infinity-embeddings:
     container_name: infinity-embeddings
-    image: michaelf34/infinity:latest-trt-onnx
+    # Pinned tag (digest-identical to the previously used latest-trt-onnx):
+    # upstream does not CI-build the trt-onnx images, so `latest` is a moving tag.
+    image: michaelf34/infinity:0.0.76-trt-onnx
     stdin_open: true
     tty: true
     deploy:
@@ -10,8 +43,8 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+              device_ids: ["1"]     # pin to physical GPU 1 — the optimum engine
+              capabilities: [gpu]   # ignores INFINITY_DEVICE_ID, so pin at the Docker layer
     volumes:
       - ${embeddings_volume}:/models
     ports:
@@ -25,13 +58,61 @@ services:
       INFINITY_MODEL_ID: '/models/multilingual-e5-large-instruct'
       INFINITY_SERVED_MODEL_NAME: 'infloat/multilingual-e5-large-instruct'
       INFINITY_DEVICE: cuda
-      INFINITY_DEVICE_ID: '1'
+      INFINITY_DEVICE_ID: '0'       # device 0 *inside* the container = physical GPU 1 (see device_ids)
       INFINITY_ENGINE: 'optimum'
     command:
       - v2
+    healthcheck:
+      # /health is NOT under INFINITY_URL_PREFIX (routes like /v1/embeddings are).
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    networks:
+      - varagity-net
     restart: always
+
+  postgres:
+    container_name: postgres
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs on first boot only (empty data dir); reset with `docker compose down -v`.
+      - ./varagity/stores/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - varagity-net
+    restart: unless-stopped
 
   app:
     container_name: varagity
     build: ./
+    env_file: .env
+    volumes:
+      - ./docs:/app/docs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      infinity-embeddings:
+        condition: service_healthy
+      llamacpp:
+        condition: service_healthy
+    networks:
+      - varagity-net
     restart: no
+
+networks:
+  varagity-net:
+
+volumes:
+  pgdata:

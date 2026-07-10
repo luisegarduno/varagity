@@ -1,2 +1,8 @@
 # Environment
 .venv/
+.env
+
+# Ingest corpus — bind-mounted at runtime (./docs:/app/docs), never baked in
+docs/
+
+.git/
