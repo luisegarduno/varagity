@@ -189,10 +189,13 @@ class TestAnswerQuery:
         assert events == ["retrieved:1", "generate"]
 
     def test_unregistered_default_method_raises_key_error(
-        self, settings_env: Callable[..., None]
+        self, settings_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """bm25 passes config validation but has no registered retriever yet."""
+        """answer_query propagates a registry miss for the configured method."""
+        from varagity.retrieval import RETRIEVER_REGISTRY
+
         settings_env(RETRIEVAL_METHOD="bm25")
+        monkeypatch.delitem(RETRIEVER_REGISTRY, "bm25")
         with pytest.raises(KeyError, match="Unknown retrieval method"):
             answer_query("q", llm=StubLLM("x"), verbose=0)  # type: ignore[arg-type]
 

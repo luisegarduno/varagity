@@ -80,6 +80,52 @@ class FakeStore:
         self.closed = True
 
 
+class FakeBM25:
+    """In-memory stand-in for ElasticsearchBM25 (the dual-write target)."""
+
+    def __init__(self) -> None:
+        self.indexed: list[ChunkRecord] = []
+        self.create_index_calls = 0
+        self.deleted_doc_ids: list[str] = []
+        self.closed = False
+
+    def create_index(self) -> bool:
+        self.create_index_calls += 1
+        return self.create_index_calls == 1
+
+    def index_chunks(self, records: list[ChunkRecord]) -> int:
+        self.indexed.extend(records)
+        return len(records)
+
+    def delete_document(self, doc_id: str) -> int:
+        self.deleted_doc_ids.append(doc_id)
+        kept = [record for record in self.indexed if record.doc_id != doc_id]
+        deleted = len(self.indexed) - len(kept)
+        self.indexed = kept
+        return deleted
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture(autouse=True)
+def auto_bm25(monkeypatch: pytest.MonkeyPatch) -> list[FakeBM25]:
+    """Substitute FakeBM25 for the class the loader constructs when none is injected.
+
+    Keeps every test hermetic (no live Elasticsearch) and returns the
+    constructed instances so the owned-store path is assertable.
+    """
+    created: list[FakeBM25] = []
+
+    class AutoFakeBM25(FakeBM25):
+        def __init__(self) -> None:
+            super().__init__()
+            created.append(self)
+
+    monkeypatch.setattr(loader_module, "ElasticsearchBM25", AutoFakeBM25)
+    return created
+
+
 class FakeEmbeddings:
     """Deterministic stand-in for EmbeddingsClient (passage mode only)."""
 
@@ -434,3 +480,83 @@ class TestReingest:
         assert summary.ingested == 2
         assert store.records  # rewritten…
         assert all(record.context for record in store.records)  # …with blurbs
+
+
+class TestDualWrite:
+    """Spec §9.6 (Phase 6): every chunk lands in both stores, or the file fails."""
+
+    def test_both_stores_receive_the_same_chunks(self, pinned_settings: None, corpus: Path) -> None:
+        store, bm25 = FakeStore(), FakeBM25()
+        summary = ingest_corpus(
+            str(corpus), store=store, bm25=bm25, embeddings=FakeEmbeddings(), verbose=0
+        )
+        assert summary.ingested == 2
+        assert bm25.create_index_calls == 1  # idempotent create at run start
+        assert [r.chunk_id for r in bm25.indexed] == [r.chunk_id for r in store.records]
+        assert [r.contextualized_content for r in bm25.indexed] == [
+            r.contextualized_content for r in store.records
+        ]
+        # injected BM25 store is NOT closed by the loader (caller owns it)
+        assert bm25.closed is False
+
+    def test_owned_bm25_store_constructed_and_closed(
+        self, pinned_settings: None, corpus: Path, auto_bm25: list[FakeBM25]
+    ) -> None:
+        store = FakeStore()
+        ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
+        assert len(auto_bm25) == 1  # constructed from settings…
+        assert auto_bm25[0].closed is True  # …and closed on return
+        assert [r.chunk_id for r in auto_bm25[0].indexed] == [r.chunk_id for r in store.records]
+
+    def test_es_failure_fails_file_before_pg_commit(
+        self, pinned_settings: None, corpus: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """BM25 is written first: a failed file leaves no idempotency marker.
+
+        If the pgvector ``documents`` row landed before the Elasticsearch
+        failure, the next run would skip the file and the stores would stay
+        inconsistent forever.
+        """
+
+        class ExplodingBM25(FakeBM25):
+            def index_chunks(self, records: list[ChunkRecord]) -> int:
+                raise RuntimeError("elasticsearch exploded mid-bulk")
+
+        store, bm25 = FakeStore(), ExplodingBM25()
+        with caplog.at_level(logging.ERROR):
+            summary = ingest_corpus(
+                str(corpus), store=store, bm25=bm25, embeddings=FakeEmbeddings(), verbose=0
+            )
+        assert summary.failed == 2
+        assert summary.ingested == 0
+        assert store.documents == {}  # no marker → both files re-attempted next run
+        assert store.records == []
+        assert any("failed to ingest" in r.message for r in caplog.records)
+
+    def test_empty_file_writes_nothing_to_es(self, pinned_settings: None, tmp_path: Path) -> None:
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "empty.txt").write_text(" \n ")
+        bm25 = FakeBM25()
+        summary = ingest_corpus(
+            str(root), store=FakeStore(), bm25=bm25, embeddings=FakeEmbeddings(), verbose=0
+        )
+        assert summary.no_text == 1
+        assert bm25.indexed == []  # the 0-chunk documents row is pgvector-only
+
+    def test_reingest_deletes_from_both_stores(self, pinned_settings: None, corpus: Path) -> None:
+        store, bm25 = FakeStore(), FakeBM25()
+        first = ingest_corpus(
+            str(corpus), store=store, bm25=bm25, embeddings=FakeEmbeddings(), verbose=0
+        )
+        again = ingest_corpus(
+            str(corpus),
+            store=store,
+            bm25=bm25,
+            embeddings=FakeEmbeddings(),
+            reingest=True,
+            verbose=0,
+        )
+        assert again.ingested == 2
+        assert sorted(bm25.deleted_doc_ids) == sorted(store.documents)
+        assert len(bm25.indexed) == first.chunks  # re-indexed without duplicates

@@ -31,8 +31,12 @@ SETTINGS_ENV_VARS = (
     "POSTGRES_DB",
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
+    "ELASTICSEARCH_URL",
+    "BM25_INDEX_NAME",
     "RETRIEVAL_METHOD",
     "TOP_K",
+    "SEMANTIC_WEIGHT",
+    "BM25_WEIGHT",
 )
 
 
@@ -67,8 +71,12 @@ def test_defaults_load() -> None:
     assert settings.BASE_MODEL_API_KEY == "none"
     assert settings.MAX_TOKENS == 8192
     assert settings.LLM_TEMPERATURE == 0.6
-    assert settings.RETRIEVAL_METHOD == "semantic"  # flips to hybrid in Phase 6
+    assert settings.ELASTICSEARCH_URL == "http://elasticsearch:9200"
+    assert settings.BM25_INDEX_NAME == "varagity_contextual_bm25"
+    assert settings.RETRIEVAL_METHOD == "hybrid"  # the v1 default (spec §10.1)
     assert settings.TOP_K == 10
+    assert settings.SEMANTIC_WEIGHT == 0.8
+    assert settings.BM25_WEIGHT == 0.2
 
 
 class TestAllowedExtensionSet:
@@ -102,11 +110,7 @@ class TestSizeValidation:
 class TestRetrievalMethodValidation:
     @pytest.mark.parametrize("method", ["semantic", "bm25", "hybrid"])
     def test_spec_vocabulary_accepted(self, method: str) -> None:
-        """All three spec §10.1 values pass config validation.
-
-        Registration of bm25/hybrid is a Phase 6 concern, enforced at
-        lookup time by ``get_retriever``.
-        """
+        """All three spec §10.1 values pass config validation."""
         settings = Settings(_env_file=None, RETRIEVAL_METHOD=method)
         assert method == settings.RETRIEVAL_METHOD
 
@@ -114,6 +118,33 @@ class TestRetrievalMethodValidation:
     def test_unknown_method_fails_fast(self, bad: str) -> None:
         with pytest.raises(ValidationError, match="RETRIEVAL_METHOD"):
             Settings(_env_file=None, RETRIEVAL_METHOD=bad)
+
+
+class TestFusionWeightValidation:
+    """Hybrid rank-fusion weights must form a convex blend (spec §6, §15.2)."""
+
+    @pytest.mark.parametrize(
+        ("semantic", "bm25"),
+        [(0.8, 0.2), (0.5, 0.5), (1.0, 0.0), (0.0, 1.0)],
+    )
+    def test_weights_summing_to_one_accepted(self, semantic: float, bm25: float) -> None:
+        settings = Settings(_env_file=None, SEMANTIC_WEIGHT=semantic, BM25_WEIGHT=bm25)
+        assert semantic == settings.SEMANTIC_WEIGHT
+        assert bm25 == settings.BM25_WEIGHT
+
+    def test_binary_float_sum_tolerated(self) -> None:
+        """0.7 + 0.3 != 1.0 exactly in binary floats — must still pass."""
+        settings = Settings(_env_file=None, SEMANTIC_WEIGHT=0.7, BM25_WEIGHT=0.3)
+        assert settings.SEMANTIC_WEIGHT == 0.7
+
+    @pytest.mark.parametrize(("semantic", "bm25"), [(0.8, 0.3), (0.5, 0.4), (1.0, 1.0)])
+    def test_sum_not_one_fails_fast(self, semantic: float, bm25: float) -> None:
+        with pytest.raises(ValidationError, match="must sum to 1.0"):
+            Settings(_env_file=None, SEMANTIC_WEIGHT=semantic, BM25_WEIGHT=bm25)
+
+    def test_negative_weight_fails_fast(self) -> None:
+        with pytest.raises(ValidationError, match="non-negative"):
+            Settings(_env_file=None, SEMANTIC_WEIGHT=1.2, BM25_WEIGHT=-0.2)
 
 
 class TestLLMTemperatureValidation:

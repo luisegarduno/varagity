@@ -59,10 +59,16 @@ class Settings(BaseSettings):
         POSTGRES_DB: PostgreSQL database name.
         POSTGRES_USER: PostgreSQL user.
         POSTGRES_PASSWORD: PostgreSQL password (dev-only static credential).
+        ELASTICSEARCH_URL: Base URL of the Elasticsearch server (BM25 store).
+        BM25_INDEX_NAME: Name of the contextual BM25 index.
         RETRIEVAL_METHOD: Registry name of the retrieval method (spec §10.1:
-            ``semantic`` | ``bm25`` | ``hybrid``). Defaults to ``semantic``
-            until hybrid lands in Phase 6.
+            ``semantic`` | ``bm25`` | ``hybrid``; the v1 default is
+            ``hybrid``).
         TOP_K: Number of chunks retrieved per query.
+        SEMANTIC_WEIGHT: Hybrid rank-fusion weight of the semantic (pgvector)
+            arm (spec §11.4). Must sum to 1.0 with ``BM25_WEIGHT``.
+        BM25_WEIGHT: Hybrid rank-fusion weight of the BM25 (Elasticsearch)
+            arm. Must sum to 1.0 with ``SEMANTIC_WEIGHT``.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -97,9 +103,13 @@ class Settings(BaseSettings):
     POSTGRES_USER: str = "varagity"
     POSTGRES_PASSWORD: str = "change-me"
 
-    # Temporary default — flips to "hybrid" when Phase 6 lands it (plan §4).
-    RETRIEVAL_METHOD: str = "semantic"
+    ELASTICSEARCH_URL: str = "http://elasticsearch:9200"
+    BM25_INDEX_NAME: str = "varagity_contextual_bm25"
+
+    RETRIEVAL_METHOD: str = "hybrid"
     TOP_K: int = 10
+    SEMANTIC_WEIGHT: float = 0.8
+    BM25_WEIGHT: float = 0.2
 
     @property
     def allowed_extension_set(self) -> frozenset[str]:
@@ -167,9 +177,9 @@ class Settings(BaseSettings):
     def _validate_retrieval_method(cls, value: str) -> str:
         """Reject retrieval methods outside the spec §10.1 vocabulary.
 
-        Membership in the vocabulary is validated here; whether the method is
-        *registered yet* (``bm25``/``hybrid`` land in Phase 6) is enforced by
-        :func:`varagity.retrieval.get_retriever` at lookup time.
+        Membership in the vocabulary is validated here; registry membership
+        is enforced by :func:`varagity.retrieval.get_retriever` at lookup
+        time.
 
         Args:
             value: The configured ``RETRIEVAL_METHOD`` value.
@@ -185,6 +195,31 @@ class Settings(BaseSettings):
         if value not in allowed:
             raise ValueError(f"RETRIEVAL_METHOD must be one of {allowed}; got {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def _validate_fusion_weights(self) -> "Settings":
+        """Reject hybrid rank-fusion weights that don't form a convex blend.
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If either weight is negative, or if
+                ``SEMANTIC_WEIGHT + BM25_WEIGHT`` is not 1.0 (spec §6; checked
+                with a small tolerance because the values arrive as decimal
+                strings, e.g. ``0.7 + 0.3`` is not exactly ``1.0`` in binary
+                floating point).
+        """
+        for name in ("SEMANTIC_WEIGHT", "BM25_WEIGHT"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative; got {getattr(self, name)}")
+        total = self.SEMANTIC_WEIGHT + self.BM25_WEIGHT
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(
+                f"SEMANTIC_WEIGHT ({self.SEMANTIC_WEIGHT}) + BM25_WEIGHT ({self.BM25_WEIGHT}) "
+                f"must sum to 1.0; got {total}"
+            )
+        return self
 
     @field_validator("LLM_TEMPERATURE")
     @classmethod

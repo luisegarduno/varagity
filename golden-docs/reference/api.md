@@ -44,11 +44,17 @@ vertical slices are implemented.
 
 ::: varagity.stores.vector_store
 
+::: varagity.stores.bm25_store
+
 ## Retrieval
 
 ::: varagity.retrieval.base
 
 ::: varagity.retrieval.semantic
+
+::: varagity.retrieval.bm25
+
+::: varagity.retrieval.hybrid
 
 ## Generation
 

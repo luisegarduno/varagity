@@ -1,8 +1,9 @@
-"""End-to-end walking-skeleton test (Phase 4): ingest → retrieve → answer.
+"""End-to-end pipeline tests: ingest → retrieve (3 methods) → answer.
 
-Real pgvector Postgres via testcontainers; deterministic fake embeddings
-(hashed bag-of-words, so lexically similar texts land near each other) and a
-scripted fake LLM stand in for the GPU services (spec §15.1 "e2e" row).
+Real pgvector Postgres **and** Elasticsearch via testcontainers (spec §15.1
+"e2e" row: real stores); deterministic fake embeddings (hashed bag-of-words,
+so lexically similar texts land near each other) and a scripted fake LLM
+stand in for the GPU services.
 
 Select with ``pytest -m e2e`` (needs Docker).
 """
@@ -15,11 +16,16 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from elasticsearch import Elasticsearch
+from testcontainers.elasticsearch import ElasticSearchContainer
 from testcontainers.postgres import PostgresContainer
 
 from varagity.generation.answer import answer_query, format_context
 from varagity.ingest.loader import ingest_corpus
+from varagity.retrieval.bm25 import BM25Retriever
+from varagity.retrieval.hybrid import HybridRetriever
 from varagity.retrieval.semantic import SemanticRetriever
+from varagity.stores.bm25_store import ElasticsearchBM25
 from varagity.stores.vector_store import ContextualVectorDB
 
 pytestmark = pytest.mark.e2e
@@ -27,6 +33,8 @@ pytestmark = pytest.mark.e2e
 SCHEMA_PATH = Path(__file__).parents[2] / "varagity" / "stores" / "schema.sql"
 CORPUS_PATH = Path(__file__).parents[1] / "fixtures" / "corpus"
 DIM = 1024  # must match the schema's vector(1024)
+ES_IMAGE = "docker.elastic.co/elasticsearch/elasticsearch:9.2.0"  # same as compose
+BM25_INDEX = "varagity_e2e_bm25"
 
 QUESTION = "How long is the kelp corridor between the Bruma and Cinza arrays?"
 # The fact planted in tests/fixtures/corpus/tidal_grid.txt, quoted verbatim.
@@ -100,6 +108,33 @@ def pg_conninfo() -> Iterator[str]:
         yield conninfo
 
 
+@pytest.fixture(scope="session")
+def es_url() -> Iterator[str]:
+    """A single-node Elasticsearch for the whole session.
+
+    Disk-watermark allocation checks are disabled: on a host whose disk is
+    >90% full, ES's default percentage watermarks refuse to allocate the
+    throwaway index's primary shard and every operation times out.
+    """
+    container = (
+        ElasticSearchContainer(ES_IMAGE, mem_limit="2g")
+        .with_env("discovery.type", "single-node")
+        .with_env("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
+        .with_env("cluster.routing.allocation.disk.threshold_enabled", "false")
+    )
+    with container as es:
+        yield f"http://{es.get_container_host_ip()}:{es.get_exposed_port(9200)}"
+
+
+@pytest.fixture
+def bm25_store(es_url: str) -> Iterator[ElasticsearchBM25]:
+    """A BM25 store on a fresh index (deleted per test; ingest recreates it)."""
+    with Elasticsearch(es_url) as raw:
+        raw.indices.delete(index=BM25_INDEX, ignore_unavailable=True)
+    with ElasticsearchBM25(url=es_url, index_name=BM25_INDEX) as store:
+        yield store
+
+
 @pytest.fixture
 def pinned_settings(settings_env: Callable[..., None]) -> None:
     """Pin every pipeline setting so the machine's .env cannot leak in.
@@ -114,15 +149,17 @@ def pinned_settings(settings_env: Callable[..., None]) -> None:
         CHUNK_OVERLAP=50,
         CONTEXTUALIZE="false",
         EMBEDDING_MODEL="fake-bow-1024",
-        RETRIEVAL_METHOD="semantic",
+        RETRIEVAL_METHOD="hybrid",
         TOP_K=10,
+        SEMANTIC_WEIGHT="0.8",
+        BM25_WEIGHT="0.2",
     )
 
 
 def test_walking_skeleton_ingest_to_grounded_answer(
-    pinned_settings: None, pg_conninfo: str
+    pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25, es_url: str
 ) -> None:
-    """★ The Phase-4 milestone, automated: fixtures → pgvector → Q&A state."""
+    """★ The Phase-4 milestone, automated: fixtures → both stores → Q&A state."""
     embeddings = FakeEmbeddings()
     llm = ScriptedLLM(f"<think>scanning the context…</think>{SCRIPTED_ANSWER}")
 
@@ -130,11 +167,18 @@ def test_walking_skeleton_ingest_to_grounded_answer(
         conn.execute("TRUNCATE documents CASCADE")
 
     with ContextualVectorDB(pg_conninfo) as store:
-        summary = ingest_corpus(str(CORPUS_PATH), store=store, embeddings=embeddings, verbose=0)
+        summary = ingest_corpus(
+            str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
+        )
         assert summary.discovered == 3
         assert summary.ingested == 3
         assert summary.failed == 0
         assert summary.chunks > 0
+
+        # Dual-write parity: both stores hold exactly this run's chunks
+        # (the live-stack success criterion, in-container).
+        with Elasticsearch(es_url) as raw:
+            assert int(raw.count(index=BM25_INDEX)["count"]) == summary.chunks
 
         retriever = SemanticRetriever(store=store, embeddings=embeddings)
         state = answer_query(QUESTION, retriever=retriever, llm=llm, verbose=0)  # type: ignore[arg-type]
@@ -191,12 +235,17 @@ class ContextualizingLLM:
 
 
 def test_contextualized_ingest_stores_blurbs_and_still_answers(
-    pinned_settings: None, settings_env: Callable[..., None], pg_conninfo: str
+    pinned_settings: None,
+    settings_env: Callable[..., None],
+    pg_conninfo: str,
+    bm25_store: ElasticsearchBM25,
 ) -> None:
-    """Phase-5 e2e variant: CONTEXTUALIZE on with a fake LLM.
+    """Phase-5/6 e2e variant: CONTEXTUALIZE on with a fake LLM.
 
-    Asserts the plan's psql criteria in-container: every chunk's ``context``
-    is non-null and ``contextualized_content`` starts with the blurb.
+    Asserts the plan's psql criteria in-container — every chunk's ``context``
+    is non-null and ``contextualized_content`` starts with the blurb — and
+    that the *same* contextualized text is what BM25 indexed (the spec §19.1
+    "used for embedding **and** BM25" DoD row).
     """
     settings_env(CONTEXTUALIZE="true")
     embeddings = FakeEmbeddings()
@@ -209,6 +258,7 @@ def test_contextualized_ingest_stores_blurbs_and_still_answers(
         summary = ingest_corpus(
             str(CORPUS_PATH),
             store=store,
+            bm25=bm25_store,
             embeddings=embeddings,
             llm=context_llm,  # type: ignore[arg-type]
             verbose=0,
@@ -216,6 +266,12 @@ def test_contextualized_ingest_stores_blurbs_and_still_answers(
         assert summary.ingested == 3
         assert summary.chunks > 0
         assert len(context_llm.prompts) == summary.chunks  # one LLM call per chunk
+
+        # The blurb-prefixed text is what the BM25 index searches.
+        blurb_hits = bm25_store.search("coastal infrastructure notes", k=summary.chunks, verbose=0)
+        assert len(blurb_hits) == summary.chunks  # every chunk carries the blurb
+        for hit in blurb_hits:
+            assert hit.contextualized_content.startswith("From the coastal infrastructure notes")
 
         with psycopg.connect(pg_conninfo) as conn:
             row = conn.execute("SELECT count(*), count(context) FROM chunks").fetchone()
@@ -244,7 +300,7 @@ def test_contextualized_ingest_stores_blurbs_and_still_answers(
 
 
 def test_second_run_is_idempotent_and_still_answers(
-    pinned_settings: None, pg_conninfo: str
+    pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25, es_url: str
 ) -> None:
     """Re-running the startup sequence skips unchanged files; Q&A still works."""
     embeddings = FakeEmbeddings()
@@ -253,11 +309,17 @@ def test_second_run_is_idempotent_and_still_answers(
         conn.execute("TRUNCATE documents CASCADE")
 
     with ContextualVectorDB(pg_conninfo) as store:
-        first = ingest_corpus(str(CORPUS_PATH), store=store, embeddings=embeddings, verbose=0)
-        second = ingest_corpus(str(CORPUS_PATH), store=store, embeddings=embeddings, verbose=0)
+        first = ingest_corpus(
+            str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
+        )
+        second = ingest_corpus(
+            str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
+        )
         assert first.ingested == 3
         assert second.ingested == 0
         assert second.skipped == 3
+        with Elasticsearch(es_url) as raw:  # skipped files were not re-indexed
+            assert int(raw.count(index=BM25_INDEX)["count"]) == first.chunks
 
         retriever = SemanticRetriever(store=store, embeddings=embeddings)
         llm = ScriptedLLM("Lantern. [SOURCE]: aurora_station.md")
@@ -269,3 +331,72 @@ def test_second_run_is_idempotent_and_still_answers(
         )
     assert any("Lantern" in chunk.content for chunk in state["retrieved"])
     assert state["answer"].startswith("Lantern")
+
+
+def test_rare_keyword_retrieved_via_bm25_and_hybrid(
+    pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25
+) -> None:
+    """★ The Phase-6 milestone: an exact rare term reaches the top via BM25.
+
+    "Pelican-9" appears in exactly one fixture chunk; the keyword arm must
+    surface it through both the ``bm25`` and ``hybrid`` retrievers, with the
+    full metadata record hydrated from pgvector (citable source).
+    """
+    embeddings = FakeEmbeddings()
+
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("TRUNCATE documents CASCADE")
+
+    with ContextualVectorDB(pg_conninfo) as store:
+        ingest_corpus(
+            str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
+        )
+
+        query = "Pelican-9 cargo capacity"
+        bm25_chunks = BM25Retriever(bm25=bm25_store, store=store).retrieve(query, k=5, verbose=0)
+        assert bm25_chunks, "bm25 retrieved nothing"
+        assert "Pelican-9" in bm25_chunks[0].content  # exact-term match ranks first
+        assert bm25_chunks[0].score > 0
+        assert bm25_chunks[0].metadata["file_name"] == "aurora_station.md"  # hydrated
+
+        hybrid_chunks = HybridRetriever(
+            store=store, bm25=bm25_store, embeddings=embeddings
+        ).retrieve(query, k=5, verbose=0)
+        assert any("Pelican-9" in chunk.content for chunk in hybrid_chunks)
+        # Fused scores are reciprocal-rank sums, bounded by the weight sum.
+        assert all(0 < chunk.score <= 1.0 for chunk in hybrid_chunks)
+
+
+def test_all_three_retrieval_methods_answer(
+    pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25
+) -> None:
+    """Every RETRIEVAL_METHOD value drives the full Q&A pipeline cleanly."""
+    embeddings = FakeEmbeddings()
+
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("TRUNCATE documents CASCADE")
+
+    with ContextualVectorDB(pg_conninfo) as store:
+        ingest_corpus(
+            str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
+        )
+        retrievers = {
+            "semantic": SemanticRetriever(store=store, embeddings=embeddings),
+            "bm25": BM25Retriever(bm25=bm25_store, store=store),
+            "hybrid": HybridRetriever(store=store, bm25=bm25_store, embeddings=embeddings),
+        }
+        for method, retriever in retrievers.items():
+            llm = ScriptedLLM(SCRIPTED_ANSWER)
+            state = answer_query(
+                QUESTION,
+                retriever=retriever,  # type: ignore[arg-type]
+                llm=llm,  # type: ignore[arg-type]
+                verbose=0,
+            )
+            assert state["retrieved"], f"{method} retrieved nothing"
+            assert any(PLANTED_FACT in chunk.content for chunk in state["retrieved"]), (
+                f"{method} missed the planted kelp-corridor chunk"
+            )
+            assert state["answer"] == SCRIPTED_ANSWER
+            # provenance survives hydration for every method
+            assert all(chunk.metadata.get("source") for chunk in state["retrieved"])

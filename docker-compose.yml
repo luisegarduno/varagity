@@ -94,6 +94,29 @@ services:
       - varagity-net
     restart: unless-stopped
 
+  elasticsearch:
+    container_name: elasticsearch
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.2.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false   # dev-only posture (see runbook)
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      # Reachability only: a single-node cluster is `yellow` by design
+      # (replicas can never be assigned), so do NOT gate on `green`.
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    networks:
+      - varagity-net
+    restart: unless-stopped
+
   app:
     container_name: varagity
     build: ./
@@ -102,6 +125,8 @@ services:
       - ./docs:/app/docs
     depends_on:
       postgres:
+        condition: service_healthy
+      elasticsearch:
         condition: service_healthy
       infinity-embeddings:
         condition: service_healthy
@@ -116,3 +141,4 @@ networks:
 
 volumes:
   pgdata:
+  esdata:

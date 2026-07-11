@@ -69,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
     ingest = subparsers.add_parser(
         "ingest",
-        help="scan DOCS_PATH and ingest the corpus into the vector store",
+        help="scan DOCS_PATH and ingest the corpus into both stores (pgvector + BM25)",
         description="Parse, chunk, contextualize, embed, and store every supported document "
         "under DOCS_PATH.",
     )

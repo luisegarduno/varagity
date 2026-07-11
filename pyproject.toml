@@ -5,6 +5,7 @@ description = "Full-stack RAG application with Contextual Retrieval — self-hos
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "elasticsearch>=9,<10",  # client major must match the ES server major (9.x ↔ 9.x)
     "httpx>=0.28.1",
     "langchain-core>=1.4.9",
     "langchain-text-splitters>=1.1.2",
@@ -29,7 +30,7 @@ dev = [
     "pytest-mock>=3.15.1",
     "respx>=0.23.1",
     "ruff>=0.15.21",
-    "testcontainers[postgres]>=4.14.2",
+    "testcontainers[elasticsearch,postgres]>=4.14.2",
 ]
 
 [tool.ruff]

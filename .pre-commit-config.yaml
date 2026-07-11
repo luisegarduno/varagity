@@ -36,6 +36,7 @@ repos:
           - psycopg
           - pgvector
           - tiktoken
+          - elasticsearch
 
   - repo: local
     hooks:

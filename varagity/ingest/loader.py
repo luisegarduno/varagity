@@ -9,13 +9,22 @@ baseline (plan decision #2). A document's chunks are contextualized
 sequentially, in order, so llama.cpp can reuse its prompt cache across the
 shared document preamble.
 
+Dual-write (spec §9.6, Phase 6): every chunk lands in **both** stores —
+Elasticsearch (contextual BM25) first, pgvector second — within the same
+per-file boundary; a store failure after client-level retries fails that
+file's ingest loudly. The ordering is deliberate: the pgvector ``documents``
+row is the idempotency marker, so it must commit *last* — a failure between
+the two writes leaves no marker, the next run re-attempts the file, and the
+Elasticsearch bulk (addressed by deterministic ``chunk_id``) overwrites
+rather than duplicates.
+
 Idempotency: a file whose ``(doc_id, content_hash)`` is already recorded is
 skipped *before* parsing. Pipeline-setting changes (``CONTEXTUALIZE``, chunk
 params) don't change content hashes, so re-processing an unchanged corpus
 requires ``reingest=True`` (the CLI's ``ingest --reingest``), which deletes
-each discovered document before ingesting it fresh. A file with no
-extractable text is never silently dropped: it gets a ``documents`` row with
-``n_chunks = 0``, a warning, and a dedicated summary count.
+each discovered document from both stores before ingesting it fresh. A file
+with no extractable text is never silently dropped: it gets a ``documents``
+row with ``n_chunks = 0``, a warning, and a dedicated summary count.
 """
 
 import logging
@@ -33,7 +42,13 @@ from varagity.debug.show import check_verbose
 from varagity.ingest.discovery import discover_documents
 from varagity.ingest.parsers import Parser, get_parser
 from varagity.models import EmbeddingsClient, LLMClient, get_model
-from varagity.stores import ChunkRecord, ContextualVectorDB, content_hash, derive_doc_id
+from varagity.stores import (
+    ChunkRecord,
+    ContextualVectorDB,
+    ElasticsearchBM25,
+    content_hash,
+    derive_doc_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,26 +89,30 @@ def ingest_corpus(
     docs_path: str | None = None,
     *,
     store: ContextualVectorDB | None = None,
+    bm25: ElasticsearchBM25 | None = None,
     embeddings: EmbeddingsClient | None = None,
     llm: LLMClient | None = None,
     reingest: bool = False,
     verbose: int | None = None,
 ) -> IngestSummary:
-    """Ingest every supported document under ``docs_path``.
+    """Ingest every supported document under ``docs_path`` into both stores.
 
     Args:
         docs_path: Corpus directory; defaults to ``settings.DOCS_PATH``.
         store: Vector store to write to; constructed from settings (and
             closed on return) when omitted.
+        bm25: BM25 store to write to; constructed from settings (and closed
+            on return) when omitted. Its index is created idempotently at
+            run start.
         embeddings: Embeddings client; resolved via the model registry when
             omitted.
         llm: Chat client for contextualization; resolved via the model
             registry when omitted. Unused when ``settings.CONTEXTUALIZE``
             is off.
-        reingest: Delete each discovered document's previous ingest and
-            re-process it. Needed after pipeline-setting changes
-            (``CONTEXTUALIZE``, chunk params): those don't change content
-            hashes, so unchanged files are otherwise skipped.
+        reingest: Delete each discovered document's previous ingest (from
+            both stores) and re-process it. Needed after pipeline-setting
+            changes (``CONTEXTUALIZE``, chunk params): those don't change
+            content hashes, so unchanged files are otherwise skipped.
         verbose: Console verbosity (0–2); defaults to
             ``settings.DEFAULT_VERBOSE``.
 
@@ -104,6 +123,8 @@ def ingest_corpus(
     Raises:
         ValueError: If ``verbose`` is invalid.
         psycopg.OperationalError: If the vector store is unreachable.
+        elastic_transport.ConnectionError: If Elasticsearch is unreachable
+            after retries (index creation at run start).
     """
     settings = get_settings()
     verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
@@ -134,7 +155,10 @@ def ingest_corpus(
 
     owns_store = store is None
     active_store = store if store is not None else ContextualVectorDB()
+    owns_bm25 = bm25 is None
+    active_bm25 = bm25 if bm25 is not None else ElasticsearchBM25()
     try:
+        active_bm25.create_index()
         client = embeddings if embeddings is not None else get_model("embedding")
         # The LLM is only needed (and only resolved) when contextualizing.
         llm_client: LLMClient | None = None
@@ -151,6 +175,7 @@ def ingest_corpus(
                         root=root,
                         parser=parser,
                         store=active_store,
+                        bm25=active_bm25,
                         embeddings=client,
                         llm=llm_client,
                         settings=settings,
@@ -175,6 +200,8 @@ def ingest_corpus(
     finally:
         if owns_store:
             active_store.close()
+        if owns_bm25:
+            active_bm25.close()
     return summary
 
 
@@ -184,6 +211,7 @@ def _ingest_file(
     root: Path,
     parser: Parser,
     store: ContextualVectorDB,
+    bm25: ElasticsearchBM25,
     embeddings: EmbeddingsClient,
     llm: LLMClient | None,
     settings: Settings,
@@ -192,7 +220,7 @@ def _ingest_file(
     progress: Progress,
     verbose: int,
 ) -> tuple[Literal["ingested", "skipped", "no_text"], int]:
-    """Ingest a single file.
+    """Ingest a single file into both stores.
 
     Args:
         path: The file to ingest.
@@ -200,14 +228,16 @@ def _ingest_file(
             plan decision #6).
         parser: Parser for the file's bucket.
         store: The vector store.
+        bm25: The BM25 store (written before the vector store — see the
+            module docstring for the ordering rationale).
         embeddings: The embeddings client.
         llm: Chat client for contextualization, or ``None`` to keep the
             identity path (``context = None``,
             ``contextualized_content = content``).
         settings: Loaded application settings.
         next_index: First free global ``original_index`` for this file.
-        reingest: Delete the document's previous ingest (if any) instead of
-            skipping it as unchanged.
+        reingest: Delete the document's previous ingest (if any) from both
+            stores instead of skipping it as unchanged.
         progress: The run's progress display (hosts the per-chunk
             contextualization sub-bar).
         verbose: Validated console verbosity.
@@ -226,7 +256,10 @@ def _ingest_file(
     file_type = path.suffix.lower().lstrip(".")
 
     if reingest:
-        if store.delete_document(doc_id):
+        # BM25 first: if it fails, the pgvector documents row (the
+        # idempotency marker) is still intact and the next run retries both.
+        deleted_bm25 = bm25.delete_document(doc_id)
+        if store.delete_document(doc_id) or deleted_bm25:
             logger.info("%s: --reingest — deleted previous ingest, re-processing", relative)
     elif store.document_exists(doc_id, file_hash):
         if store.document_n_chunks(doc_id) == 0:
@@ -281,6 +314,11 @@ def _ingest_file(
     vectors = embeddings.embed_passages(
         [record.contextualized_content for record in records], verbose=verbose
     )
+    # Both stores in the same boundary (spec §9.6), BM25 first: the pgvector
+    # documents row is the idempotency marker and must commit last, so a
+    # failure in between leaves the file re-attemptable on the next run
+    # (the deterministic chunk_id-addressed BM25 docs then overwrite).
+    bm25.index_chunks(records)
     store.store_document(
         doc_id=doc_id,
         source=source,
@@ -289,7 +327,7 @@ def _ingest_file(
         records=records,
         embeddings=vectors,
     )
-    logger.info("%s: ingested %d chunk(s)", relative, len(records))
+    logger.info("%s: ingested %d chunk(s) into both stores", relative, len(records))
     return "ingested", len(records)
 
 

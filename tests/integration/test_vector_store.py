@@ -222,6 +222,31 @@ class TestDeletion:
         assert store.delete_document("doc0000000000nil") == 0
 
 
+class TestFetchByIdentity:
+    """Hydration for the bm25/hybrid retrievers (spec §11.4)."""
+
+    def test_returns_full_rows_keyed_by_identity(self, store: ContextualVectorDB) -> None:
+        _seed_document(store, "dochyd000000000h", [_unit_vector(0), _unit_vector(1)])
+        _seed_document(store, "docoth000000000o", [_unit_vector(2)])
+
+        found = store.fetch_by_identity([("dochyd000000000h", 1), ("docoth000000000o", 0)])
+
+        assert set(found) == {("dochyd000000000h", 1), ("docoth000000000o", 0)}
+        chunk = found[("dochyd000000000h", 1)]
+        assert chunk.chunk_id == "dochyd000000000h::1"
+        assert chunk.content == "dochyd000000000h chunk 1"
+        assert chunk.metadata["file_type"] == "md"  # full metadata hydrated
+        assert chunk.score == 0.0  # relevance belongs to the caller
+
+    def test_unknown_keys_are_absent(self, store: ContextualVectorDB) -> None:
+        _seed_document(store, "dochyd000000000h", [_unit_vector(0)])
+        found = store.fetch_by_identity([("dochyd000000000h", 0), ("doc0000000000nil", 9)])
+        assert set(found) == {("dochyd000000000h", 0)}
+
+    def test_empty_input_short_circuits(self, store: ContextualVectorDB) -> None:
+        assert store.fetch_by_identity([]) == {}
+
+
 class TestAtomicity:
     def test_store_document_rolls_back_on_mismatch(self, store: ContextualVectorDB) -> None:
         """A failed chunk write rolls back the documents row too.

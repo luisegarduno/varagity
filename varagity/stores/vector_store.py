@@ -59,6 +59,16 @@ ORDER BY embedding <=> %(qvec)s
 LIMIT %(k)s
 """
 
+# Hydration for bm25/hybrid retrieval (spec §11.4): fetch full rows by the
+# fusion identity. unnest() pairs the two arrays positionally.
+_FETCH_BY_IDENTITY_SQL = """
+SELECT c.chunk_id, c.doc_id, c.original_index, c.content, c.context, c.metadata
+FROM chunks c
+JOIN unnest(%(doc_ids)s::text[], %(original_indexes)s::int[])
+     AS want(doc_id, original_index)
+  ON c.doc_id = want.doc_id AND c.original_index = want.original_index
+"""
+
 
 def _default_conninfo() -> str:
     """Build the connection string from settings.
@@ -304,6 +314,40 @@ class ContextualVectorDB:
         check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
         rows = self._conn.execute(_SEARCH_SQL, {"qvec": Vector(query_vector), "k": k}).fetchall()
         return [_row_to_retrieved(row) for row in rows]
+
+    def fetch_by_identity(
+        self, keys: list[tuple[str, int]]
+    ) -> dict[tuple[str, int], RetrievedChunk]:
+        """Fetch full chunk rows by their fusion identity (spec §11.4 hydrate).
+
+        Backs the bm25/hybrid retrievers: Elasticsearch only stores the
+        identity and text fields, so complete records (source, page, context,
+        full metadata) are hydrated from here. The returned chunks carry
+        ``score = 0.0`` — relevance belongs to the caller, which attaches its
+        own (BM25 or fused) score.
+
+        Args:
+            keys: ``(doc_id, original_index)`` identity tuples.
+
+        Returns:
+            A mapping of identity tuple → chunk for every key that exists;
+            unknown keys are simply absent (the caller decides whether that
+            is an inconsistency worth logging).
+        """
+        if not keys:
+            return {}
+        rows = self._conn.execute(
+            _FETCH_BY_IDENTITY_SQL,
+            {
+                "doc_ids": [doc_id for doc_id, _ in keys],
+                "original_indexes": [original_index for _, original_index in keys],
+            },
+        ).fetchall()
+        found: dict[tuple[str, int], RetrievedChunk] = {}
+        for row in rows:
+            chunk = _row_to_retrieved((*row, 0.0))
+            found[(chunk.doc_id, chunk.original_index)] = chunk
+        return found
 
 
 def _row_to_retrieved(row: tuple[Any, ...]) -> RetrievedChunk:
