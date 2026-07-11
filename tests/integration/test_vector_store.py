@@ -199,6 +199,29 @@ class TestIdentity:
         assert store.next_original_index() == 42
 
 
+class TestDeletion:
+    def test_delete_document_cascades_to_chunks(
+        self, store: ContextualVectorDB, pg_conninfo: str
+    ) -> None:
+        """`--reingest` backing: the documents row and all chunks go together."""
+        _seed_document(store, "docdel000000000d", [_unit_vector(0), _unit_vector(1)])
+        _seed_document(store, "dockeep00000000k", [_unit_vector(2)])
+
+        assert store.delete_document("docdel000000000d") == 1
+
+        assert store.document_n_chunks("docdel000000000d") is None
+        with psycopg.connect(pg_conninfo) as conn:
+            row = conn.execute(
+                "SELECT count(*) FROM chunks WHERE doc_id = %s", ("docdel000000000d",)
+            ).fetchone()
+            assert row is not None and row[0] == 0
+        # the other document is untouched
+        assert store.document_n_chunks("dockeep00000000k") == 1
+
+    def test_delete_unknown_document_is_a_noop(self, store: ContextualVectorDB) -> None:
+        assert store.delete_document("doc0000000000nil") == 0
+
+
 class TestAtomicity:
     def test_store_document_rolls_back_on_mismatch(self, store: ContextualVectorDB) -> None:
         """A failed chunk write rolls back the documents row too.

@@ -1,7 +1,8 @@
-"""Unit tests for the ingestion loader (skeleton invariants + guards)."""
+"""Unit tests for the ingestion loader (identity/contextual paths + guards)."""
 
 import logging
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,16 @@ class FakeStore:
         )
         self.upsert_chunks(records, embeddings)
 
+    def delete_document(self, doc_id: str) -> int:
+        if self.documents.pop(doc_id, None) is None:
+            return 0
+        kept = [
+            (r, e) for r, e in zip(self.records, self.embeddings, strict=True) if r.doc_id != doc_id
+        ]
+        self.records = [r for r, _ in kept]
+        self.embeddings = [e for _, e in kept]
+        return 1
+
     def close(self) -> None:
         self.closed = True
 
@@ -80,6 +91,28 @@ class FakeEmbeddings:
         return [[0.25, -0.25, 0.5] for _ in texts]
 
 
+class FakeContextLLM:
+    """Stub LLM for contextualization: records prompts, returns numbered blurbs."""
+
+    def __init__(self, think: bool = False) -> None:
+        self.think = think
+        self.prompts: list[str] = []
+
+    def generate(
+        self,
+        messages: Sequence[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        verbose: int | None = None,
+    ) -> str:
+        self.prompts.append(messages[0]["content"])
+        blurb = f"Situating blurb #{len(self.prompts)}."
+        return f"<think>placing the chunk…</think>{blurb}" if self.think else blurb
+
+
+# The identity path (plan decision #2): pin CONTEXTUALIZE off so these tests
+# exercise the non-contextual baseline regardless of the machine's .env.
 @pytest.fixture
 def pinned_settings(settings_env: Callable[..., None]) -> None:
     settings_env(
@@ -88,7 +121,13 @@ def pinned_settings(settings_env: Callable[..., None]) -> None:
         CHUNK_SIZE=400,
         CHUNK_OVERLAP=50,
         EMBEDDING_MODEL="test-model",
+        CONTEXTUALIZE="false",
     )
+
+
+@pytest.fixture
+def contextual_settings(pinned_settings: None, settings_env: Callable[..., None]) -> None:
+    settings_env(CONTEXTUALIZE="true")
 
 
 @pytest.fixture
@@ -117,7 +156,7 @@ def test_happy_path_skeleton_invariants(pinned_settings: None, corpus: Path) -> 
     assert summary.chunks == len(store.records) > 0
 
     for record in store.records:
-        assert record.context is None  # contextualization lands in Phase 5
+        assert record.context is None  # identity path: CONTEXTUALIZE off
         assert record.contextualized_content == record.content
         assert record.chunk_id == f"{record.doc_id}::{record.chunk_index}"
         assert record.chunk_size == 400
@@ -261,3 +300,137 @@ def test_one_bad_file_does_not_abort_the_run(
 def test_invalid_verbose_raises(pinned_settings: None, corpus: Path) -> None:
     with pytest.raises(ValueError, match="verbose"):
         ingest_corpus(str(corpus), store=FakeStore(), embeddings=FakeEmbeddings(), verbose=3)
+
+
+class TestContextualization:
+    """The Phase-5 contextual path (spec §9.4; plan decision #2)."""
+
+    def test_blurb_lands_in_context_with_composition(
+        self, contextual_settings: None, corpus: Path
+    ) -> None:
+        store, embeddings = FakeStore(), FakeEmbeddings()
+        llm = FakeContextLLM(think=True)
+        summary = ingest_corpus(str(corpus), store=store, embeddings=embeddings, llm=llm, verbose=0)
+
+        assert summary.ingested == 2
+        assert len(store.records) > 0
+        # one LLM call per chunk
+        assert len(llm.prompts) == len(store.records)
+        for record in store.records:
+            assert record.context is not None
+            assert record.context.startswith("Situating blurb #")
+            assert "<think>" not in record.context  # clean_response applied
+            # spec §9.4 composition, via ChunkRecord.create
+            assert record.contextualized_content == f"{record.context}\n\n{record.content}"
+
+        # embed_passages received the *contextualized* texts, not the raw chunks
+        embedded = [text for call in embeddings.calls for text in call]
+        assert embedded == [record.contextualized_content for record in store.records]
+
+    def test_chunks_contextualized_per_document_in_order(
+        self, contextual_settings: None, tmp_path: Path
+    ) -> None:
+        """Stub LLM call order: doc A's chunks (in order), then doc B's.
+
+        Per-document grouping keeps the shared document preamble identical
+        across consecutive calls so llama.cpp reuses its prompt cache.
+        """
+        root = tmp_path / "docs"
+        root.mkdir()
+        # Each file > CHUNK_SIZE (400 chars) so it splits into ≥ 2 chunks.
+        (root / "alpha.txt").write_text(
+            "ALPHA-MARKER opening paragraph about the station's aeroponics bay. "
+            + "The hydro loops recirculate nutrient film across forty racks. " * 6
+        )
+        (root / "bravo.txt").write_text(
+            "BRAVO-MARKER opening paragraph about the tidal turbine arrays. "
+            + "Each turbine reports blade torque to the shore controller. " * 6
+        )
+        store = FakeStore()
+        llm = FakeContextLLM()
+        ingest_corpus(str(root), store=store, embeddings=FakeEmbeddings(), llm=llm, verbose=0)
+
+        per_doc = Counter(record.doc_id for record in store.records)
+        assert len(per_doc) == 2
+        assert all(count >= 2 for count in per_doc.values())
+
+        # Prompt order == record order: per-document grouping and chunk order
+        # in one assertion (records accumulate file-by-file, chunk-by-chunk).
+        prompt_chunks = [
+            prompt.split("<chunk>\n")[1].split("\n</chunk>")[0] for prompt in llm.prompts
+        ]
+        assert prompt_chunks == [record.content for record in store.records]
+        # Every prompt embeds its own parent document, never the other one.
+        for prompt, record in zip(llm.prompts, store.records, strict=True):
+            marker = "ALPHA-MARKER" if record.file_name == "alpha.txt" else "BRAVO-MARKER"
+            other = "BRAVO-MARKER" if marker == "ALPHA-MARKER" else "ALPHA-MARKER"
+            document = prompt.split("</document>")[0]
+            assert marker in document
+            assert other not in document
+
+    def test_contextualize_off_keeps_identity_and_never_calls_llm(
+        self, pinned_settings: None, corpus: Path
+    ) -> None:
+        store = FakeStore()
+        llm = FakeContextLLM()
+        summary = ingest_corpus(
+            str(corpus), store=store, embeddings=FakeEmbeddings(), llm=llm, verbose=0
+        )
+        assert summary.ingested == 2
+        assert llm.prompts == []  # the injected client is ignored when off
+        for record in store.records:
+            assert record.context is None
+            assert record.contextualized_content == record.content
+
+
+class TestReingest:
+    """`ingest --reingest`: re-process unchanged files after setting changes."""
+
+    def test_unchanged_files_are_reprocessed_without_duplicates(
+        self, pinned_settings: None, corpus: Path
+    ) -> None:
+        store = FakeStore()
+        first = ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
+        again = ingest_corpus(
+            str(corpus), store=store, embeddings=FakeEmbeddings(), reingest=True, verbose=0
+        )
+        assert again.ingested == 2
+        assert again.skipped == 0
+        # previous ingests were deleted first — no duplicate chunks
+        assert len(store.records) == first.chunks
+        assert len(store.documents) == 2
+
+    def test_toggling_contextualize_alone_skips_unchanged_files(
+        self, pinned_settings: None, settings_env: Callable[..., None], corpus: Path
+    ) -> None:
+        """The documented gotcha: config changes don't change content hashes."""
+        store = FakeStore()
+        ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
+
+        settings_env(CONTEXTUALIZE="true")
+        summary = ingest_corpus(
+            str(corpus), store=store, embeddings=FakeEmbeddings(), llm=FakeContextLLM(), verbose=0
+        )
+        assert summary.skipped == 2  # unchanged bytes → skipped despite the toggle
+        assert all(record.context is None for record in store.records)
+
+    def test_reingest_upgrades_identity_ingest_to_contextual(
+        self, pinned_settings: None, settings_env: Callable[..., None], corpus: Path
+    ) -> None:
+        """The Phase-5 migration path: baseline corpus → --reingest → blurbs."""
+        store = FakeStore()
+        ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
+        assert all(record.context is None for record in store.records)
+
+        settings_env(CONTEXTUALIZE="true")
+        summary = ingest_corpus(
+            str(corpus),
+            store=store,
+            embeddings=FakeEmbeddings(),
+            llm=FakeContextLLM(),
+            reingest=True,
+            verbose=0,
+        )
+        assert summary.ingested == 2
+        assert store.records  # rewritten…
+        assert all(record.context for record in store.records)  # …with blurbs

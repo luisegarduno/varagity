@@ -70,9 +70,17 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = subparsers.add_parser(
         "ingest",
         help="scan DOCS_PATH and ingest the corpus into the vector store",
-        description="Parse, chunk, embed, and store every supported document under DOCS_PATH.",
+        description="Parse, chunk, contextualize, embed, and store every supported document "
+        "under DOCS_PATH.",
     )
     _add_verbose_option(ingest, default=argparse.SUPPRESS)
+    ingest.add_argument(
+        "--reingest",
+        action="store_true",
+        help="delete and re-process every discovered document. Needed after pipeline-setting "
+        "changes (CONTEXTUALIZE, chunk params): those don't change content hashes, so "
+        "unchanged files are otherwise skipped",
+    )
     chat = subparsers.add_parser(
         "chat",
         help="ingest the corpus, then answer questions from the terminal (the default)",
@@ -100,21 +108,23 @@ def run(argv: list[str] | None = None) -> int:
     verbose = settings.DEFAULT_VERBOSE if args.verbose is None else args.verbose
 
     if args.command == "ingest":
-        return _run_ingest(verbose)
+        return _run_ingest(verbose, reingest=args.reingest)
     # chat is the default subcommand (spec §13).
     return _run_chat(verbose)
 
 
-def _run_ingest(verbose: int) -> int:
+def _run_ingest(verbose: int, *, reingest: bool = False) -> int:
     """Execute the ``ingest`` subcommand.
 
     Args:
         verbose: Effective console verbosity.
+        reingest: Delete and re-process every discovered document (the
+            ``--reingest`` flag).
 
     Returns:
         ``0`` on success, ``1`` if any file failed to ingest.
     """
-    summary = ingest_corpus(verbose=verbose)
+    summary = ingest_corpus(reingest=reingest, verbose=verbose)
     _show_ingest_summary(summary)
     return 1 if summary.failed else 0
 

@@ -87,8 +87,8 @@ def v_retrieve(chunks: "Sequence[RetrievedChunk]", verbose: int) -> None:
     """Render retrieval results (for a retriever's ``retrieve``).
 
     Mirrors the reference's ``v_retrieve_docs``: at level 2 each retrieved
-    chunk becomes a panel with its score, source, content, and — once Phase 5
-    populates it — situating context.
+    chunk becomes a panel with its score, source, content, and (when the
+    chunk was ingested with ``CONTEXTUALIZE`` on) its situating context.
 
     Args:
         chunks: The retrieved chunks, best first.
@@ -117,6 +117,38 @@ def v_retrieve(chunks: "Sequence[RetrievedChunk]", verbose: int) -> None:
                     subtitle_align="left",
                 )
             )
+
+
+def v_situate_context(chunk_text: str, context: str, verbose: int) -> None:
+    """Render one situating blurb (for :func:`~varagity.context.contextual.situate_context`).
+
+    Level 1 stays quiet — the loader's contextualization sub-progress bar is
+    the per-chunk signal there; level 2 shows each blurb next to a snippet of
+    the chunk it situates.
+
+    Args:
+        chunk_text: The chunk being situated (snippet shown as the subtitle).
+        context: The LLM-generated situating blurb.
+        verbose: 0/1 = nothing; 2 = a panel per blurb.
+
+    Raises:
+        ValueError: If ``verbose`` is invalid.
+    """
+    check_verbose(verbose)
+    if verbose < 2:
+        return
+    snippet = " ".join(chunk_text.split())
+    if len(snippet) > 70:
+        snippet = snippet[:69] + "…"
+    console.print(
+        Panel(
+            Text(context) if context else Text("<empty blurb>", style="italic red"),
+            title="context blurb",
+            subtitle=f"chunk: {snippet}",
+            subtitle_align="left",
+            style="dim",
+        )
+    )
 
 
 def v_chunk(chunks: "Sequence[Document]", verbose: int) -> None:

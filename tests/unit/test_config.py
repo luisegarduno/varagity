@@ -15,6 +15,7 @@ SETTINGS_ENV_VARS = (
     "CHUNKING_STRATEGY",
     "CHUNK_SIZE",
     "CHUNK_OVERLAP",
+    "CONTEXTUALIZE",
     "EMBEDDING_MODEL",
     "EMBEDDING_API_URL",
     "EMBEDDING_API_KEY",
@@ -57,6 +58,7 @@ def test_defaults_load() -> None:
     assert settings.CHUNKING_STRATEGY == "recursive_character"
     assert settings.CHUNK_SIZE == 400  # characters, not tokens
     assert settings.CHUNK_OVERLAP == 50
+    assert settings.CONTEXTUALIZE is True  # Contextual Retrieval on by default
     assert settings.EMBEDDING_MODEL == "infloat/multilingual-e5-large-instruct"
     assert settings.EMBEDDING_API_URL == "http://infinity-embeddings:8081/v1"
     assert settings.EMBEDDING_DIM == 1024
@@ -124,6 +126,20 @@ class TestLLMTemperatureValidation:
     def test_out_of_range_fails_fast(self, temperature: float) -> None:
         with pytest.raises(ValidationError, match="LLM_TEMPERATURE"):
             Settings(_env_file=None, LLM_TEMPERATURE=temperature)
+
+
+class TestContextualize:
+    @pytest.mark.parametrize(("raw", "expected"), [("false", False), ("true", True)])
+    def test_bool_env_parse(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+    ) -> None:
+        monkeypatch.setenv("CONTEXTUALIZE", raw)
+        assert Settings(_env_file=None).CONTEXTUALIZE is expected
+
+    def test_non_bool_fails_fast(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CONTEXTUALIZE", "maybe")
+        with pytest.raises(ValidationError, match="CONTEXTUALIZE"):
+            Settings(_env_file=None)
 
 
 def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

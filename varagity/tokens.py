@@ -58,3 +58,32 @@ def count_tokens(text: str) -> int:
     if encoding is None:
         return len(text) // _FALLBACK_CHARS_PER_TOKEN
     return len(encoding.encode(text))
+
+
+def truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Truncate ``text`` to at most ``max_tokens`` tokens (approximate).
+
+    Used by the contextualizer to keep an oversized document preamble inside
+    the llama.cpp context budget instead of crashing ingest.
+
+    Args:
+        text: The text to truncate.
+        max_tokens: Maximum tokens to keep (must be non-negative).
+
+    Returns:
+        ``text`` unchanged when it fits, otherwise its first ``max_tokens``
+        tokens decoded back to a string (chars/4 estimate if the encoding
+        could not be loaded).
+
+    Raises:
+        ValueError: If ``max_tokens`` is negative.
+    """
+    if max_tokens < 0:
+        raise ValueError(f"max_tokens must be non-negative; got {max_tokens}")
+    encoding = _encoding()
+    if encoding is None:
+        return text[: max_tokens * _FALLBACK_CHARS_PER_TOKEN]
+    tokens = encoding.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return encoding.decode(tokens[:max_tokens])

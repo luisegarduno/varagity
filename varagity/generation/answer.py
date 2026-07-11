@@ -18,8 +18,8 @@ from varagity.retrieval.base import Retriever, get_retriever
 from varagity.stores.records import RetrievedChunk
 
 # Per-chunk provenance block (spec §10.2, column-aligned as specified).
-# [CONTEXT] renders empty until Phase 5 populates the situating blurb — the
-# format is stable across that change.
+# [CONTEXT] renders empty for chunks ingested without a situating blurb
+# (CONTEXTUALIZE off) — the format is stable either way.
 _CHUNK_BLOCK = "[SOURCE]:  {source}\n[CONTEXT]: {context}\n[CONTENT]: {content}"
 
 # The grounding prompt (spec §10.2, verbatim).
@@ -66,7 +66,7 @@ def format_context(chunks: list[RetrievedChunk]) -> str:
     Returns:
         One ``[SOURCE]/[CONTEXT]/[CONTENT]`` block per chunk, blank-line
         separated. ``[CONTEXT]`` is empty for chunks without a situating
-        blurb (every chunk until Phase 5).
+        blurb (ingested with ``CONTEXTUALIZE`` off).
     """
     return "\n\n".join(
         _CHUNK_BLOCK.format(

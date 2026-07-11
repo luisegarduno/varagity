@@ -1,14 +1,21 @@
-"""Ingestion orchestrator: parse → chunk → embed → store, per file (spec §9).
+r"""Ingestion orchestrator: parse → chunk → contextualize → embed → store (spec §9).
 
-Phase-3 skeleton semantics (plan decision #1): contextualization does not
-exist yet, so every record is built with ``context = None`` and
-``contextualized_content = content``. Phase 5 changes only the contextualize
-step — no schema or store changes.
+Contextualization (spec §9.4, Phase 5): when ``settings.CONTEXTUALIZE`` is
+on, each chunk gets an LLM-generated situating blurb and
+``contextualized_content = context + "\n\n" + content`` is what gets
+embedded; when off, the identity path (``context = None``,
+``contextualized_content = content``) is preserved — the non-contextual eval
+baseline (plan decision #2). A document's chunks are contextualized
+sequentially, in order, so llama.cpp can reuse its prompt cache across the
+shared document preamble.
 
 Idempotency: a file whose ``(doc_id, content_hash)`` is already recorded is
-skipped *before* parsing. A file with no extractable text is never silently
-dropped: it gets a ``documents`` row with ``n_chunks = 0``, a warning, and a
-dedicated summary count.
+skipped *before* parsing. Pipeline-setting changes (``CONTEXTUALIZE``, chunk
+params) don't change content hashes, so re-processing an unchanged corpus
+requires ``reingest=True`` (the CLI's ``ingest --reingest``), which deletes
+each discovered document before ingesting it fresh. A file with no
+extractable text is never silently dropped: it gets a ``documents`` row with
+``n_chunks = 0``, a warning, and a dedicated summary count.
 """
 
 import logging
@@ -16,15 +23,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from rich.progress import Progress
+from rich.progress import Progress, TaskID
 
 from varagity.chunking import get_chunker
 from varagity.config import Settings, get_settings
+from varagity.context import situate_context
 from varagity.debug import show
 from varagity.debug.show import check_verbose
 from varagity.ingest.discovery import discover_documents
 from varagity.ingest.parsers import Parser, get_parser
-from varagity.models import EmbeddingsClient, get_model
+from varagity.models import EmbeddingsClient, LLMClient, get_model
 from varagity.stores import ChunkRecord, ContextualVectorDB, content_hash, derive_doc_id
 
 logger = logging.getLogger(__name__)
@@ -67,6 +75,8 @@ def ingest_corpus(
     *,
     store: ContextualVectorDB | None = None,
     embeddings: EmbeddingsClient | None = None,
+    llm: LLMClient | None = None,
+    reingest: bool = False,
     verbose: int | None = None,
 ) -> IngestSummary:
     """Ingest every supported document under ``docs_path``.
@@ -77,6 +87,13 @@ def ingest_corpus(
             closed on return) when omitted.
         embeddings: Embeddings client; resolved via the model registry when
             omitted.
+        llm: Chat client for contextualization; resolved via the model
+            registry when omitted. Unused when ``settings.CONTEXTUALIZE``
+            is off.
+        reingest: Delete each discovered document's previous ingest and
+            re-process it. Needed after pipeline-setting changes
+            (``CONTEXTUALIZE``, chunk params): those don't change content
+            hashes, so unchanged files are otherwise skipped.
         verbose: Console verbosity (0–2); defaults to
             ``settings.DEFAULT_VERBOSE``.
 
@@ -119,6 +136,10 @@ def ingest_corpus(
     active_store = store if store is not None else ContextualVectorDB()
     try:
         client = embeddings if embeddings is not None else get_model("embedding")
+        # The LLM is only needed (and only resolved) when contextualizing.
+        llm_client: LLMClient | None = None
+        if settings.CONTEXTUALIZE:
+            llm_client = llm if llm is not None else get_model("default")
         next_index = active_store.next_original_index()
         with Progress(console=show.console, disable=verbose == 0) as progress:
             task = progress.add_task("Ingesting", total=len(work))
@@ -131,8 +152,11 @@ def ingest_corpus(
                         parser=parser,
                         store=active_store,
                         embeddings=client,
+                        llm=llm_client,
                         settings=settings,
                         next_index=next_index,
+                        reingest=reingest,
+                        progress=progress,
                         verbose=verbose,
                     )
                 except Exception:
@@ -161,8 +185,11 @@ def _ingest_file(
     parser: Parser,
     store: ContextualVectorDB,
     embeddings: EmbeddingsClient,
+    llm: LLMClient | None,
     settings: Settings,
     next_index: int,
+    reingest: bool,
+    progress: Progress,
     verbose: int,
 ) -> tuple[Literal["ingested", "skipped", "no_text"], int]:
     """Ingest a single file.
@@ -174,8 +201,15 @@ def _ingest_file(
         parser: Parser for the file's bucket.
         store: The vector store.
         embeddings: The embeddings client.
+        llm: Chat client for contextualization, or ``None`` to keep the
+            identity path (``context = None``,
+            ``contextualized_content = content``).
         settings: Loaded application settings.
         next_index: First free global ``original_index`` for this file.
+        reingest: Delete the document's previous ingest (if any) instead of
+            skipping it as unchanged.
+        progress: The run's progress display (hosts the per-chunk
+            contextualization sub-bar).
         verbose: Validated console verbosity.
 
     Returns:
@@ -191,7 +225,10 @@ def _ingest_file(
     source = str(path.resolve())
     file_type = path.suffix.lower().lstrip(".")
 
-    if store.document_exists(doc_id, file_hash):
+    if reingest:
+        if store.delete_document(doc_id):
+            logger.info("%s: --reingest — deleted previous ingest, re-processing", relative)
+    elif store.document_exists(doc_id, file_hash):
         if store.document_n_chunks(doc_id) == 0:
             logger.warning(
                 "%s: known document with no extractable text (unchanged since last run)", relative
@@ -214,6 +251,14 @@ def _ingest_file(
 
     chunker = get_chunker(settings.CHUNKING_STRATEGY)
     chunks = chunker.split(raw_doc.text, source_meta=raw_doc.source_meta, verbose=verbose)
+    contexts = _contextualize(
+        document_text=raw_doc.text,
+        chunk_texts=[chunk.page_content for chunk in chunks],
+        llm=llm,
+        file_name=path.name,
+        progress=progress,
+        verbose=verbose,
+    )
     records = [
         ChunkRecord.create(
             doc_id=doc_id,
@@ -224,7 +269,7 @@ def _ingest_file(
             file_type=file_type,
             page=chunk.metadata.get("page"),
             content=chunk.page_content,
-            context=None,  # identity until Phase 5 (plan decision #1)
+            context=contexts[chunk_index],
             chunk_size=settings.CHUNK_SIZE,
             chunk_overlap=settings.CHUNK_OVERLAP,
             chunking_strategy=settings.CHUNKING_STRATEGY,
@@ -246,3 +291,44 @@ def _ingest_file(
     )
     logger.info("%s: ingested %d chunk(s)", relative, len(records))
     return "ingested", len(records)
+
+
+def _contextualize(
+    *,
+    document_text: str,
+    chunk_texts: list[str],
+    llm: LLMClient | None,
+    file_name: str,
+    progress: Progress,
+    verbose: int,
+) -> list[str | None]:
+    """Generate one situating blurb per chunk (or the identity path).
+
+    Chunks are processed sequentially, in document order, so every call
+    shares the same document preamble and llama.cpp reuses its prompt cache
+    (spec §9.4). Progress is a per-chunk sub-bar under the run's file bar.
+
+    Args:
+        document_text: The parent document's full extracted text.
+        chunk_texts: The document's chunk texts, in order.
+        llm: Chat client for contextualization, or ``None`` for the identity
+            path (every context ``None`` — ``settings.CONTEXTUALIZE`` off).
+        file_name: Source file name (labels the sub-progress bar).
+        progress: The run's progress display.
+        verbose: Validated console verbosity.
+
+    Returns:
+        One context blurb per chunk, in chunk order (all ``None`` when
+        ``llm`` is ``None``).
+    """
+    if llm is None:
+        return [None] * len(chunk_texts)
+    contexts: list[str | None] = []
+    sub_task: TaskID = progress.add_task(f"  ↳ contextualizing {file_name}", total=len(chunk_texts))
+    try:
+        for chunk_text in chunk_texts:
+            contexts.append(situate_context(document_text, chunk_text, llm=llm, verbose=verbose))
+            progress.advance(sub_task)
+    finally:
+        progress.remove_task(sub_task)
+    return contexts

@@ -35,6 +35,12 @@ class Settings(BaseSettings):
         CHUNK_SIZE: Chunk size in **characters** — not tokens —
             (``RecursiveCharacterTextSplitter`` counts characters, spec §9.3).
         CHUNK_OVERLAP: Overlap between consecutive chunks, in characters.
+        CONTEXTUALIZE: Whether ingestion generates an LLM situating blurb per
+            chunk (Contextual Retrieval, spec §9.4). ``False`` keeps the
+            identity path (``contextualized_content = content``) — the
+            non-contextual eval baseline and a throughput knob (plan
+            decision #2). Toggling it does not change content hashes, so
+            re-processing an unchanged corpus needs ``ingest --reingest``.
         EMBEDDING_MODEL: Served model name passed to the embeddings API (the
             infinity ``INFINITY_SERVED_MODEL_NAME`` string, verbatim).
         EMBEDDING_API_URL: OpenAI-compatible base URL of the infinity server.
@@ -70,6 +76,8 @@ class Settings(BaseSettings):
     CHUNKING_STRATEGY: str = "recursive_character"
     CHUNK_SIZE: int = 400  # characters, not tokens (spec §9.3)
     CHUNK_OVERLAP: int = 50
+
+    CONTEXTUALIZE: bool = True
 
     EMBEDDING_MODEL: str = "infloat/multilingual-e5-large-instruct"
     EMBEDDING_API_URL: str = "http://infinity-embeddings:8081/v1"

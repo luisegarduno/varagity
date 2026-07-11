@@ -56,3 +56,32 @@ def test_fallback_warning_logged_once(
         tokens.count_tokens("efgh")
     warnings = [r for r in caplog.records if "unavailable" in r.message]
     assert len(warnings) == 1  # lru_cache makes the failure (and warning) one-time
+
+
+class TestTruncateToTokens:
+    def test_text_within_budget_is_unchanged(self) -> None:
+        text = "a short sentence"
+        assert tokens.truncate_to_tokens(text, 100) == text
+
+    def test_truncates_to_token_budget(self) -> None:
+        text = "word " * 200
+        truncated = tokens.truncate_to_tokens(text, 50)
+        assert len(truncated) < len(text)
+        assert tokens.count_tokens(truncated) <= 50
+        assert text.startswith(truncated)  # a clean prefix, decoded back
+
+    def test_zero_budget_returns_empty(self) -> None:
+        assert tokens.truncate_to_tokens("anything", 0) == ""
+
+    def test_negative_budget_raises(self) -> None:
+        with pytest.raises(ValueError, match="max_tokens"):
+            tokens.truncate_to_tokens("anything", -1)
+
+    def test_falls_back_to_char_estimate_when_encoding_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, fresh_encoder_cache: None
+    ) -> None:
+        def boom(name: str) -> None:
+            raise OSError("offline")
+
+        monkeypatch.setattr(tokens.tiktoken, "get_encoding", boom)
+        assert tokens.truncate_to_tokens("x" * 100, 10) == "x" * 40  # 10 tokens × 4 chars

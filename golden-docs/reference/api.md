@@ -26,6 +26,10 @@ vertical slices are implemented.
 
 ::: varagity.chunking.recursive_character
 
+## Contextual Retrieval
+
+::: varagity.context.contextual
+
 ## Model clients
 
 ::: varagity.models.registry

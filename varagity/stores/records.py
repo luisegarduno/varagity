@@ -63,7 +63,8 @@ class ChunkRecord(BaseModel):
         file_type: ``pdf`` / ``txt`` / ``md``.
         page: Page number (PDF; ``None`` otherwise).
         content: Original chunk text.
-        context: LLM-generated situating blurb (``None`` until Phase 5).
+        context: LLM-generated situating blurb (``None`` when
+            ``CONTEXTUALIZE`` is off — the non-contextual baseline).
         contextualized_content: The text actually embedded and BM25-indexed;
             identical to ``content`` while ``context`` is ``None``.
         chunk_size: Chunk size parameter used, in characters (provenance).
@@ -123,7 +124,7 @@ class ChunkRecord(BaseModel):
         Derives ``chunk_id``, ``n_tokens``, ``created_at``, and the
         ``contextualized_content`` composition rule (spec §9.4): with a
         ``context`` blurb it is ``context + "\n\n" + content``; without one
-        (the pre-Phase-5 skeleton path, plan decision #1) it is ``content``
+        (``CONTEXTUALIZE`` off, plan decision #2) it is ``content``
         unchanged.
 
         Args:
@@ -135,7 +136,7 @@ class ChunkRecord(BaseModel):
             file_type: ``pdf`` / ``txt`` / ``md``.
             page: Page number (PDF; ``None`` otherwise).
             content: Original chunk text.
-            context: LLM situating blurb, or ``None`` before Phase 5.
+            context: LLM situating blurb, or ``None`` (``CONTEXTUALIZE`` off).
             chunk_size: Chunk size parameter used (characters).
             chunk_overlap: Chunk overlap parameter used (characters).
             chunking_strategy: Registry name of the chunker used.
@@ -181,7 +182,8 @@ class RetrievedChunk(BaseModel):
         doc_id: Parent document id.
         original_index: Global chunk index (fusion identity).
         content: Original chunk text.
-        context: LLM situating blurb (``None`` until Phase 5).
+        context: LLM situating blurb (``None`` when ingested with
+            ``CONTEXTUALIZE`` off).
         metadata: Full persisted metadata record.
         score: Similarity score — cosine similarity ``1 - distance`` for the
             vector store (higher is better).

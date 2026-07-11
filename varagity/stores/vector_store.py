@@ -159,6 +159,23 @@ class ContextualVectorDB:
         ).fetchone()
         return None if row is None else int(row[0])
 
+    def delete_document(self, doc_id: str) -> int:
+        """Delete a document row and, via FK cascade, all its chunks.
+
+        Backs ``ingest --reingest``: pipeline-setting changes (e.g. toggling
+        ``CONTEXTUALIZE``) don't change content hashes, so re-processing an
+        unchanged file requires deleting its previous ingest first.
+
+        Args:
+            doc_id: The document's stable id (deleting an unknown id is a
+                no-op).
+
+        Returns:
+            The number of ``documents`` rows deleted (0 or 1).
+        """
+        cursor = self._conn.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,))
+        return cursor.rowcount
+
     def next_original_index(self) -> int:
         """Allocate the next global chunk index (called once per ingest run).
 

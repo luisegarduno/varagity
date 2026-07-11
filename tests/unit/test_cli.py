@@ -90,11 +90,11 @@ class TestIngestCommand:
     def test_ingest_dispatch_and_exit_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[int] = []
 
-        def fake_ingest(verbose: int) -> IngestSummary:
+        def fake_ingest(verbose: int, reingest: bool = False) -> IngestSummary:
             calls.append(verbose)
             return IngestSummary(discovered=2, ingested=2, chunks=7)
 
-        monkeypatch.setattr(cli_app, "ingest_corpus", lambda verbose: fake_ingest(verbose))
+        monkeypatch.setattr(cli_app, "ingest_corpus", fake_ingest)
         with console.capture() as capture:
             exit_code = cli_app.run(["-v", "0", "ingest"])
         assert exit_code == 0
@@ -105,17 +105,33 @@ class TestIngestCommand:
 
     def test_ingest_exit_one_on_failures(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            cli_app, "ingest_corpus", lambda verbose: IngestSummary(discovered=1, failed=1)
+            cli_app,
+            "ingest_corpus",
+            lambda verbose, reingest=False: IngestSummary(discovered=1, failed=1),
         )
         with console.capture():
             assert cli_app.run(["ingest"]) == 1
+
+    def test_reingest_flag_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`ingest --reingest` reaches the loader; plain `ingest` stays False."""
+        seen: list[bool] = []
+        monkeypatch.setattr(
+            cli_app,
+            "ingest_corpus",
+            lambda verbose, reingest=False: seen.append(reingest) or IngestSummary(),
+        )
+        with console.capture():
+            assert cli_app.run(["ingest"]) == 0
+            assert cli_app.run(["ingest", "--reingest"]) == 0
+            assert cli_app.run(["ingest", "--reingest", "-v", "0"]) == 0
+        assert seen == [False, True, True]
 
     def test_verbose_flag_overrides_settings_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: list[int] = []
         monkeypatch.setattr(
             cli_app,
             "ingest_corpus",
-            lambda verbose: seen.append(verbose) or IngestSummary(),
+            lambda verbose, reingest=False: seen.append(verbose) or IngestSummary(),
         )
         with console.capture():
             cli_app.run(["-v", "2", "ingest"])
@@ -127,7 +143,7 @@ class TestIngestCommand:
         monkeypatch.setattr(
             cli_app,
             "ingest_corpus",
-            lambda verbose: seen.append(verbose) or IngestSummary(),
+            lambda verbose, reingest=False: seen.append(verbose) or IngestSummary(),
         )
         with console.capture():
             cli_app.run(["ingest", "-v", "0"])
