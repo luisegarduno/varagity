@@ -79,7 +79,32 @@ class BM25Retriever:
         self._bm25 = bm25
         self._store = store
 
-    def retrieve(self, query: str, k: int, verbose: int | None = None) -> list[RetrievedChunk]:
+    def encode_query(self, query: str, verbose: int | None = None) -> None:
+        """Return ``None``: BM25 searches raw text and never encodes queries.
+
+        Args:
+            query: The user's query (unused).
+            verbose: Console verbosity (0–2); defaults to
+                ``settings.DEFAULT_VERBOSE``.
+
+        Returns:
+            Always ``None`` (the ``query_vector`` of a bm25-only pipeline
+            state stays empty, spec §10.1).
+
+        Raises:
+            ValueError: If ``verbose`` is invalid.
+        """
+        check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
+        return None
+
+    def retrieve(
+        self,
+        query: str,
+        k: int,
+        verbose: int | None = None,
+        *,
+        query_vector: list[float] | None = None,
+    ) -> list[RetrievedChunk]:
         """Retrieve the top-k chunks by BM25 relevance.
 
         Args:
@@ -87,6 +112,8 @@ class BM25Retriever:
             k: Number of chunks to return.
             verbose: Console verbosity (0–2); defaults to
                 ``settings.DEFAULT_VERBOSE``.
+            query_vector: Accepted for protocol compatibility; unused (BM25
+                is purely lexical).
 
         Returns:
             The top-k chunks, best first, with BM25 scores and full hydrated

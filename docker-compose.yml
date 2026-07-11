@@ -117,6 +117,35 @@ services:
       - varagity-net
     restart: unless-stopped
 
+  prefect:
+    container_name: prefect
+    image: prefecthq/prefect:3-latest
+    command: prefect server start --host 0.0.0.0
+    ports:
+      - "4200:4200"
+    volumes:
+      # Default SQLite backing store lives here (plan decision #5); reset
+      # with `docker compose down -v` like the other stateful services.
+      - prefect:/root/.prefect
+    environment:
+      PREFECT_SERVER_ANALYTICS_ENABLED: false
+    healthcheck:
+      # The base image ships no curl/wget — probe with the stdlib, as the
+      # official Prefect compose example does (research §2.6).
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health', timeout=4)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    networks:
+      - varagity-net
+    restart: unless-stopped
+
   app:
     container_name: varagity
     build: ./
@@ -137,6 +166,8 @@ services:
         condition: service_healthy
       llamacpp:
         condition: service_healthy
+      prefect:
+        condition: service_healthy
     networks:
       - varagity-net
     restart: no
@@ -148,3 +179,4 @@ volumes:
   pgdata:
   esdata:
   model_cache:
+  prefect:

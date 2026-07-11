@@ -7,15 +7,49 @@ Each retrieval method module defines one implementation decorated with
 """
 
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from varagity.stores.records import RetrievedChunk
 
 
+@runtime_checkable
 class Retriever(Protocol):
-    """Interface every retrieval method implements."""
+    """Interface every retrieval method implements.
 
-    def retrieve(self, query: str, k: int, verbose: int | None = None) -> list[RetrievedChunk]:
+    ``runtime_checkable`` because the protocol appears in Prefect flow
+    signatures (``varagity.pipeline.query_flow``): Prefect builds a pydantic
+    parameter schema from the annotations at decoration time, which requires
+    types usable with ``isinstance``.
+    """
+
+    def encode_query(self, query: str, verbose: int | None = None) -> list[float] | None:
+        """Encode a query into the vector its ``retrieve`` would use.
+
+        Split out of ``retrieve`` so callers that track pipeline stages
+        (``varagity.pipeline.query_flow``, spec §10.1 step 2) can run query
+        embedding as its own stage and pass the result back via
+        ``query_vector``.
+
+        Args:
+            query: The user's query, unformatted (each method owns its own
+                query encoding — e.g. e5 query mode for ``semantic``).
+            verbose: Console verbosity (0–2); defaults to
+                ``settings.DEFAULT_VERBOSE``.
+
+        Returns:
+            The query embedding, or ``None`` for methods that never encode
+            queries (``bm25``).
+        """
+        ...
+
+    def retrieve(
+        self,
+        query: str,
+        k: int,
+        verbose: int | None = None,
+        *,
+        query_vector: list[float] | None = None,
+    ) -> list[RetrievedChunk]:
         """Retrieve the top-k chunks for a query.
 
         Args:
@@ -24,6 +58,9 @@ class Retriever(Protocol):
             k: Number of chunks to return.
             verbose: Console verbosity (0–2); defaults to
                 ``settings.DEFAULT_VERBOSE``.
+            query_vector: Pre-computed :meth:`encode_query` output; when
+                omitted, methods that need a vector encode the query
+                themselves. Methods that don't (``bm25``) ignore it.
 
         Returns:
             The top-k chunks, best first, each carrying its ``score`` and the

@@ -5,6 +5,11 @@ Subcommands land with their vertical slices: ``ingest`` (Phase 3), ``chat``
 ``chat`` follows the spec §13 startup sequence: ingest the corpus first,
 then loop — prompt → retrieve → show matches → grounded answer — until
 ``:quit`` (or end-of-input, e.g. in a non-interactive container).
+
+Since Phase 8 both subcommands run through the Prefect flows
+(``varagity.pipeline``), invoked directly in-process — no worker or
+deployment (spec §21 #8) — so every ingest stage and every question is a
+tracked run at the Prefect UI (``:4200``).
 """
 
 import argparse
@@ -17,10 +22,10 @@ from rich.table import Table
 
 from varagity.config import get_settings
 from varagity.debug.show import console
-from varagity.generation.answer import answer_query
-from varagity.ingest.loader import IngestSummary, ingest_corpus
+from varagity.ingest.loader import IngestSummary
 from varagity.logging_setup import setup_logging
 from varagity.models.registry import get_model
+from varagity.pipeline import ingest_flow, query_flow
 from varagity.retrieval import get_retriever
 from varagity.stores.records import RetrievedChunk
 
@@ -124,7 +129,7 @@ def _run_ingest(verbose: int, *, reingest: bool = False) -> int:
     Returns:
         ``0`` on success, ``1`` if any file failed to ingest.
     """
-    summary = ingest_corpus(reingest=reingest, verbose=verbose)
+    summary = ingest_flow(reingest=reingest, verbose=verbose)
     _show_ingest_summary(summary)
     return 1 if summary.failed else 0
 
@@ -143,7 +148,7 @@ def _run_chat(verbose: int) -> int:
     """
     settings = get_settings()
 
-    summary = ingest_corpus(verbose=verbose)
+    summary = ingest_flow(verbose=verbose)
     _show_ingest_summary(summary)
     if summary.failed:
         logger.warning(
@@ -170,7 +175,7 @@ def _run_chat(verbose: int) -> int:
             continue
         if query == QUIT_COMMAND:
             return 0
-        state = answer_query(
+        state = query_flow(
             query,
             retriever=retriever,
             llm=llm,

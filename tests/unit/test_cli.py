@@ -1,4 +1,12 @@
-"""Unit tests for the CLI shell (dispatch, exit codes, the chat loop)."""
+"""Unit tests for the CLI shell (dispatch, exit codes, the chat loop).
+
+The Prefect flow seams (``ingest_flow``, ``query_flow``) are stubbed at the
+CLI module boundary so no Prefect engine (or server) runs here; the flows'
+own composition is covered by ``test_pipeline_flows.py`` under the test
+harness. The ``query_flow`` stub delegates to the *real*
+:func:`~varagity.generation.answer.answer_query`, so the chat tests still
+exercise genuine retrieval → grounding → answer wiring.
+"""
 
 from collections.abc import Iterator, Sequence
 
@@ -7,6 +15,7 @@ import pytest
 from varagity.cli import app as cli_app
 from varagity.config import get_settings
 from varagity.debug.show import console
+from varagity.generation.answer import answer_query
 from varagity.ingest.loader import IngestSummary
 from varagity.stores.records import RetrievedChunk
 
@@ -79,7 +88,12 @@ def chat_harness(monkeypatch: pytest.MonkeyPatch, settings_env) -> dict:  # type
             raise EOFError
         return harness["inputs"].pop(0)
 
-    monkeypatch.setattr(cli_app, "ingest_corpus", lambda verbose: fake_ingest(verbose))
+    def fake_query_flow(query: str, **kwargs: object) -> object:
+        # The flow's plain twin: same parameters, no Prefect engine.
+        return answer_query(query, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli_app, "ingest_flow", lambda verbose: fake_ingest(verbose))
+    monkeypatch.setattr(cli_app, "query_flow", fake_query_flow)
     monkeypatch.setattr(cli_app, "get_retriever", lambda name: harness["retriever"])
     monkeypatch.setattr(cli_app, "get_model", lambda model_type: harness["llm"])
     monkeypatch.setattr(cli_app.Prompt, "ask", fake_ask)
@@ -94,7 +108,7 @@ class TestIngestCommand:
             calls.append(verbose)
             return IngestSummary(discovered=2, ingested=2, chunks=7)
 
-        monkeypatch.setattr(cli_app, "ingest_corpus", fake_ingest)
+        monkeypatch.setattr(cli_app, "ingest_flow", fake_ingest)
         with console.capture() as capture:
             exit_code = cli_app.run(["-v", "0", "ingest"])
         assert exit_code == 0
@@ -106,7 +120,7 @@ class TestIngestCommand:
     def test_ingest_exit_one_on_failures(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             cli_app,
-            "ingest_corpus",
+            "ingest_flow",
             lambda verbose, reingest=False: IngestSummary(discovered=1, failed=1),
         )
         with console.capture():
@@ -117,7 +131,7 @@ class TestIngestCommand:
         seen: list[bool] = []
         monkeypatch.setattr(
             cli_app,
-            "ingest_corpus",
+            "ingest_flow",
             lambda verbose, reingest=False: seen.append(reingest) or IngestSummary(),
         )
         with console.capture():
@@ -130,7 +144,7 @@ class TestIngestCommand:
         seen: list[int] = []
         monkeypatch.setattr(
             cli_app,
-            "ingest_corpus",
+            "ingest_flow",
             lambda verbose, reingest=False: seen.append(verbose) or IngestSummary(),
         )
         with console.capture():
@@ -142,7 +156,7 @@ class TestIngestCommand:
         seen: list[int] = []
         monkeypatch.setattr(
             cli_app,
-            "ingest_corpus",
+            "ingest_flow",
             lambda verbose, reingest=False: seen.append(verbose) or IngestSummary(),
         )
         with console.capture():

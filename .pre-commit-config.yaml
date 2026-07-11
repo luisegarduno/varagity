@@ -37,6 +37,7 @@ repos:
           - pgvector
           - tiktoken
           - elasticsearch
+          - prefect
 
   - repo: local
     hooks:

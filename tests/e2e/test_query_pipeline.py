@@ -1,11 +1,14 @@
 """End-to-end pipeline tests: ingest → retrieve (3 methods) → answer.
 
-Real pgvector Postgres **and** Elasticsearch via testcontainers (spec §15.1
-"e2e" row: real stores); deterministic fake embeddings (hashed bag-of-words,
-so lexically similar texts land near each other) and a scripted fake LLM
-stand in for the GPU services. PDF parsing runs for real (Docling + OCR on
-CPU — the corpus includes the Phase 7 fixture PDFs), so the first run
-downloads Docling/EasyOCR models.
+Since Phase 8 the pipelines run through the Prefect flows
+(``varagity.pipeline``) under ``prefect_test_harness`` — every stage below
+is a tracked task run against an ephemeral API, exactly the production
+composition. Real pgvector Postgres **and** Elasticsearch via
+testcontainers (spec §15.1 "e2e" row: real stores); deterministic fake
+embeddings (hashed bag-of-words, so lexically similar texts land near each
+other) and a scripted fake LLM stand in for the GPU services. PDF parsing
+runs for real (Docling + OCR on CPU — the corpus includes the Phase 7
+fixture PDFs), so the first run downloads Docling/EasyOCR models.
 
 Select with ``pytest -m e2e`` (needs Docker).
 """
@@ -19,11 +22,12 @@ from pathlib import Path
 import psycopg
 import pytest
 from elasticsearch import Elasticsearch
+from prefect.testing.utilities import prefect_test_harness
 from testcontainers.elasticsearch import ElasticSearchContainer
 from testcontainers.postgres import PostgresContainer
 
-from varagity.generation.answer import answer_query, format_context
-from varagity.ingest.loader import ingest_corpus
+from varagity.generation.answer import format_context
+from varagity.pipeline import ingest_flow, query_flow
 from varagity.retrieval.bm25 import BM25Retriever
 from varagity.retrieval.hybrid import HybridRetriever
 from varagity.retrieval.semantic import SemanticRetriever
@@ -31,6 +35,14 @@ from varagity.stores.bm25_store import ElasticsearchBM25
 from varagity.stores.vector_store import ContextualVectorDB
 
 pytestmark = pytest.mark.e2e
+
+
+@pytest.fixture(scope="module", autouse=True)
+def prefect_harness() -> Iterator[None]:
+    """Ephemeral Prefect API so the flows run tracked, hermetically."""
+    with prefect_test_harness():
+        yield
+
 
 SCHEMA_PATH = Path(__file__).parents[2] / "varagity" / "stores" / "schema.sql"
 CORPUS_PATH = Path(__file__).parents[1] / "fixtures" / "corpus"
@@ -169,7 +181,7 @@ def test_walking_skeleton_ingest_to_grounded_answer(
         conn.execute("TRUNCATE documents CASCADE")
 
     with ContextualVectorDB(pg_conninfo) as store:
-        summary = ingest_corpus(
+        summary = ingest_flow(
             str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
         )
         assert summary.discovered == 7  # 3 text/md + 4 PDFs (Phase 7)
@@ -184,7 +196,7 @@ def test_walking_skeleton_ingest_to_grounded_answer(
             assert int(raw.count(index=BM25_INDEX)["count"]) == summary.chunks
 
         retriever = SemanticRetriever(store=store, embeddings=embeddings)
-        state = answer_query(QUESTION, retriever=retriever, llm=llm, verbose=0)  # type: ignore[arg-type]
+        state = query_flow(QUESTION, retriever=retriever, llm=llm, verbose=0)  # type: ignore[arg-type]
 
     # The query was embedded exactly once, in query mode, with the raw text.
     assert embeddings.query_calls == [QUESTION]
@@ -258,7 +270,7 @@ def test_contextualized_ingest_stores_blurbs_and_still_answers(
         conn.execute("TRUNCATE documents CASCADE")
 
     with ContextualVectorDB(pg_conninfo) as store:
-        summary = ingest_corpus(
+        summary = ingest_flow(
             str(CORPUS_PATH),
             store=store,
             bm25=bm25_store,
@@ -293,7 +305,7 @@ def test_contextualized_ingest_stores_blurbs_and_still_answers(
         # The Q&A path still grounds and answers over contextualized chunks.
         retriever = SemanticRetriever(store=store, embeddings=embeddings)
         answer_llm = ScriptedLLM(SCRIPTED_ANSWER)
-        state = answer_query(QUESTION, retriever=retriever, llm=answer_llm, verbose=0)  # type: ignore[arg-type]
+        state = query_flow(QUESTION, retriever=retriever, llm=answer_llm, verbose=0)  # type: ignore[arg-type]
 
     assert any(PLANTED_FACT in chunk.content for chunk in state["retrieved"])
     assert all(chunk.context for chunk in state["retrieved"])  # blurbs round-trip
@@ -312,10 +324,10 @@ def test_second_run_is_idempotent_and_still_answers(
         conn.execute("TRUNCATE documents CASCADE")
 
     with ContextualVectorDB(pg_conninfo) as store:
-        first = ingest_corpus(
+        first = ingest_flow(
             str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
         )
-        second = ingest_corpus(
+        second = ingest_flow(
             str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
         )
         assert first.ingested == 6
@@ -327,7 +339,7 @@ def test_second_run_is_idempotent_and_still_answers(
 
         retriever = SemanticRetriever(store=store, embeddings=embeddings)
         llm = ScriptedLLM("Lantern. [SOURCE]: aurora_station.md")
-        state = answer_query(
+        state = query_flow(
             "What reactor powers the Aurora station?",
             retriever=retriever,
             llm=llm,  # type: ignore[arg-type]
@@ -352,7 +364,7 @@ def test_rare_keyword_retrieved_via_bm25_and_hybrid(
         conn.execute("TRUNCATE documents CASCADE")
 
     with ContextualVectorDB(pg_conninfo) as store:
-        ingest_corpus(
+        ingest_flow(
             str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
         )
 
@@ -386,7 +398,7 @@ def test_pdf_facts_are_retrievable_and_answerable(
         conn.execute("TRUNCATE documents CASCADE")
 
     with ContextualVectorDB(pg_conninfo) as store:
-        ingest_corpus(
+        ingest_flow(
             str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
         )
         retriever = HybridRetriever(store=store, bm25=bm25_store, embeddings=embeddings)
@@ -394,7 +406,7 @@ def test_pdf_facts_are_retrievable_and_answerable(
         # Digital PDF (fast path): the Saltmere ceilometer fact.
         digital_answer = "Firefly measures up to 12,400 meters. [SOURCE]: saltmere_observatory.pdf"
         llm = ScriptedLLM(digital_answer)
-        state = answer_query(
+        state = query_flow(
             "How high can the Firefly ceilometer measure cloud-base height?",
             retriever=retriever,
             llm=llm,  # type: ignore[arg-type]
@@ -411,7 +423,7 @@ def test_pdf_facts_are_retrievable_and_answerable(
         # Scanned PDF (OCR fallback): the Moorhen dredging fact.
         scanned_answer = "Nine meters. [SOURCE]: moorhen_dredging_memo.pdf"
         llm = ScriptedLLM(scanned_answer)
-        state = answer_query(
+        state = query_flow(
             "What depth did the dredger Moorhen clear the harbor channel to?",
             retriever=retriever,
             llm=llm,  # type: ignore[arg-type]
@@ -436,7 +448,7 @@ def test_all_three_retrieval_methods_answer(
         conn.execute("TRUNCATE documents CASCADE")
 
     with ContextualVectorDB(pg_conninfo) as store:
-        ingest_corpus(
+        ingest_flow(
             str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
         )
         retrievers = {
@@ -446,7 +458,7 @@ def test_all_three_retrieval_methods_answer(
         }
         for method, retriever in retrievers.items():
             llm = ScriptedLLM(SCRIPTED_ANSWER)
-            state = answer_query(
+            state = query_flow(
                 QUESTION,
                 retriever=retriever,  # type: ignore[arg-type]
                 llm=llm,  # type: ignore[arg-type]

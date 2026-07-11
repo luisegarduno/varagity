@@ -62,6 +62,14 @@ vertical slices are implemented.
 
 ::: varagity.generation.answer
 
+## Orchestration (Prefect)
+
+::: varagity.pipeline
+
+::: varagity.pipeline.ingest_flow
+
+::: varagity.pipeline.query_flow
+
 ## CLI & debug output
 
 ::: varagity.cli.app

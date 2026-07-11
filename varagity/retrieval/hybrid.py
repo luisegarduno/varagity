@@ -96,7 +96,33 @@ class HybridRetriever:
         self._bm25 = bm25
         self._embeddings = embeddings
 
-    def retrieve(self, query: str, k: int, verbose: int | None = None) -> list[RetrievedChunk]:
+    def encode_query(self, query: str, verbose: int | None = None) -> list[float]:
+        """Embed a query in e5 query mode for the semantic arm (spec §9.5).
+
+        Args:
+            query: The user's query, unformatted.
+            verbose: Console verbosity (0–2); defaults to
+                ``settings.DEFAULT_VERBOSE``.
+
+        Returns:
+            The query embedding (the BM25 arm searches the raw text).
+
+        Raises:
+            ValueError: If ``verbose`` is invalid.
+            openai.APIError: If query embedding still fails after retries.
+        """
+        verbose = check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
+        embeddings = self._embeddings if self._embeddings is not None else get_model("embedding")
+        return embeddings.embed_query(query, verbose=verbose)
+
+    def retrieve(
+        self,
+        query: str,
+        k: int,
+        verbose: int | None = None,
+        *,
+        query_vector: list[float] | None = None,
+    ) -> list[RetrievedChunk]:
         """Retrieve the top-k chunks by weighted rank fusion.
 
         Args:
@@ -105,6 +131,8 @@ class HybridRetriever:
             k: Number of chunks to return.
             verbose: Console verbosity (0–2); defaults to
                 ``settings.DEFAULT_VERBOSE``.
+            query_vector: Pre-computed :meth:`encode_query` output; encoded
+                here when omitted.
 
         Returns:
             The top-k chunks, best first, with fused scores (maximum 1.0
@@ -119,8 +147,8 @@ class HybridRetriever:
         """
         settings = get_settings()
         verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
-        embeddings = self._embeddings if self._embeddings is not None else get_model("embedding")
-        query_vector = embeddings.embed_query(query, verbose=verbose)
+        if query_vector is None:
+            query_vector = self.encode_query(query, verbose=verbose)
 
         with ExitStack() as stack:
             store = self._store

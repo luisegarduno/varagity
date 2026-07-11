@@ -25,13 +25,23 @@ requires ``reingest=True`` (the CLI's ``ingest --reingest``), which deletes
 each discovered document from both stores before ingesting it fresh. A file
 with no extractable text is never silently dropped: it gets a ``documents``
 row with ``n_chunks = 0``, a warning, and a dedicated summary count.
+
+Orchestration seam (Phase 8): each spec §9 stage is a named module function
+(:func:`parse_document`, :func:`chunk_document`, :func:`contextualize_chunks`,
+:func:`embed_chunks`, :func:`store_chunks`), and the run loop invokes them
+through an :class:`IngestStages` bundle. By default the bundle holds the
+functions themselves; ``varagity.pipeline.ingest_flow`` passes task-wrapped
+equivalents so every stage becomes a tracked, retryable Prefect task run —
+one orchestration loop, with or without Prefect.
 """
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+from langchain_core.documents import Document
 from rich.progress import Progress, TaskID
 
 from varagity.chunking import get_chunker
@@ -39,8 +49,8 @@ from varagity.config import Settings, get_settings
 from varagity.context import situate_context
 from varagity.debug import show
 from varagity.debug.show import check_verbose
-from varagity.ingest.discovery import discover_documents
-from varagity.ingest.parsers import Parser, get_parser
+from varagity.ingest.discovery import Buckets, discover_documents
+from varagity.ingest.parsers import Parser, RawDocument, get_parser
 from varagity.models import EmbeddingsClient, LLMClient, get_model
 from varagity.stores import (
     ChunkRecord,
@@ -85,6 +95,165 @@ class IngestSummary:
     chunks: int = 0
 
 
+def parse_document(parser: Parser, path: Path, *, verbose: int) -> RawDocument:
+    """Extract a file's text and provenance (spec §9.2).
+
+    Args:
+        parser: Parser for the file's discovery bucket.
+        path: The file to parse.
+        verbose: Validated console verbosity.
+
+    Returns:
+        The extracted document.
+    """
+    return parser.extract(path, verbose=verbose)
+
+
+def chunk_document(raw: RawDocument, *, verbose: int) -> list[Document]:
+    """Split a parsed document with the configured strategy (spec §9.3).
+
+    Args:
+        raw: The parsed document (text + provenance).
+        verbose: Validated console verbosity.
+
+    Returns:
+        The chunks, provenance seeded into each chunk's metadata.
+
+    Raises:
+        KeyError: If ``settings.CHUNKING_STRATEGY`` names an unregistered
+            strategy.
+    """
+    chunker = get_chunker(get_settings().CHUNKING_STRATEGY)
+    return chunker.split(raw.text, source_meta=raw.source_meta, verbose=verbose)
+
+
+def contextualize_chunks(
+    *,
+    document_text: str,
+    chunk_texts: list[str],
+    llm: LLMClient | None,
+    file_name: str,
+    progress: Progress,
+    verbose: int,
+) -> list[str | None]:
+    """Generate one situating blurb per chunk, or the identity path (spec §9.4).
+
+    Chunks are processed sequentially, in document order, so every call
+    shares the same document preamble and llama.cpp reuses its prompt cache.
+    Progress is a per-chunk sub-bar under the run's file bar.
+
+    Args:
+        document_text: The parent document's full extracted text.
+        chunk_texts: The document's chunk texts, in order.
+        llm: Chat client for contextualization, or ``None`` for the identity
+            path (every context ``None`` — ``settings.CONTEXTUALIZE`` off).
+        file_name: Source file name (labels the sub-progress bar).
+        progress: The run's progress display.
+        verbose: Validated console verbosity.
+
+    Returns:
+        One context blurb per chunk, in chunk order (all ``None`` when
+        ``llm`` is ``None``).
+    """
+    if llm is None:
+        return [None] * len(chunk_texts)
+    contexts: list[str | None] = []
+    sub_task: TaskID = progress.add_task(f"  ↳ contextualizing {file_name}", total=len(chunk_texts))
+    try:
+        for chunk_text in chunk_texts:
+            contexts.append(situate_context(document_text, chunk_text, llm=llm, verbose=verbose))
+            progress.advance(sub_task)
+    finally:
+        progress.remove_task(sub_task)
+    return contexts
+
+
+def embed_chunks(
+    texts: list[str], *, embeddings: EmbeddingsClient, verbose: int
+) -> list[list[float]]:
+    """Embed contextualized chunk texts in e5 passage mode (spec §9.5).
+
+    Args:
+        texts: The ``contextualized_content`` of each chunk, in order.
+        embeddings: The embeddings client.
+        verbose: Validated console verbosity.
+
+    Returns:
+        One embedding vector per text, in order.
+
+    Raises:
+        openai.APIError: If embedding still fails after client retries.
+    """
+    return embeddings.embed_passages(texts, verbose=verbose)
+
+
+def store_chunks(
+    records: list[ChunkRecord],
+    vectors: list[list[float]],
+    *,
+    store: ContextualVectorDB,
+    bm25: ElasticsearchBM25,
+) -> None:
+    """Write one document's chunks to both stores (spec §9.6).
+
+    Both writes share one boundary, BM25 first: the pgvector ``documents``
+    row is the idempotency marker and must commit last, so a failure in
+    between leaves the file re-attemptable on the next run (the
+    deterministic ``chunk_id``-addressed BM25 docs then overwrite rather
+    than duplicate). The parent-document row's fields are taken from the
+    records, which all belong to one document.
+
+    Args:
+        records: The document's chunk records (non-empty; the empty-
+            extraction guard runs before this stage).
+        vectors: One embedding per record, in order.
+        store: The vector store.
+        bm25: The BM25 store.
+
+    Raises:
+        ValueError: If ``records`` is empty.
+    """
+    if not records:
+        raise ValueError("store_chunks requires at least one record")
+    head = records[0]
+    bm25.index_chunks(records)
+    store.store_document(
+        doc_id=head.doc_id,
+        source=head.source,
+        file_type=head.file_type,
+        content_hash=head.content_hash,
+        records=records,
+        embeddings=vectors,
+    )
+
+
+@dataclass(frozen=True)
+class IngestStages:
+    """Call seam through which the run loop invokes each spec §9 stage.
+
+    Defaults are the plain stage functions in this module, so constructing
+    the bundle without arguments changes nothing. ``varagity.pipeline``
+    substitutes Prefect ``@task``-wrapped equivalents (same signatures), so
+    the same loop yields tracked, retryable task runs — the orchestration
+    logic exists once.
+
+    Attributes:
+        discover: Corpus discovery (spec §9.1).
+        parse: Text extraction (spec §9.2).
+        chunk: Chunking (spec §9.3).
+        contextualize: Situating-blurb generation (spec §9.4).
+        embed: Passage embedding (spec §9.5).
+        store: Dual-store write (spec §9.6).
+    """
+
+    discover: Callable[..., Buckets] = field(default=discover_documents)
+    parse: Callable[..., RawDocument] = field(default=parse_document)
+    chunk: Callable[..., list[Document]] = field(default=chunk_document)
+    contextualize: Callable[..., list[str | None]] = field(default=contextualize_chunks)
+    embed: Callable[..., list[list[float]]] = field(default=embed_chunks)
+    store: Callable[..., Any] = field(default=store_chunks)
+
+
 def ingest_corpus(
     docs_path: str | None = None,
     *,
@@ -94,6 +263,7 @@ def ingest_corpus(
     llm: LLMClient | None = None,
     reingest: bool = False,
     verbose: int | None = None,
+    stages: IngestStages | None = None,
 ) -> IngestSummary:
     """Ingest every supported document under ``docs_path`` into both stores.
 
@@ -115,6 +285,9 @@ def ingest_corpus(
             content hashes, so unchanged files are otherwise skipped.
         verbose: Console verbosity (0–2); defaults to
             ``settings.DEFAULT_VERBOSE``.
+        stages: Per-stage call seam; the plain stage functions when omitted.
+            ``varagity.pipeline.ingest_flow`` passes task-wrapped stages so
+            each stage is a tracked Prefect task run.
 
     Returns:
         The run's counters (one file failing is counted and logged, not
@@ -129,8 +302,9 @@ def ingest_corpus(
     settings = get_settings()
     verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
     root = Path(docs_path if docs_path is not None else settings.DOCS_PATH)
+    stages = stages if stages is not None else IngestStages()
 
-    buckets = discover_documents(str(root), verbose=verbose)
+    buckets = stages.discover(str(root), verbose=verbose)
     summary = IngestSummary(discovered=buckets.total)
 
     # Resolve parsers up front; a bucket without one (PDF until Phase 7) is
@@ -183,6 +357,7 @@ def ingest_corpus(
                         reingest=reingest,
                         progress=progress,
                         verbose=verbose,
+                        stages=stages,
                     )
                 except Exception:
                     logger.exception("failed to ingest %s — continuing with the next file", path)
@@ -219,6 +394,7 @@ def _ingest_file(
     reingest: bool,
     progress: Progress,
     verbose: int,
+    stages: IngestStages,
 ) -> tuple[Literal["ingested", "skipped", "no_text"], int]:
     """Ingest a single file into both stores.
 
@@ -241,6 +417,7 @@ def _ingest_file(
         progress: The run's progress display (hosts the per-chunk
             contextualization sub-bar).
         verbose: Validated console verbosity.
+        stages: Per-stage call seam (plain functions or Prefect tasks).
 
     Returns:
         A ``(summary_field, chunks_stored)`` pair, where ``summary_field``
@@ -270,7 +447,7 @@ def _ingest_file(
         logger.info("%s: unchanged — skipping (already ingested)", relative)
         return "skipped", 0
 
-    raw_doc = parser.extract(path, verbose=verbose)
+    raw_doc = stages.parse(parser, path, verbose=verbose)
     if sum(1 for char in raw_doc.text if not char.isspace()) < MIN_EXTRACTED_CHARS:
         logger.warning(
             "%s: no extractable text (<%d non-whitespace chars) — recording a 0-chunk document",
@@ -282,9 +459,8 @@ def _ingest_file(
         )
         return "no_text", 0
 
-    chunker = get_chunker(settings.CHUNKING_STRATEGY)
-    chunks = chunker.split(raw_doc.text, source_meta=raw_doc.source_meta, verbose=verbose)
-    contexts = _contextualize(
+    chunks = stages.chunk(raw_doc, verbose=verbose)
+    contexts = stages.contextualize(
         document_text=raw_doc.text,
         chunk_texts=[chunk.page_content for chunk in chunks],
         llm=llm,
@@ -312,62 +488,13 @@ def _ingest_file(
         )
         for chunk_index, chunk in enumerate(chunks)
     ]
-    vectors = embeddings.embed_passages(
-        [record.contextualized_content for record in records], verbose=verbose
+    vectors = stages.embed(
+        [record.contextualized_content for record in records],
+        embeddings=embeddings,
+        verbose=verbose,
     )
-    # Both stores in the same boundary (spec §9.6), BM25 first: the pgvector
-    # documents row is the idempotency marker and must commit last, so a
-    # failure in between leaves the file re-attemptable on the next run
-    # (the deterministic chunk_id-addressed BM25 docs then overwrite).
-    bm25.index_chunks(records)
-    store.store_document(
-        doc_id=doc_id,
-        source=source,
-        file_type=file_type,
-        content_hash=file_hash,
-        records=records,
-        embeddings=vectors,
-    )
+    # Both stores in one stage boundary (spec §9.6) — ordering rationale in
+    # store_chunks.
+    stages.store(records, vectors, store=store, bm25=bm25)
     logger.info("%s: ingested %d chunk(s) into both stores", relative, len(records))
     return "ingested", len(records)
-
-
-def _contextualize(
-    *,
-    document_text: str,
-    chunk_texts: list[str],
-    llm: LLMClient | None,
-    file_name: str,
-    progress: Progress,
-    verbose: int,
-) -> list[str | None]:
-    """Generate one situating blurb per chunk (or the identity path).
-
-    Chunks are processed sequentially, in document order, so every call
-    shares the same document preamble and llama.cpp reuses its prompt cache
-    (spec §9.4). Progress is a per-chunk sub-bar under the run's file bar.
-
-    Args:
-        document_text: The parent document's full extracted text.
-        chunk_texts: The document's chunk texts, in order.
-        llm: Chat client for contextualization, or ``None`` for the identity
-            path (every context ``None`` — ``settings.CONTEXTUALIZE`` off).
-        file_name: Source file name (labels the sub-progress bar).
-        progress: The run's progress display.
-        verbose: Validated console verbosity.
-
-    Returns:
-        One context blurb per chunk, in chunk order (all ``None`` when
-        ``llm`` is ``None``).
-    """
-    if llm is None:
-        return [None] * len(chunk_texts)
-    contexts: list[str | None] = []
-    sub_task: TaskID = progress.add_task(f"  ↳ contextualizing {file_name}", total=len(chunk_texts))
-    try:
-        for chunk_text in chunk_texts:
-            contexts.append(situate_context(document_text, chunk_text, llm=llm, verbose=verbose))
-            progress.advance(sub_task)
-    finally:
-        progress.remove_task(sub_task)
-    return contexts

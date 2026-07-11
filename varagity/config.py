@@ -83,6 +83,11 @@ class Settings(BaseSettings):
         POSTGRES_PASSWORD: PostgreSQL password (dev-only static credential).
         ELASTICSEARCH_URL: Base URL of the Elasticsearch server (BM25 store).
         BM25_INDEX_NAME: Name of the contextual BM25 index.
+        PREFECT_API_URL: Base URL of the Prefect server's API. Exported to
+            the process environment by ``varagity.pipeline`` **before**
+            ``prefect`` is imported (Prefect captures its environment at
+            import time), so flow/task runs are tracked by the compose
+            ``prefect`` service.
         RETRIEVAL_METHOD: Registry name of the retrieval method (spec §10.1:
             ``semantic`` | ``bm25`` | ``hybrid``; the v1 default is
             ``hybrid``).
@@ -134,6 +139,8 @@ class Settings(BaseSettings):
 
     ELASTICSEARCH_URL: str = "http://elasticsearch:9200"
     BM25_INDEX_NAME: str = "varagity_contextual_bm25"
+
+    PREFECT_API_URL: str = "http://prefect:4200/api"
 
     RETRIEVAL_METHOD: str = "hybrid"
     TOP_K: int = 10
