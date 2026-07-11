@@ -70,6 +70,18 @@ vertical slices are implemented.
 
 ::: varagity.pipeline.query_flow
 
+::: varagity.pipeline.eval_flow
+
+## Evaluation
+
+::: varagity.eval.datasets
+
+::: varagity.eval.containers
+
+::: varagity.eval.evaluate
+
+::: varagity.eval.ocr_benchmark
+
 ## CLI & debug output
 
 ::: varagity.cli.app

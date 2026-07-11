@@ -1,41 +1,31 @@
 """Integration tests for ContextualVectorDB against a real pgvector Postgres.
 
 Runs the actual ``schema.sql`` in a throwaway ``pgvector/pgvector:pg16``
-container (testcontainers), then exercises upsert, idempotency, the unique
-``(doc_id, original_index)`` identity, and cosine search ordering.
+container (via the shared :mod:`varagity.eval.containers` helpers), then
+exercises upsert, idempotency, the unique ``(doc_id, original_index)``
+identity, and cosine search ordering.
 
 Select with ``pytest -m integration`` (needs Docker).
 """
 
 from collections.abc import Iterator
-from pathlib import Path
 
 import psycopg
 import pytest
-from testcontainers.postgres import PostgresContainer
 
+from varagity.eval.containers import ephemeral_postgres
 from varagity.stores.records import ChunkRecord, content_hash, derive_doc_id
 from varagity.stores.vector_store import ContextualVectorDB
 
 pytestmark = pytest.mark.integration
 
-SCHEMA_PATH = Path(__file__).parents[2] / "varagity" / "stores" / "schema.sql"
 DIM = 1024
 
 
 @pytest.fixture(scope="session")
 def pg_conninfo() -> Iterator[str]:
     """A pgvector Postgres with schema.sql applied, for the whole session."""
-    with PostgresContainer("pgvector/pgvector:pg16") as container:
-        conninfo = psycopg.conninfo.make_conninfo(
-            host=container.get_container_host_ip(),
-            port=int(container.get_exposed_port(5432)),
-            dbname=container.dbname,
-            user=container.username,
-            password=container.password,
-        )
-        with psycopg.connect(conninfo, autocommit=True) as conn:
-            conn.execute(SCHEMA_PATH.read_text())
+    with ephemeral_postgres() as conninfo:
         yield conninfo
 
 

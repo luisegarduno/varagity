@@ -1,12 +1,13 @@
 """CLI argument parsing, subcommand dispatch, and the terminal Q&A loop.
 
 Subcommands land with their vertical slices: ``ingest`` (Phase 3), ``chat``
-(Phase 4 — the default when no subcommand is given), ``eval`` (Phase 9).
-``chat`` follows the spec §13 startup sequence: ingest the corpus first,
-then loop — prompt → retrieve → show matches → grounded answer — until
-``:quit`` (or end-of-input, e.g. in a non-interactive container).
+(Phase 4 — the default when no subcommand is given), ``eval`` / ``eval
+ocr`` (Phase 9). ``chat`` follows the spec §13 startup sequence: ingest the
+corpus first, then loop — prompt → retrieve → show matches → grounded
+answer — until ``:quit`` (or end-of-input, e.g. in a non-interactive
+container).
 
-Since Phase 8 both subcommands run through the Prefect flows
+Since Phase 8 every subcommand runs through the Prefect flows
 (``varagity.pipeline``), invoked directly in-process — no worker or
 deployment (spec §21 #8) — so every ingest stage and every question is a
 tracked run at the Prefect UI (``:4200``).
@@ -14,6 +15,7 @@ tracked run at the Prefect UI (``:4200``).
 
 import argparse
 import logging
+from typing import Any
 
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -25,7 +27,7 @@ from varagity.debug.show import console
 from varagity.ingest.loader import IngestSummary
 from varagity.logging_setup import setup_logging
 from varagity.models.registry import get_model
-from varagity.pipeline import ingest_flow, query_flow
+from varagity.pipeline import eval_flow, ingest_flow, ocr_benchmark_flow, query_flow
 from varagity.retrieval import get_retriever
 from varagity.stores.records import RetrievedChunk
 
@@ -93,6 +95,22 @@ def build_parser() -> argparse.ArgumentParser:
         f"and generate a grounded, cited answer. Type {QUIT_COMMAND} to exit.",
     )
     _add_verbose_option(chat, default=argparse.SUPPRESS)
+    evaluate = subparsers.add_parser(
+        "eval",
+        help="measure retrieval quality (recall@k/pass@k, 4-config matrix) on ephemeral stores",
+        description="Run the spec §16 evaluation harness against ephemeral testcontainers "
+        "stores (Docker required) and the live GPU services. Without a target, runs the "
+        "4-configuration retrieval matrix; `eval ocr` benchmarks the OCR engines.",
+    )
+    _add_verbose_option(evaluate, default=argparse.SUPPRESS)
+    eval_targets = evaluate.add_subparsers(dest="eval_command", metavar="TARGET")
+    eval_ocr = eval_targets.add_parser(
+        "ocr",
+        help="benchmark the OCR engines (CER/WER, pages/sec, retrieval recall)",
+        description="Parse the scanned fixture PDFs with every OCR engine, score them "
+        "against ground truth, and measure the retrieval impact per engine.",
+    )
+    _add_verbose_option(eval_ocr, default=argparse.SUPPRESS)
     return parser
 
 
@@ -114,6 +132,10 @@ def run(argv: list[str] | None = None) -> int:
 
     if args.command == "ingest":
         return _run_ingest(verbose, reingest=args.reingest)
+    if args.command == "eval":
+        if getattr(args, "eval_command", None) == "ocr":
+            return _run_eval_ocr(verbose)
+        return _run_eval(verbose)
     # chat is the default subcommand (spec §13).
     return _run_chat(verbose)
 
@@ -184,6 +206,121 @@ def _run_chat(verbose: int) -> int:
             on_retrieved=_show_matches,
         )
         console.print(Panel(Markdown(state["answer"]), title="answer", border_style="green"))
+
+
+def _run_eval(verbose: int) -> int:
+    """Execute the ``eval`` subcommand: the 4-configuration retrieval matrix.
+
+    Args:
+        verbose: Effective console verbosity.
+
+    Returns:
+        ``0`` on success (a failed run raises).
+    """
+    results = eval_flow(verbose=verbose)
+    _show_matrix_results(results)
+    return 0
+
+
+def _run_eval_ocr(verbose: int) -> int:
+    """Execute the ``eval ocr`` subcommand: the OCR engine benchmark.
+
+    Args:
+        verbose: Effective console verbosity.
+
+    Returns:
+        ``0`` on success (a failed run raises).
+    """
+    results = ocr_benchmark_flow(verbose=verbose)
+    _show_ocr_results(results)
+    return 0
+
+
+# Matrix config keys in ladder order, with their table labels (spec §16).
+_MATRIX_CONFIG_LABELS: tuple[tuple[str, str], ...] = (
+    ("semantic_noncontextual", "1. semantic, non-contextual"),
+    ("semantic_contextual", "2. semantic, contextual"),
+    ("bm25_contextual", "3. BM25, contextual"),
+    ("hybrid_contextual", "4. hybrid, contextual"),
+)
+
+
+def _show_matrix_results(results: dict[str, Any]) -> None:
+    """Render the retrieval matrix as a config × k table.
+
+    Args:
+        results: The :func:`varagity.eval.evaluate.run_matrix` document.
+    """
+    k_values: list[int] = results["k_values"]
+    table = Table(
+        title=f"Retrieval matrix — {results['n_queries']} golden queries, "
+        f"{results['chunks_ingested']} chunks"
+    )
+    table.add_column("Configuration", style="bold")
+    for k in k_values:
+        table.add_column(f"recall@{k}", justify="right")
+    for k in k_values:
+        table.add_column(f"pass@{k}", justify="right", style="dim")
+    for key, label in _MATRIX_CONFIG_LABELS:
+        scores = results["configs"][key]
+        table.add_row(
+            label,
+            *(f"{scores['recall'][str(k)]:.3f}" for k in k_values),
+            *(f"{scores['pass'][str(k)]:.3f}" for k in k_values),
+        )
+    console.print(table)
+    console.print(f"Results written to [bold]{results['results_path']}[/]")
+
+
+def _show_ocr_results(results: dict[str, Any]) -> None:
+    """Render the OCR benchmark: intrinsic quality and retrieval impact.
+
+    Args:
+        results: The :func:`varagity.eval.ocr_benchmark.run_ocr_benchmark`
+            document.
+    """
+    k_values: list[int] = results["k_values"]
+    intrinsic = Table(
+        title=f"OCR intrinsic quality — {len(results['fixtures'])} fixture PDFs "
+        "(normalized CER/WER vs ground truth)"
+    )
+    intrinsic.add_column("Engine", style="bold")
+    intrinsic.add_column("CER", justify="right")
+    intrinsic.add_column("WER", justify="right")
+    intrinsic.add_column("Pages/s", justify="right")
+    for engine, data in results["engines"].items():
+        overall = data["intrinsic"]["overall"]
+        intrinsic.add_row(
+            engine,
+            f"{overall['cer']:.4f}",
+            f"{overall['wer']:.4f}",
+            f"{overall['pages_per_sec']:.3f}",
+        )
+    console.print(intrinsic)
+
+    retrieval = Table(
+        title=f"OCR retrieval impact — {results['n_scanned_queries']} scanned-doc queries "
+        "(non-contextual ingest per engine)"
+    )
+    retrieval.add_column("Engine", style="bold")
+    retrieval.add_column("Method")
+    for k in k_values:
+        retrieval.add_column(f"recall@{k}", justify="right")
+    for engine, data in results["engines"].items():
+        unresolvable = data["retrieval"]["unresolvable_golden_refs"]
+        for method, scores in data["retrieval"]["methods"].items():
+            retrieval.add_row(
+                engine,
+                method,
+                *(f"{scores['recall'][str(k)]:.3f}" for k in k_values),
+            )
+        if unresolvable:
+            console.print(
+                f"[yellow]{engine}: {len(unresolvable)} golden ref(s) unresolvable under this "
+                f"engine's chunk boundaries (counted as misses): {unresolvable}[/]"
+            )
+    console.print(retrieval)
+    console.print(f"Results written to [bold]{results['results_path']}[/]")
 
 
 def _show_matches(chunks: list[RetrievedChunk]) -> None:

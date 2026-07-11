@@ -5,6 +5,9 @@
 # Ingest corpus (the DOCS_PATH input directory — NOT golden-docs/, which is tracked)
 /docs/
 
+# Timestamped eval results (the golden set and OCR ground truth ARE tracked)
+/data/eval/results/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

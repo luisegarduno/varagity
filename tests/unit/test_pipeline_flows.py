@@ -312,3 +312,46 @@ class TestQueryFlow:
     def test_invalid_verbose_raises(self, pinned_settings: None) -> None:
         with pytest.raises(ValueError, match="verbose"):
             query_flow("q?", retriever=FakeRetriever([], None), llm=ScriptedLLM("A."), verbose=9)
+
+
+class TestEvalFlows:
+    """The Phase 9 eval flows delegate to the harness with the tracked ingest."""
+
+    def test_eval_flow_passes_the_tracked_ingest_seam(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same package-attribute shadowing as ingest_flow_module above.
+        eval_flow_module = importlib.import_module("varagity.pipeline.eval_flow")
+        from varagity.pipeline import eval_flow
+
+        captured: dict[str, object] = {}
+
+        def fake_run_matrix(**kwargs: object) -> dict[str, str]:
+            captured.update(kwargs)
+            return {"kind": "retrieval_matrix"}
+
+        monkeypatch.setattr(eval_flow_module, "run_matrix", fake_run_matrix)
+        result = eval_flow(verbose=0)
+
+        assert result == {"kind": "retrieval_matrix"}
+        assert captured["ingest"] is ingest_flow  # eval ingests are tracked subflows
+        assert captured["verbose"] == 0
+
+    def test_ocr_benchmark_flow_passes_the_tracked_ingest_seam(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        eval_flow_module = importlib.import_module("varagity.pipeline.eval_flow")
+        from varagity.pipeline import ocr_benchmark_flow
+
+        captured: dict[str, object] = {}
+
+        def fake_benchmark(**kwargs: object) -> dict[str, str]:
+            captured.update(kwargs)
+            return {"kind": "ocr_benchmark"}
+
+        monkeypatch.setattr(eval_flow_module, "run_ocr_benchmark", fake_benchmark)
+        result = ocr_benchmark_flow(verbose=1)
+
+        assert result == {"kind": "ocr_benchmark"}
+        assert captured["ingest"] is ingest_flow
+        assert captured["verbose"] == 1

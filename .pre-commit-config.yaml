@@ -38,6 +38,7 @@ repos:
           - tiktoken
           - elasticsearch
           - prefect
+          - jiwer
 
   - repo: local
     hooks:

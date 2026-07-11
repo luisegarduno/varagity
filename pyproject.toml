@@ -39,6 +39,13 @@ dev = [
     "pytest-mock>=3.15.1",
     "respx>=0.23.1",
     "ruff>=0.15.21",
+    { include-group = "eval" },
+]
+# What `main.py eval` needs beyond the runtime deps (Phase 9): ephemeral
+# stores + OCR error metrics. Shared into dev (tests use the same
+# containers); `uv run --group eval main.py eval` works without dev.
+eval = [
+    "jiwer>=3.1.0",
     "testcontainers[elasticsearch,postgres]>=4.14.2",
 ]
 
@@ -73,6 +80,11 @@ convention = "google"
 python_version = "3.12"
 disallow_untyped_defs = true
 warn_return_any = true
+
+[[tool.mypy.overrides]]
+# Ships no py.typed marker; imported (deferred) by varagity.eval.containers.
+module = ["testcontainers.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -23,9 +23,8 @@ import psycopg
 import pytest
 from elasticsearch import Elasticsearch
 from prefect.testing.utilities import prefect_test_harness
-from testcontainers.elasticsearch import ElasticSearchContainer
-from testcontainers.postgres import PostgresContainer
 
+from varagity.eval.containers import ephemeral_elasticsearch, ephemeral_postgres
 from varagity.generation.answer import format_context
 from varagity.pipeline import ingest_flow, query_flow
 from varagity.retrieval.bm25 import BM25Retriever
@@ -44,10 +43,8 @@ def prefect_harness() -> Iterator[None]:
         yield
 
 
-SCHEMA_PATH = Path(__file__).parents[2] / "varagity" / "stores" / "schema.sql"
 CORPUS_PATH = Path(__file__).parents[1] / "fixtures" / "corpus"
 DIM = 1024  # must match the schema's vector(1024)
-ES_IMAGE = "docker.elastic.co/elasticsearch/elasticsearch:9.2.0"  # same as compose
 BM25_INDEX = "varagity_e2e_bm25"
 
 QUESTION = "How long is the kelp corridor between the Bruma and Cinza arrays?"
@@ -109,35 +106,15 @@ class ScriptedLLM:
 @pytest.fixture(scope="session")
 def pg_conninfo() -> Iterator[str]:
     """A pgvector Postgres with schema.sql applied, for the whole session."""
-    with PostgresContainer("pgvector/pgvector:pg16") as container:
-        conninfo = psycopg.conninfo.make_conninfo(
-            host=container.get_container_host_ip(),
-            port=int(container.get_exposed_port(5432)),
-            dbname=container.dbname,
-            user=container.username,
-            password=container.password,
-        )
-        with psycopg.connect(conninfo, autocommit=True) as conn:
-            conn.execute(SCHEMA_PATH.read_text())
+    with ephemeral_postgres() as conninfo:
         yield conninfo
 
 
 @pytest.fixture(scope="session")
 def es_url() -> Iterator[str]:
-    """A single-node Elasticsearch for the whole session.
-
-    Disk-watermark allocation checks are disabled: on a host whose disk is
-    >90% full, ES's default percentage watermarks refuse to allocate the
-    throwaway index's primary shard and every operation times out.
-    """
-    container = (
-        ElasticSearchContainer(ES_IMAGE, mem_limit="2g")
-        .with_env("discovery.type", "single-node")
-        .with_env("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
-        .with_env("cluster.routing.allocation.disk.threshold_enabled", "false")
-    )
-    with container as es:
-        yield f"http://{es.get_container_host_ip()}:{es.get_exposed_port(9200)}"
+    """A single-node Elasticsearch for the whole session."""
+    with ephemeral_elasticsearch() as url:
+        yield url
 
 
 @pytest.fixture

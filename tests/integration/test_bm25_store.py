@@ -1,7 +1,7 @@
 """Integration tests for ElasticsearchBM25 against a real Elasticsearch.
 
-Runs a throwaway ``docker.elastic.co/elasticsearch/elasticsearch:9.2.0``
-container (testcontainers, same image as compose) and exercises the spec §8.3
+Runs a throwaway single-node Elasticsearch (same image as compose, via the
+shared :mod:`varagity.eval.containers` helpers) and exercises the spec §8.3
 mapping shape, contextual ``multi_match`` ranking, idempotent indexing, and
 ``delete_by_query`` — including that term queries work against the
 ``index: false`` identity fields (doc-values scan).
@@ -14,34 +14,21 @@ from typing import Any
 
 import pytest
 from elasticsearch import Elasticsearch
-from testcontainers.elasticsearch import ElasticSearchContainer
 
+from varagity.eval.containers import ephemeral_elasticsearch
 from varagity.stores.bm25_store import ElasticsearchBM25
 from varagity.stores.records import ChunkRecord
 
 pytestmark = pytest.mark.integration
 
-# Same image as docker-compose.yml so integration matches production behavior.
-ES_IMAGE = "docker.elastic.co/elasticsearch/elasticsearch:9.2.0"
 INDEX = "varagity_test_bm25"
 
 
 @pytest.fixture(scope="session")
 def es_url() -> Iterator[str]:
-    """A single-node Elasticsearch for the whole session.
-
-    Disk-watermark allocation checks are disabled: on a host whose disk is
-    >90% full, ES's default percentage watermarks refuse to allocate the
-    throwaway index's primary shard and every operation times out.
-    """
-    container = (
-        ElasticSearchContainer(ES_IMAGE, mem_limit="2g")
-        .with_env("discovery.type", "single-node")
-        .with_env("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
-        .with_env("cluster.routing.allocation.disk.threshold_enabled", "false")
-    )
-    with container as es:
-        yield f"http://{es.get_container_host_ip()}:{es.get_exposed_port(9200)}"
+    """A single-node Elasticsearch for the whole session."""
+    with ephemeral_elasticsearch() as url:
+        yield url
 
 
 @pytest.fixture
