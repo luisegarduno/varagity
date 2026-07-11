@@ -248,6 +248,8 @@ def run_ocr_benchmark(
             queries exist.
         FileNotFoundError: If a fixture, ground-truth file, or the golden
             set is missing.
+        RuntimeError: If an engine's ingest reports failed files (a partial
+            index would silently under-report its retrieval scores).
     """
     verbose = check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
     entries = resolve_golden(load_golden(golden_path), corpus_root)

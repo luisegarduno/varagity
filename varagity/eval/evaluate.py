@@ -314,6 +314,8 @@ def run_matrix(
             match the ingested chunk boundaries.
         FileNotFoundError: If the golden set or a referenced corpus file
             is missing.
+        RuntimeError: If either eval ingest reports failed files (a partial
+            index would silently under-report every score).
     """
     verbose = check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
     entries = resolve_golden(load_golden(golden_path), corpus_root)

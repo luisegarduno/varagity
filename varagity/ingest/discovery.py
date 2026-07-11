@@ -26,7 +26,7 @@ class Buckets:
 
     Attributes:
         text_like: ``.txt`` / ``.md`` files (parsed by ``parsers/text.py``).
-        pdf: ``.pdf`` files (parsed by ``parsers/pdf.py`` from Phase 7).
+        pdf: ``.pdf`` files (parsed by ``parsers/pdf.py``).
     """
 
     text_like: list[Path] = field(default_factory=list)

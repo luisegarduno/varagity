@@ -1,0 +1,3 @@
+# Generation
+
+::: varagity.generation.answer

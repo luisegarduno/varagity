@@ -2,8 +2,9 @@
 
 Each retrieval method module defines one implementation decorated with
 ``@register("name")``; callers resolve the configured method with
-``get_retriever(settings.RETRIEVAL_METHOD)``. Phase 4 registers ``semantic``;
-``bm25`` and ``hybrid`` land in Phase 6 as new files — no caller edits.
+``get_retriever(settings.RETRIEVAL_METHOD)``. v1 registers ``semantic``,
+``bm25``, and ``hybrid``; adding a method later (e.g. a reranking retriever,
+post-v1) means one new file plus its import line — no caller edits.
 """
 
 from collections.abc import Callable
@@ -100,8 +101,7 @@ def get_retriever(name: str) -> Retriever:
 
     Raises:
         KeyError: If no retriever is registered under ``name`` (message lists
-            the available ones — note ``bm25``/``hybrid`` pass config
-            validation but are not registered until Phase 6).
+            the available ones).
     """
     if name not in RETRIEVER_REGISTRY:
         raise KeyError(f"Unknown retrieval method {name!r}. Available: {list(RETRIEVER_REGISTRY)}")

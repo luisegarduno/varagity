@@ -1,10 +1,9 @@
 """``situate_context()`` — the heart of Contextual Retrieval (spec §9.4, §11.1).
 
 For each chunk, the LLM produces a short blurb situating the chunk within its
-whole document; the blurb is prepended to the chunk before embedding and (from
-Phase 6) BM25 indexing, which is what lifts retrieval out of the vanilla-RAG
-baseline (Anthropic: ≈35% fewer retrieval failures from contextual embeddings
-alone).
+whole document; the blurb is prepended to the chunk before embedding and BM25
+indexing, which is what lifts retrieval out of the vanilla-RAG baseline
+(Anthropic: ≈35% fewer retrieval failures from contextual embeddings alone).
 
 Callers process a document's chunks **sequentially, grouped per document**
 (the loader already iterates this way): every call for the same document

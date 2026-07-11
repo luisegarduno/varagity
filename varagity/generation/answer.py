@@ -41,10 +41,11 @@ class QueryState(TypedDict):
 
     Attributes:
         query: The user's question.
-        query_vector: The query embedding. ``None`` in Phase 4 — the
-            retrieval seam encapsulates query encoding (bm25 has no vector at
-            all); Phase 8's ``query_flow`` restructures embedding into its
-            own tracked stage.
+        query_vector: The query embedding. ``None`` on the plain path
+            (:func:`answer_query`), where the retrieval seam encapsulates
+            query encoding (bm25 has no vector at all); the Prefect
+            ``query_flow`` runs embedding as its own tracked stage and
+            fills it.
         retrieved: The retrieved chunks with scores, best first.
         formatted_context: The provenance-formatted context fed to the LLM.
         answer: The generated, ``<think>``-stripped answer.

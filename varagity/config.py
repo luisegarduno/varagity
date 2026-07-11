@@ -47,8 +47,9 @@ class Settings(BaseSettings):
         OCR_ENGINE: Registry name of the OCR engine used by the fallback
             (``easyocr`` | ``tesseract``; see
             ``varagity.ingest.parsers.pdf.OCR_ENGINE_FACTORIES``). EasyOCR
-            is a provisional default — the Phase 9 benchmark decides the
-            shipped one.
+            is the benchmark-decided default (ADR-004): error-free on the
+            fixture scans where Tesseract drops words; Tesseract trades
+            that accuracy for ~5× throughput.
         OCR_LANGUAGES: Comma-separated ISO 639-1 language codes for OCR,
             primary language first (mapped per engine, e.g. ``en`` →
             Tesseract's ``eng``).
@@ -110,7 +111,7 @@ class Settings(BaseSettings):
     PDF_OCR_MIN_CHARS: int = 50
     PDF_OCR_TEXTLESS_PAGE_RATIO: float = 0.2
     PDF_OCR_FORCE_FULL_PAGE: bool = False
-    OCR_ENGINE: str = "easyocr"  # provisional — the Phase 9 benchmark decides (plan decision #10)
+    OCR_ENGINE: str = "easyocr"  # benchmark-decided default (ADR-004)
     OCR_LANGUAGES: str = "en"
 
     CHUNKING_STRATEGY: str = "recursive_character"

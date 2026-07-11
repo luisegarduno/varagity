@@ -8,6 +8,12 @@ repo_name: luisegarduno/varagity
 # architecture documentation rendered by this site lives in `golden-docs/`.
 docs_dir: golden-docs
 
+# Broken intra-doc anchors default to INFO; promote them so `--strict`
+# (which turns warnings into errors) actually enforces link integrity.
+validation:
+  links:
+    anchors: warn
+
 theme:
   name: material
   palette:
@@ -22,8 +28,14 @@ theme:
         icon: material/brightness-4
         name: Switch to light mode
 
+# Setting markdown_extensions replaces the MkDocs defaults (toc, tables,
+# fenced_code) — they must be re-listed alongside our additions.
 markdown_extensions:
   - admonition
+  - toc:
+      permalink: true
+  - tables
+  - fenced_code
 
 plugins:
   - search
@@ -38,5 +50,26 @@ plugins:
 
 nav:
   - Home: index.md
-  - Reference:
-      - API: reference/api.md
+  - Architecture: architecture.md
+  - Data model: data-model.md
+  - Pipelines: pipelines.md
+  - Runbook: runbook.md
+  - ADRs:
+      - adr/index.md
+      - ADR-001 pgvector over Qdrant: adr/ADR-001-pgvector-over-qdrant.md
+      - ADR-002 infinity over FastEmbed: adr/ADR-002-infinity-over-fastembed.md
+      - ADR-003 vertical build & ops choices: adr/ADR-003-vertical-build-and-ops-choices.md
+      - ADR-004 OCR engine choice: adr/ADR-004-ocr-engine-choice.md
+  - API reference:
+      - reference/index.md
+      - Configuration & logging: reference/config.md
+      - Model clients: reference/models.md
+      - Ingestion: reference/ingest.md
+      - Chunking: reference/chunking.md
+      - Contextual Retrieval: reference/context.md
+      - Stores: reference/stores.md
+      - Retrieval: reference/retrieval.md
+      - Generation: reference/generation.md
+      - Orchestration: reference/pipeline.md
+      - Evaluation: reference/eval.md
+      - CLI & debug: reference/cli.md

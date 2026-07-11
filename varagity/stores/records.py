@@ -1,8 +1,8 @@
 """Chunk-level data model — the canonical metadata record (spec §8.1).
 
 Every chunk carries a complete, validated metadata record. Chunks live in
-both stores (pgvector now, Elasticsearch from Phase 6) and are joinable by
-the shared identity ``(doc_id, original_index)``.
+both stores (pgvector and Elasticsearch) and are joinable by the shared
+identity ``(doc_id, original_index)``.
 
 Identity derivation (plan decision #6): ``doc_id`` hashes the path
 **relative to** ``DOCS_PATH`` — not the absolute path spec §8.1 sketched —

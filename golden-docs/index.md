@@ -5,16 +5,29 @@ system implementing Anthropic-style **Contextual Retrieval**: documents are pars
 chunked, situated with LLM-generated context blurbs, then indexed for hybrid
 (semantic + BM25) retrieval and grounded, cited terminal Q&A.
 
-## Where things live
+## This site
 
-- **System design** — `spec.md` at the repository root: the full v1 specification.
+As-built documentation of the v1 system:
+
+- **[Architecture](architecture.md)** — service topology, the two pipelines,
+  the `(doc_id, original_index)` identity thread, and why Contextual Retrieval.
+- **[Data model](data-model.md)** — the chunk metadata record, PostgreSQL
+  schema, Elasticsearch mapping, and idempotency semantics.
+- **[Pipelines](pipelines.md)** — the ingest/query/eval Prefect task graphs
+  and their retry/caching posture.
+- **[Runbook](runbook.md)** — clean clone to answered question, plus every
+  operational gotcha (healthchecks, volumes, GPUs, OCR, Elasticsearch).
+- **[ADRs](adr/index.md)** — the decisions with lasting consequences and
+  their why.
+- **[API reference](reference/index.md)** — rendered from the package's
+  Google-style docstrings via mkdocstrings.
+
+## Where everything else lives
+
+- **System design** — `spec.md` at the repository root: the full, forward-looking
+  v1 specification this system was built from.
 - **Implementation plan** — `thoughts/shared/plans/2026-07-09-varagity-v1-vertical-slices.md`:
-  the vertically-sliced build order this system is being built in.
-- **This site** (`golden-docs/`) — as-built architecture documentation. It grows with
-  the system; the full architecture / data-model / pipelines / runbook / ADR set lands
-  with the hardening phase.
-- **[API reference](reference/api.md)** — rendered from the package's Google-style
-  docstrings via mkdocstrings.
+  the ten vertical slices the build followed, with per-phase verification notes.
 
 !!! warning "Naming caution"
     `docs/` in this repository is the **gitignored ingest corpus** (the documents the

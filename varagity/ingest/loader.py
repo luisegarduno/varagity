@@ -80,8 +80,9 @@ class IngestSummary:
         skipped: Unchanged files skipped via the idempotency check.
         no_text: Files with no extractable text (recorded as 0-chunk
             documents; includes known-empty files seen again).
-        unsupported: Files whose bucket has no registered parser yet
-            (PDFs until Phase 7).
+        unsupported: Files whose bucket has no registered parser (a
+            defensive counter — every v1 bucket has one; it guards future
+            buckets added to discovery before their parser lands).
         failed: Files that raised during ingestion (logged, run continues).
         chunks: Total chunks stored this run.
     """

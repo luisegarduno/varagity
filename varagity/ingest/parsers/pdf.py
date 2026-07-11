@@ -9,9 +9,9 @@ export (headings, tables) and page provenance, so the fallback changes
 
 The OCR engine is pluggable via the ``OCR_ENGINE`` setting: a small
 factory maps engine names to Docling ``ocr_options`` (EasyOCR is the
-provisional default — the Phase 9 benchmark picks the shipped one;
-Tesseract needs only the system binary). Documents recovered by pass 2
-carry ``extraction="ocr_fallback"`` provenance on every chunk.
+benchmark-decided default — ADR-004; Tesseract needs only the system
+binary). Documents recovered by pass 2 carry
+``extraction="ocr_fallback"`` provenance on every chunk.
 
 Docling imports are deferred to call time: importing this module (which
 happens on every CLI start via parser self-registration) must not pay
@@ -55,7 +55,7 @@ _TESSERACT_LANG = {
 
 
 def _easyocr_options(languages: list[str], force_full_page: bool) -> "OcrOptions":
-    """Build EasyOCR options (the provisional default engine).
+    """Build EasyOCR options (the default engine — ADR-004).
 
     Model storage is pinned inside Docling's cache directory (instead of
     EasyOCR's own ``~/.EasyOCR``) so one cache volume covers every model

@@ -93,5 +93,8 @@ markers = [
     "e2e: full ingest→query pipeline over the fixtures corpus (Docker)",
 ]
 # Default run is unit-only; select the other layers with `-m integration` / `-m e2e`.
-# No coverage floor yet — enforced in Phase 10.
 addopts = "--cov=varagity --cov-report=term-missing -m 'not integration and not e2e'"
+
+[tool.coverage.report]
+# The spec §15.3 floor; ratchet upward as coverage grows (unit suite ~83%).
+fail_under = 80
