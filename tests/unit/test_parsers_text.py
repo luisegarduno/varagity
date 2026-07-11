@@ -68,10 +68,6 @@ class TestParserRegistry:
         assert isinstance(get_parser("text"), TextParser)
         assert "text" in PARSER_REGISTRY
 
-    def test_pdf_not_registered_until_phase_7(self) -> None:
-        with pytest.raises(KeyError, match="Available"):
-            get_parser("pdf")
-
     def test_unknown_name_lists_available(self) -> None:
         with pytest.raises(KeyError, match="'text'"):
             get_parser("bogus")

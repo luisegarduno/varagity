@@ -30,6 +30,28 @@ class Settings(BaseSettings):
         DOCS_PATH: Directory scanned for the ingest corpus.
         ALLOWED_EXTENSIONS: Comma-separated whitelist of ingestable file
             extensions (v1: ``.pdf``, ``.txt``, ``.md``).
+        PDF_OCR_FALLBACK: Whether a PDF whose text-layer extraction comes
+            up (near-)empty is automatically re-converted with OCR (plan
+            decision #10). Off = pass 1's result stands and a textless PDF
+            ends in the empty-extraction guard.
+        PDF_OCR_MIN_CHARS: Below this many non-whitespace characters a
+            pass-1 extraction counts as "no text layer" and triggers the
+            OCR fallback.
+        PDF_OCR_TEXTLESS_PAGE_RATIO: Textless-page share at or above which
+            the OCR fallback triggers (catches mixed scanned/digital
+            documents whose digital pages alone pass the length check).
+        PDF_OCR_FORCE_FULL_PAGE: Escape hatch for corrupt-text-layer PDFs
+            (garbage embedded text passes the content triggers): skip pass
+            1 and OCR every page, ignoring embedded text. Off by default —
+            digital pages of mixed documents keep their text layer.
+        OCR_ENGINE: Registry name of the OCR engine used by the fallback
+            (``easyocr`` | ``tesseract``; see
+            ``varagity.ingest.parsers.pdf.OCR_ENGINE_FACTORIES``). EasyOCR
+            is a provisional default — the Phase 9 benchmark decides the
+            shipped one.
+        OCR_LANGUAGES: Comma-separated ISO 639-1 language codes for OCR,
+            primary language first (mapped per engine, e.g. ``en`` →
+            Tesseract's ``eng``).
         CHUNKING_STRATEGY: Registry name of the chunking strategy
             (see ``varagity.chunking``).
         CHUNK_SIZE: Chunk size in **characters** — not tokens —
@@ -78,6 +100,13 @@ class Settings(BaseSettings):
 
     DOCS_PATH: str = "./docs"
     ALLOWED_EXTENSIONS: str = ".pdf,.txt,.md"
+
+    PDF_OCR_FALLBACK: bool = True
+    PDF_OCR_MIN_CHARS: int = 50
+    PDF_OCR_TEXTLESS_PAGE_RATIO: float = 0.2
+    PDF_OCR_FORCE_FULL_PAGE: bool = False
+    OCR_ENGINE: str = "easyocr"  # provisional — the Phase 9 benchmark decides (plan decision #10)
+    OCR_LANGUAGES: str = "en"
 
     CHUNKING_STRATEGY: str = "recursive_character"
     CHUNK_SIZE: int = 400  # characters, not tokens (spec §9.3)
@@ -128,6 +157,63 @@ class Settings(BaseSettings):
                 continue
             extensions.add(ext if ext.startswith(".") else f".{ext}")
         return frozenset(extensions)
+
+    @property
+    def ocr_language_list(self) -> list[str]:
+        """Parsed ``OCR_LANGUAGES`` as an ordered, deduplicated list.
+
+        Order is preserved (OCR engines weight the primary language);
+        entries are lowercased and stripped.
+
+        Returns:
+            The language codes, e.g. ``["en", "de"]``.
+        """
+        languages: list[str] = []
+        for raw in self.OCR_LANGUAGES.split(","):
+            code = raw.strip().lower()
+            if code and code not in languages:
+                languages.append(code)
+        return languages
+
+    @field_validator("OCR_LANGUAGES")
+    @classmethod
+    def _validate_ocr_languages(cls, value: str) -> str:
+        """Reject an OCR language list with no usable entries.
+
+        Args:
+            value: The configured ``OCR_LANGUAGES`` value.
+
+        Returns:
+            The validated value, unchanged.
+
+        Raises:
+            ValueError: If no non-empty code remains after splitting.
+        """
+        if not any(part.strip() for part in value.split(",")):
+            raise ValueError("OCR_LANGUAGES must list at least one language code, e.g. 'en'")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_pdf_ocr(self) -> "Settings":
+        """Reject OCR-fallback trigger parameters outside their domains.
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If ``PDF_OCR_MIN_CHARS`` is negative or
+                ``PDF_OCR_TEXTLESS_PAGE_RATIO`` is not within ``[0.0, 1.0]``.
+        """
+        if self.PDF_OCR_MIN_CHARS < 0:
+            raise ValueError(
+                f"PDF_OCR_MIN_CHARS must be non-negative; got {self.PDF_OCR_MIN_CHARS}"
+            )
+        if not 0.0 <= self.PDF_OCR_TEXTLESS_PAGE_RATIO <= 1.0:
+            raise ValueError(
+                "PDF_OCR_TEXTLESS_PAGE_RATIO must be between 0.0 and 1.0; "
+                f"got {self.PDF_OCR_TEXTLESS_PAGE_RATIO}"
+            )
+        return self
 
     @field_validator("ALLOWED_EXTENSIONS")
     @classmethod

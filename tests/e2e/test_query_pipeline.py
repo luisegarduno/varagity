@@ -3,7 +3,9 @@
 Real pgvector Postgres **and** Elasticsearch via testcontainers (spec §15.1
 "e2e" row: real stores); deterministic fake embeddings (hashed bag-of-words,
 so lexically similar texts land near each other) and a scripted fake LLM
-stand in for the GPU services.
+stand in for the GPU services. PDF parsing runs for real (Docling + OCR on
+CPU — the corpus includes the Phase 7 fixture PDFs), so the first run
+downloads Docling/EasyOCR models.
 
 Select with ``pytest -m e2e`` (needs Docker).
 """
@@ -170,8 +172,9 @@ def test_walking_skeleton_ingest_to_grounded_answer(
         summary = ingest_corpus(
             str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
         )
-        assert summary.discovered == 3
-        assert summary.ingested == 3
+        assert summary.discovered == 7  # 3 text/md + 4 PDFs (Phase 7)
+        assert summary.ingested == 6
+        assert summary.no_text == 1  # blank_pages.pdf: nothing recoverable, 0-chunk row
         assert summary.failed == 0
         assert summary.chunks > 0
 
@@ -263,7 +266,7 @@ def test_contextualized_ingest_stores_blurbs_and_still_answers(
             llm=context_llm,  # type: ignore[arg-type]
             verbose=0,
         )
-        assert summary.ingested == 3
+        assert summary.ingested == 6
         assert summary.chunks > 0
         assert len(context_llm.prompts) == summary.chunks  # one LLM call per chunk
 
@@ -315,9 +318,10 @@ def test_second_run_is_idempotent_and_still_answers(
         second = ingest_corpus(
             str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
         )
-        assert first.ingested == 3
+        assert first.ingested == 6
         assert second.ingested == 0
-        assert second.skipped == 3
+        assert second.skipped == 6
+        assert second.no_text == 1  # the known-empty blank PDF re-warns, unparsed
         with Elasticsearch(es_url) as raw:  # skipped files were not re-indexed
             assert int(raw.count(index=BM25_INDEX)["count"]) == first.chunks
 
@@ -365,6 +369,61 @@ def test_rare_keyword_retrieved_via_bm25_and_hybrid(
         assert any("Pelican-9" in chunk.content for chunk in hybrid_chunks)
         # Fused scores are reciprocal-rank sums, bounded by the weight sum.
         assert all(0 < chunk.score <= 1.0 for chunk in hybrid_chunks)
+
+
+def test_pdf_facts_are_retrievable_and_answerable(
+    pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25
+) -> None:
+    """★ The Phase-7 milestone: PDF-only facts reach grounded answers.
+
+    A digital-PDF-only fact and a scanned-PDF-only fact both flow through
+    ingest → hybrid retrieval → grounded answer, with ``extraction``
+    provenance intact on the retrieved metadata.
+    """
+    embeddings = FakeEmbeddings()
+
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("TRUNCATE documents CASCADE")
+
+    with ContextualVectorDB(pg_conninfo) as store:
+        ingest_corpus(
+            str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
+        )
+        retriever = HybridRetriever(store=store, bm25=bm25_store, embeddings=embeddings)
+
+        # Digital PDF (fast path): the Saltmere ceilometer fact.
+        digital_answer = "Firefly measures up to 12,400 meters. [SOURCE]: saltmere_observatory.pdf"
+        llm = ScriptedLLM(digital_answer)
+        state = answer_query(
+            "How high can the Firefly ceilometer measure cloud-base height?",
+            retriever=retriever,
+            llm=llm,  # type: ignore[arg-type]
+            verbose=0,
+        )
+        digital_hits = [c for c in state["retrieved"] if "12,400 meters" in c.content]
+        assert digital_hits, "the digital-PDF ceilometer chunk was not retrieved"
+        assert digital_hits[0].metadata["file_type"] == "pdf"
+        assert digital_hits[0].metadata["extraction"] == "text"  # no OCR involved
+        assert digital_hits[0].metadata["page"] is not None
+        assert "12,400 meters" in llm.prompts[0]  # grounded, not parroted
+        assert state["answer"] == digital_answer
+
+        # Scanned PDF (OCR fallback): the Moorhen dredging fact.
+        scanned_answer = "Nine meters. [SOURCE]: moorhen_dredging_memo.pdf"
+        llm = ScriptedLLM(scanned_answer)
+        state = answer_query(
+            "What depth did the dredger Moorhen clear the harbor channel to?",
+            retriever=retriever,
+            llm=llm,  # type: ignore[arg-type]
+            verbose=0,
+        )
+        scanned_hits = [c for c in state["retrieved"] if "NINE METERS" in c.content.upper()]
+        assert scanned_hits, "the scanned-PDF dredging chunk was not retrieved"
+        assert scanned_hits[0].metadata["file_type"] == "pdf"
+        assert scanned_hits[0].metadata["extraction"] == "ocr_fallback"  # OCR provenance
+        assert "MOORHEN" in scanned_hits[0].content.upper()
+        assert "NINE METERS" in llm.prompts[0].upper()
+        assert state["answer"] == scanned_answer
 
 
 def test_all_three_retrieval_methods_answer(

@@ -318,17 +318,41 @@ def test_known_empty_file_rewarns_without_reparsing(
     assert any("no extractable text" in r.message for r in caplog.records)
 
 
-def test_pdfs_counted_unsupported_until_phase_7(
-    pinned_settings: None, corpus: Path, caplog: pytest.LogCaptureFixture
+def test_pdfs_route_to_the_registered_parser_with_provenance(
+    pinned_settings: None, corpus: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """PDFs are parsed since Phase 7, with provenance threaded to records.
+
+    The pdf bucket resolves a real parser (docling stubbed here), and its
+    ``extraction`` metadata reaches the stored ``ChunkRecord``s.
+    """
+    from varagity.ingest.parsers import PARSER_REGISTRY, RawDocument
+
+    class StubPdfParser:
+        def extract(self, path: Path, verbose: int | None = None) -> RawDocument:
+            return RawDocument(
+                text="Scanned page recovered by the OCR fallback, well past the guard. " * 2,
+                source_meta={
+                    "source": str(path.resolve()),
+                    "file_name": path.name,
+                    "file_type": "pdf",
+                    "page": 1,
+                    "extraction": "ocr_fallback",
+                },
+            )
+
+    monkeypatch.setitem(PARSER_REGISTRY, "pdf", StubPdfParser())
     (corpus / "paper.pdf").write_bytes(b"%PDF-1.4 fake")
     store = FakeStore()
-    with caplog.at_level(logging.WARNING):
-        summary = ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
+    summary = ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
+
     assert summary.discovered == 3
-    assert summary.ingested == 2
-    assert summary.unsupported == 1
-    assert any("no parser registered" in r.message for r in caplog.records)
+    assert summary.ingested == 3
+    assert summary.unsupported == 0
+    by_type = {record.file_type: record for record in store.records}
+    assert by_type["pdf"].extraction == "ocr_fallback"  # parser-provided provenance
+    assert by_type["pdf"].page == 1
+    assert by_type["md"].extraction == "text"  # everything else keeps the default
 
 
 def test_one_bad_file_does_not_abort_the_run(

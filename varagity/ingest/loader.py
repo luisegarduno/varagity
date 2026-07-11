@@ -301,6 +301,7 @@ def _ingest_file(
             file_name=path.name,
             file_type=file_type,
             page=chunk.metadata.get("page"),
+            extraction=chunk.metadata.get("extraction", "text"),
             content=chunk.page_content,
             context=contexts[chunk_index],
             chunk_size=settings.CHUNK_SIZE,

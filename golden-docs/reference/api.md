@@ -18,6 +18,8 @@ vertical slices are implemented.
 
 ::: varagity.ingest.parsers.text
 
+::: varagity.ingest.parsers.pdf
+
 ::: varagity.ingest.loader
 
 ## Chunking

@@ -123,6 +123,11 @@ services:
     env_file: .env
     volumes:
       - ./docs:/app/docs
+      # Model cache for PDF parsing, surviving rebuilds (one-time downloads):
+      # Docling's layout/table models land in ~/.cache/huggingface, EasyOCR
+      # weights are pinned under ~/.cache/docling/models/EasyOcr — one volume
+      # over ~/.cache covers both (verified at implementation, plan Phase 7).
+      - model_cache:/home/user/.cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -142,3 +147,4 @@ networks:
 volumes:
   pgdata:
   esdata:
+  model_cache:

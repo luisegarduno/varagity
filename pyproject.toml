@@ -5,6 +5,10 @@ description = "Full-stack RAG application with Contextual Retrieval — self-hos
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # PDF extraction (structure-aware markdown) + OCR fallback. The easyocr
+    # extra is required since docling 2.98 split OCR engines out of the
+    # standard bundle; tesseract needs only the system binary (Dockerfile).
+    "docling[easyocr]>=2.112.0",
     "elasticsearch>=9,<10",  # client major must match the ES server major (9.x ↔ 9.x)
     "httpx>=0.28.1",
     "langchain-core>=1.4.9",
@@ -16,6 +20,10 @@ dependencies = [
     "rich>=15.0.0",
     "tenacity>=9.1.4",
     "tiktoken>=0.13.0",
+    # Declared directly (not just via docling[easyocr]) so the [tool.uv.sources]
+    # CPU-wheel pin below applies — uv sources only bind to declared deps.
+    "torch>=2.6",
+    "torchvision>=0.21",
 ]
 
 [dependency-groups]
@@ -32,6 +40,18 @@ dev = [
     "ruff>=0.15.21",
     "testcontainers[elasticsearch,postgres]>=4.14.2",
 ]
+
+# v1 OCR runs on CPU (plan decision #10), so pull CPU-only torch wheels for
+# docling/EasyOCR — the default CUDA wheels add multiple GB to the venv/image
+# for GPU inference the app container can't use anyway.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.ruff]
 line-length = 100
