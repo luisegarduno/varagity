@@ -32,11 +32,23 @@ vertical slices are implemented.
 
 ::: varagity.models.embeddings
 
+::: varagity.models.llm
+
 ## Stores
 
 ::: varagity.stores.records
 
 ::: varagity.stores.vector_store
+
+## Retrieval
+
+::: varagity.retrieval.base
+
+::: varagity.retrieval.semantic
+
+## Generation
+
+::: varagity.generation.answer
 
 ## CLI & debug output
 

@@ -5,8 +5,16 @@ from pathlib import Path
 import pytest
 from langchain_core.documents import Document
 
-from varagity.debug.show import VERBOSE_LEVELS, check_verbose, console, v_chunk, v_discover
+from varagity.debug.show import (
+    VERBOSE_LEVELS,
+    check_verbose,
+    console,
+    v_chunk,
+    v_discover,
+    v_retrieve,
+)
 from varagity.ingest.discovery import Buckets
+from varagity.stores.records import RetrievedChunk
 
 
 def test_supported_levels_are_0_1_2() -> None:
@@ -95,3 +103,49 @@ class TestVChunk:
         with console.capture() as capture:
             v_chunk([], verbose=2)
         assert capture.get() == ""
+
+
+class TestVRetrieve:
+    def _chunks(self, *, context: str | None = None) -> list[RetrievedChunk]:
+        return [
+            RetrievedChunk(
+                chunk_id=f"docaaa000000000a::{i}",
+                doc_id="docaaa000000000a",
+                original_index=i,
+                content=f"retrieved body {i}",
+                context=context,
+                metadata={"source": "/docs/a.md", "file_name": "a.md", "page": None},
+                score=0.91 - i / 10,
+            )
+            for i in range(2)
+        ]
+
+    def test_level_0_renders_nothing(self) -> None:
+        with console.capture() as capture:
+            v_retrieve(self._chunks(), verbose=0)
+        assert capture.get() == ""
+
+    def test_level_1_shows_count_only(self) -> None:
+        with console.capture() as capture:
+            v_retrieve(self._chunks(), verbose=1)
+        out = capture.get()
+        assert "2 chunk(s)" in out
+        assert "retrieved body 0" not in out  # panels are level 2
+
+    def test_level_2_renders_score_source_content_panels(self) -> None:
+        with console.capture() as capture:
+            v_retrieve(self._chunks(), verbose=2)
+        out = capture.get()
+        assert "retrieved body 0" in out
+        assert "retrieved body 1" in out
+        assert "0.9100" in out
+        assert "/docs/a.md" in out
+
+    def test_level_2_shows_context_when_present(self) -> None:
+        with console.capture() as capture:
+            v_retrieve(self._chunks(context="situating blurb"), verbose=2)
+        assert "situating blurb" in capture.get()
+
+    def test_invalid_level_raises(self) -> None:
+        with pytest.raises(ValueError, match="verbose"):
+            v_retrieve(self._chunks(), verbose=3)

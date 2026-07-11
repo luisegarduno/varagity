@@ -21,7 +21,7 @@ Concrete ``v_<name>`` helpers land alongside the features they render.
 
 from typing import TYPE_CHECKING
 
-from rich.console import Console
+from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text
 
@@ -31,6 +31,7 @@ if TYPE_CHECKING:  # imported for annotations only — avoids a runtime cycle
     from langchain_core.documents import Document
 
     from varagity.ingest.discovery import Buckets
+    from varagity.stores.records import RetrievedChunk
 
 VERBOSE_LEVELS: tuple[int, ...] = (0, 1, 2)
 
@@ -80,6 +81,42 @@ def v_discover(buckets: "Buckets", verbose: int) -> None:
         for bucket_name, paths in (("text_like", buckets.text_like), ("pdf", buckets.pdf)):
             for path in paths:
                 console.print(f"  [dim]{bucket_name}[/dim] {path}")
+
+
+def v_retrieve(chunks: "Sequence[RetrievedChunk]", verbose: int) -> None:
+    """Render retrieval results (for a retriever's ``retrieve``).
+
+    Mirrors the reference's ``v_retrieve_docs``: at level 2 each retrieved
+    chunk becomes a panel with its score, source, content, and — once Phase 5
+    populates it — situating context.
+
+    Args:
+        chunks: The retrieved chunks, best first.
+        verbose: 0 = nothing; 1 = retrieved count; 2 = a panel per chunk
+            (score/source/content/context).
+
+    Raises:
+        ValueError: If ``verbose`` is invalid.
+    """
+    check_verbose(verbose)
+    if verbose == 0:
+        return
+    console.print(f"[bold]Retrieved[/] {len(chunks)} chunk(s)")
+    if verbose == 2:
+        for rank, chunk in enumerate(chunks, start=1):
+            source = str(chunk.metadata.get("source", "<unknown>"))
+            page = chunk.metadata.get("page")
+            body: RenderableType = Text(chunk.content)
+            if chunk.context:
+                body = Group(Panel(Text(chunk.context), title="context", style="dim"), body)
+            console.print(
+                Panel(
+                    body,
+                    title=f"match {rank} · score {chunk.score:.4f} · {chunk.chunk_id}",
+                    subtitle=source if page is None else f"{source} · page {page}",
+                    subtitle_align="left",
+                )
+            )
 
 
 def v_chunk(chunks: "Sequence[Document]", verbose: int) -> None:

@@ -21,11 +21,17 @@ SETTINGS_ENV_VARS = (
     "EMBEDDING_DIM",
     "EMBEDDING_BATCH_SIZE",
     "BASE_MODEL",
+    "BASE_MODEL_API_URL",
+    "BASE_MODEL_API_KEY",
+    "MAX_TOKENS",
+    "LLM_TEMPERATURE",
     "POSTGRES_HOST",
     "POSTGRES_PORT",
     "POSTGRES_DB",
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
+    "RETRIEVAL_METHOD",
+    "TOP_K",
 )
 
 
@@ -55,6 +61,12 @@ def test_defaults_load() -> None:
     assert settings.EMBEDDING_API_URL == "http://infinity-embeddings:8081/v1"
     assert settings.EMBEDDING_DIM == 1024
     assert settings.EMBEDDING_BATCH_SIZE == 32
+    assert settings.BASE_MODEL_API_URL == "http://llamacpp:8080/v1"
+    assert settings.BASE_MODEL_API_KEY == "none"
+    assert settings.MAX_TOKENS == 8192
+    assert settings.LLM_TEMPERATURE == 0.6
+    assert settings.RETRIEVAL_METHOD == "semantic"  # flips to hybrid in Phase 6
+    assert settings.TOP_K == 10
 
 
 class TestAllowedExtensionSet:
@@ -76,10 +88,42 @@ class TestSizeValidation:
         with pytest.raises(ValidationError, match="CHUNK_OVERLAP"):
             Settings(_env_file=None, CHUNK_OVERLAP=-1)
 
-    @pytest.mark.parametrize("field", ["CHUNK_SIZE", "EMBEDDING_DIM", "EMBEDDING_BATCH_SIZE"])
+    @pytest.mark.parametrize(
+        "field",
+        ["CHUNK_SIZE", "EMBEDDING_DIM", "EMBEDDING_BATCH_SIZE", "MAX_TOKENS", "TOP_K"],
+    )
     def test_positive_sizes_enforced(self, field: str) -> None:
         with pytest.raises(ValidationError, match=field):
             Settings(_env_file=None, **{field: 0})
+
+
+class TestRetrievalMethodValidation:
+    @pytest.mark.parametrize("method", ["semantic", "bm25", "hybrid"])
+    def test_spec_vocabulary_accepted(self, method: str) -> None:
+        """All three spec §10.1 values pass config validation.
+
+        Registration of bm25/hybrid is a Phase 6 concern, enforced at
+        lookup time by ``get_retriever``.
+        """
+        settings = Settings(_env_file=None, RETRIEVAL_METHOD=method)
+        assert method == settings.RETRIEVAL_METHOD
+
+    @pytest.mark.parametrize("bad", ["keyword", "SEMANTIC", "", "hybrid "])
+    def test_unknown_method_fails_fast(self, bad: str) -> None:
+        with pytest.raises(ValidationError, match="RETRIEVAL_METHOD"):
+            Settings(_env_file=None, RETRIEVAL_METHOD=bad)
+
+
+class TestLLMTemperatureValidation:
+    @pytest.mark.parametrize("temperature", [0.0, 0.6, 2.0])
+    def test_in_range_accepted(self, temperature: float) -> None:
+        settings = Settings(_env_file=None, LLM_TEMPERATURE=temperature)
+        assert temperature == settings.LLM_TEMPERATURE
+
+    @pytest.mark.parametrize("temperature", [-0.1, 2.1, 100.0])
+    def test_out_of_range_fails_fast(self, temperature: float) -> None:
+        with pytest.raises(ValidationError, match="LLM_TEMPERATURE"):
+            Settings(_env_file=None, LLM_TEMPERATURE=temperature)
 
 
 def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

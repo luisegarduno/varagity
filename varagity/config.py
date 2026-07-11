@@ -43,11 +43,20 @@ class Settings(BaseSettings):
         EMBEDDING_BATCH_SIZE: Number of passages sent per embeddings request.
         BASE_MODEL: Filename of the llama.cpp ``.gguf`` model, relative to the
             bind-mounted ``${models_volume}`` directory.
+        BASE_MODEL_API_URL: OpenAI-compatible base URL of the llama.cpp server.
+        BASE_MODEL_API_KEY: Bearer token for the llama.cpp server (it runs
+            unauthenticated in v1, but the OpenAI client requires a value).
+        MAX_TOKENS: Generation cap per LLM response.
+        LLM_TEMPERATURE: Sampling temperature for LLM responses.
         POSTGRES_HOST: PostgreSQL host (service name in-container).
         POSTGRES_PORT: PostgreSQL port.
         POSTGRES_DB: PostgreSQL database name.
         POSTGRES_USER: PostgreSQL user.
         POSTGRES_PASSWORD: PostgreSQL password (dev-only static credential).
+        RETRIEVAL_METHOD: Registry name of the retrieval method (spec §10.1:
+            ``semantic`` | ``bm25`` | ``hybrid``). Defaults to ``semantic``
+            until hybrid lands in Phase 6.
+        TOP_K: Number of chunks retrieved per query.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -69,12 +78,20 @@ class Settings(BaseSettings):
     EMBEDDING_BATCH_SIZE: int = 32
 
     BASE_MODEL: str = "Qwythos-9B-Claude-Mythos-5-1M-Q8_0.gguf"
+    BASE_MODEL_API_URL: str = "http://llamacpp:8080/v1"
+    BASE_MODEL_API_KEY: str = "none"
+    MAX_TOKENS: int = 8192
+    LLM_TEMPERATURE: float = 0.6
 
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "varagity"
     POSTGRES_USER: str = "varagity"
     POSTGRES_PASSWORD: str = "change-me"
+
+    # Temporary default — flips to "hybrid" when Phase 6 lands it (plan §4).
+    RETRIEVAL_METHOD: str = "semantic"
+    TOP_K: int = 10
 
     @property
     def allowed_extension_set(self) -> frozenset[str]:
@@ -120,12 +137,12 @@ class Settings(BaseSettings):
             The validated settings instance.
 
         Raises:
-            ValueError: If ``CHUNK_SIZE``, ``EMBEDDING_DIM``, or
-                ``EMBEDDING_BATCH_SIZE`` is not positive, if ``CHUNK_OVERLAP``
-                is negative, or if ``CHUNK_OVERLAP`` is not smaller than
-                ``CHUNK_SIZE``.
+            ValueError: If ``CHUNK_SIZE``, ``EMBEDDING_DIM``,
+                ``EMBEDDING_BATCH_SIZE``, ``MAX_TOKENS``, or ``TOP_K`` is not
+                positive, if ``CHUNK_OVERLAP`` is negative, or if
+                ``CHUNK_OVERLAP`` is not smaller than ``CHUNK_SIZE``.
         """
-        for name in ("CHUNK_SIZE", "EMBEDDING_DIM", "EMBEDDING_BATCH_SIZE"):
+        for name in ("CHUNK_SIZE", "EMBEDDING_DIM", "EMBEDDING_BATCH_SIZE", "MAX_TOKENS", "TOP_K"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive; got {getattr(self, name)}")
         if self.CHUNK_OVERLAP < 0:
@@ -136,6 +153,48 @@ class Settings(BaseSettings):
                 f"CHUNK_SIZE ({self.CHUNK_SIZE})"
             )
         return self
+
+    @field_validator("RETRIEVAL_METHOD")
+    @classmethod
+    def _validate_retrieval_method(cls, value: str) -> str:
+        """Reject retrieval methods outside the spec §10.1 vocabulary.
+
+        Membership in the vocabulary is validated here; whether the method is
+        *registered yet* (``bm25``/``hybrid`` land in Phase 6) is enforced by
+        :func:`varagity.retrieval.get_retriever` at lookup time.
+
+        Args:
+            value: The configured ``RETRIEVAL_METHOD`` value.
+
+        Returns:
+            The validated value, unchanged.
+
+        Raises:
+            ValueError: If ``value`` is not ``semantic``, ``bm25``, or
+                ``hybrid``.
+        """
+        allowed = ("semantic", "bm25", "hybrid")
+        if value not in allowed:
+            raise ValueError(f"RETRIEVAL_METHOD must be one of {allowed}; got {value!r}")
+        return value
+
+    @field_validator("LLM_TEMPERATURE")
+    @classmethod
+    def _validate_llm_temperature(cls, value: float) -> float:
+        """Reject sampling temperatures outside the OpenAI-compatible range.
+
+        Args:
+            value: The configured ``LLM_TEMPERATURE`` value.
+
+        Returns:
+            The validated value, unchanged.
+
+        Raises:
+            ValueError: If ``value`` is not within ``[0.0, 2.0]``.
+        """
+        if not 0.0 <= value <= 2.0:
+            raise ValueError(f"LLM_TEMPERATURE must be between 0.0 and 2.0; got {value}")
+        return value
 
     @field_validator("DEFAULT_VERBOSE")
     @classmethod
