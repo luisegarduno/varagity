@@ -67,6 +67,17 @@ citing its `[SOURCE]`. `:quit` exits.
 `depends_on: condition: service_healthy` on all five services, and `--wait`
 honors the healthchecks. What "healthy" means per service:
 
+```mermaid
+flowchart LR
+    llamacpp["llamacpp<br/>curl /health"] --> gate
+    infinity["infinity-embeddings<br/>curl /health"] --> gate
+    postgres["postgres<br/>pg_isready"] --> gate
+    elasticsearch["elasticsearch<br/>curl /_cluster/health"] --> gate
+    prefect["prefect<br/>urllib /api/health"] --> gate
+    gate{{"all 5 healthchecks green<br/>(docker compose up --wait blocks here)"}} --> app["app starts<br/>depends_on: service_healthy"]
+```
+
+
 | Service | Probe | Semantics to know |
 |---|---|---|
 | `llamacpp` | `curl /health` | Returns **503 while the model loads** (~30 s for the current 9B `.gguf`); the generous `retries: 20` covers it. Also unprioritized under load — a busy server can look slow to probe. |
@@ -205,6 +216,19 @@ when a document yields < `PDF_OCR_MIN_CHARS` non-whitespace chars, has
 ≥ `PDF_OCR_TEXTLESS_PAGE_RATIO` textless pages, or pass 1 raised. Chunks
 recovered this way carry `extraction: "ocr_fallback"` provenance
 (`SELECT ... WHERE metadata->>'extraction' = 'ocr_fallback'`).
+
+```mermaid
+flowchart TB
+    pdf[("PDF")] --> force{"PDF_OCR_FORCE_FULL_PAGE?"}
+    force -->|"yes · corrupt text layer"| p2
+    force -->|no| p1["Pass 1 · Docling do_ocr=false<br/>(fast text-layer extraction)"]
+    p1 --> trig{"trigger OCR?<br/>chars &lt; PDF_OCR_MIN_CHARS<br/>OR textless ratio ≥ PDF_OCR_TEXTLESS_PAGE_RATIO<br/>OR pass 1 raised"}
+    trig -->|no| ok["chunks<br/>extraction: text"]
+    trig -->|yes| p2["Pass 2 · Docling do_ocr=true<br/>OCR_ENGINE: easyocr | tesseract"]
+    p2 --> got{"recovered any text?"}
+    got -->|yes| okocr["chunks<br/>extraction: ocr_fallback"]
+    got -->|no| guard["empty-extraction guard<br/>0-chunk documents row + warning<br/>(never a silent drop)"]
+```
 
 - Engines: `OCR_ENGINE=easyocr` (default — ADR-004) or `tesseract`. CPU-only
   by design in v1; throughput measured at ~0.10 pages/s (EasyOCR) vs ~0.55

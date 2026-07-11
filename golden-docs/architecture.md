@@ -15,26 +15,28 @@ Six services, one network (`varagity-net`). The Python **app** is a client of
 every backing service and holds all pipeline logic; the services never talk to
 each other.
 
-```
-                        docker compose network: varagity-net
- ┌────────────────────────────────────────────────────────────────────────────┐
- │  ┌───────────────────┐  ┌──────────────────────┐  ┌───────────────────────┐│
- │  │ llamacpp           │  │ infinity-embeddings  │  │ postgres              ││
- │  │ LLM (GPU 0)        │  │ e5 + reranker (GPU 1)│  │ pgvector/pg16         ││
- │  │ :8080 /v1          │  │ :8081 /v1            │  │ :5432                 ││
- │  └─────────▲─────────┘  └──────────▲───────────┘  └───────────▲───────────┘│
- │            │ chat/contextualize    │ embed (+rerank, staged)  │ vectors +  │
- │            │                       │                          │ metadata   │
- │  ┌─────────┴───────────────────────┴──────────────────────────┴──────────┐ │
- │  │                          app (Python / uv)                            │ │
- │  │        ingest flow + query flow + eval flows (Prefect-tracked)        │ │
- │  └─────────┬──────────────────────────────────────────────┬─────────────┘ │
- │            │ BM25 index/search                             │ flow/task     │
- │  ┌─────────▼─────────┐                          ┌─────────▼─────────┐     │
- │  │ elasticsearch      │                          │ prefect            │     │
- │  │ BM25 :9200         │                          │ API/UI :4200       │     │
- │  └───────────────────┘                          └───────────────────┘     │
- └────────────────────────────────────────────────────────────────────────────┘
+Every arrow starts at `app`: it is the sole client, and the services never
+talk to each other.
+
+```mermaid
+flowchart TB
+    subgraph net["docker compose network · varagity-net"]
+        llamacpp["llamacpp · GPU 0<br/>chat LLM — answers + blurbs<br/>:8080/v1"]
+        infinity["infinity-embeddings · GPU 1<br/>e5 embeddings + reranker (staged)<br/>:8081/v1"]
+        postgres[("postgres · pgvector/pg16<br/>dense vectors + canonical metadata<br/>:5432")]
+        elasticsearch[("elasticsearch<br/>contextual BM25 index<br/>:9200")]
+        prefect["prefect<br/>flow / task run tracking · UI<br/>:4200"]
+        app["app · Python / uv<br/>ingest + query + eval flows<br/>(holds all pipeline logic)"]
+
+        app -->|"chat · contextualize"| llamacpp
+        app -->|"embed (+ rerank, staged)"| infinity
+        app -->|"vectors + metadata"| postgres
+        app -->|"BM25 index / search"| elasticsearch
+        app -->|"flow / task runs"| prefect
+    end
+
+    classDef emphasis stroke-width:3px;
+    class app emphasis;
 ```
 
 | Service | Image | Role | GPU |
@@ -79,7 +81,32 @@ content`) — the measured non-contextual baseline of the
 ## The two pipelines
 
 Both live in the app and are Prefect-tracked (task graphs in
-[Pipelines](pipelines.md)):
+[Pipelines](pipelines.md)). At the system level they meet at the two stores —
+ingest writes both, query reads both:
+
+```mermaid
+flowchart LR
+    corpus[("docs/ corpus<br/>PDF · txt · md")]
+
+    subgraph ingest["Ingestion (idempotent per file)"]
+        direction LR
+        parse["parse<br/>(PDF: two-pass OCR)"] --> chunk[chunk] --> ctx[contextualize] --> iembed[embed]
+    end
+
+    corpus --> parse
+    iembed --> pg[("pgvector<br/>vectors + metadata")]
+    iembed --> es[("Elasticsearch<br/>contextual BM25")]
+
+    subgraph query["Query (RETRIEVAL_METHOD)"]
+        direction LR
+        retrieve["retrieve<br/>semantic · bm25 · hybrid"] --> generate["generate<br/>grounded + cited"]
+    end
+
+    question(["question"]) --> retrieve
+    pg --> retrieve
+    es --> retrieve
+    generate --> answer(["cited answer"])
+```
 
 - **Ingestion** — `discover → parse → chunk → contextualize → embed →
   store(pgvector + Elasticsearch)`. Idempotent per file (byte-hash keyed);
@@ -112,6 +139,20 @@ original_index = global monotonic chunk counter across the corpus        (fusion
 - A unique index `chunks(doc_id, original_index)` enforces the identity in
   PostgreSQL so ingest bugs surface as constraint violations, not silent
   retrieval weirdness.
+
+Hybrid retrieval is where the composite key earns its keep — two independent
+ranked lists fuse and dedupe on it, then full rows are hydrated from pgvector:
+
+```mermaid
+flowchart TB
+    q(["query"]) --> enc["encode_query · e5 query mode"]
+    enc --> sem["semantic arm · pgvector<br/>cosine top-k → ranked identities"]
+    q --> bm["bm25 arm · Elasticsearch<br/>BM25 top-k → identities + text only"]
+    sem --> fuse["weighted RRF fusion<br/>score += weight · 1/(rank+1)<br/>dedupe on (doc_id, original_index)"]
+    bm --> fuse
+    fuse --> hydrate["hydrate full rows from pgvector<br/>fetch_by_identity — the single metadata source"]
+    hydrate --> topk(["top-k chunks · fused score ≤ 1.0"])
+```
 
 ## Modularity: the registry pattern
 

@@ -26,18 +26,25 @@ or without Prefect.
 
 ## Ingestion flow (`ingest`)
 
+```mermaid
+flowchart TB
+    start(["ingest_flow(docs_path)"]) --> discover["discover_documents<br/>bucket files by parser family — §9.1"]
+    discover --> loop{{"for each file"}}
+    loop --> skip{"unchanged?<br/>(doc_id, content_hash)<br/>already in documents"}
+    skip -->|"yes · skip before parse"| loop
+    skip -->|no| parse["parse_document<br/>text extraction · PDF two-pass OCR — §9.2"]
+    parse --> chunk["chunk_document<br/>recursive_character 400/50 chars — §9.3"]
+    chunk --> ctx["contextualize_chunks<br/>LLM situating blurb per chunk — §9.4"]
+    ctx --> embed["embed_chunks<br/>e5 passage mode, batched — §9.5"]
+    embed --> store["store_chunks<br/>ES bulk first, then pg txn — §9.6"]
+    store --> loop
+
+    classDef retry stroke-width:3px,stroke-dasharray:4 3;
+    class ctx,embed,store retry;
 ```
-ingest_flow(docs_path)
-│
-├── discover_documents ──────────── bucket files by parser family (§9.1)
-│
-└── for each file:                              (skip-unchanged check first)
-    ├── parse_document ──────────── text extraction; PDF two-pass OCR (§9.2)
-    ├── chunk_document ──────────── recursive_character 400/50 chars  (§9.3)
-    ├── contextualize_chunks ────── LLM situating blurb per chunk     (§9.4)   retries=2
-    ├── embed_chunks ────────────── e5 passage mode, batched          (§9.5)   retries=2
-    └── store_chunks ────────────── ES bulk first, then pg txn        (§9.6)   retries=2
-```
+
+The three model/store stages (dashed border) carry Prefect `retries=2`;
+discovery/parse/chunk are local and deterministic, so they carry none (below).
 
 - **One orchestration loop.** The loader (`varagity/ingest/loader.py`) owns
   the loop — idempotency skip, empty-extraction guard, per-file failure
@@ -63,12 +70,16 @@ ingest_flow(docs_path)
 
 ## Query flow (`query`)
 
-```
-query_flow(query)
-├── embed_query ─────────────── retriever.encode_query()  (None for bm25)
-├── retrieve ────────────────── top-k via semantic | bm25 | hybrid
-│     └─(hook)─ matches table rendered by the CLI
-└── generate_answer ─────────── grounded, cited answer (spec §10.2 prompt)
+```mermaid
+flowchart TB
+    start(["query_flow(query)"]) --> embed["embed_query<br/>retriever.encode_query() — None for bm25"]
+    embed --> retrieve["retrieve<br/>top-k via semantic | bm25 | hybrid"]
+    retrieve -.->|hook| matches["matches table<br/>rendered by the CLI"]
+    retrieve --> generate["generate_answer<br/>grounded, cited answer — §10.2 prompt"]
+    generate --> state(["state dict — §10.1<br/>{query, query_vector, retrieved,<br/>formatted_context, answer}"])
+
+    classDef sidecar stroke-dasharray:4 3;
+    class matches sidecar;
 ```
 
 Returns the spec §10.1 state dict:
@@ -101,6 +112,24 @@ task runs.
   ADR-004 — per engine: CER/WER against the fixtures' known ground truth,
   pages/sec, and (supplementary) retrieval recall on the scanned-doc golden
   queries with the engine as the only variable.
+
+How `eval-matrix` covers all four configs with only two ingests into the
+throwaway stores:
+
+```mermaid
+flowchart LR
+    gpu["live GPU services<br/>embeddings + contextualizing LLM<br/>(stateless — never touch the live corpus)"]
+
+    subgraph tc["ephemeral testcontainers · pg + ES (ADR-003)"]
+        A["ingest A<br/>CONTEXTUALIZE=false"] --> c1["config 1<br/>semantic non-contextual"]
+        B["ingest B<br/>CONTEXTUALIZE=true, reingest"] --> c2["config 2 · semantic contextual"]
+        B --> c3["config 3 · contextual BM25"]
+        B --> c4["config 4 · hybrid contextual"]
+    end
+
+    gpu -.-> A
+    gpu -.-> B
+```
 
 Results are rendered as `rich` tables and persisted as timestamped JSON under
 `data/eval/results/` (gitignored) for regression comparison. Metric

@@ -35,7 +35,15 @@ markdown_extensions:
   - toc:
       permalink: true
   - tables
-  - fenced_code
+  # pymdownx.superfences supersedes the stdlib `fenced_code` (it renders the
+  # same ```lang blocks) and adds the `mermaid` custom fence. Material bundles
+  # Mermaid.js and re-themes diagrams on the light/slate palette toggle when it
+  # sees this exact fence config — no plugin or extra dependency required.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
 
 plugins:
   - search

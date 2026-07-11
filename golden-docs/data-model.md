@@ -66,6 +66,31 @@ per-chunk page attribution has no data path yet. A future chunker with
 directory). Reset with `docker compose down -v` (see the
 [runbook](runbook.md#volumes-and-resets)).
 
+```mermaid
+erDiagram
+    documents ||--o{ chunks : "doc_id · ON DELETE CASCADE"
+    documents {
+        text doc_id PK "sha256(rel_path:content_hash)[:16]"
+        text source
+        text file_type
+        text content_hash
+        int n_chunks "0 = seen but textless"
+        timestamptz ingested_at
+    }
+    chunks {
+        text chunk_id PK "doc_id::chunk_index"
+        text doc_id FK
+        int original_index UK "UNIQUE(doc_id, original_index) — fusion key"
+        int chunk_index
+        text content "original"
+        text context "situating blurb · nullable"
+        text contextualized_content "embedded + BM25-indexed text"
+        vector1024 embedding "cosine HNSW"
+        jsonb metadata "full ChunkRecord"
+        timestamptz created_at
+    }
+```
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -173,6 +198,24 @@ Notes:
   `chunk_id`-addressed ES bulk then overwrites rather than duplicates).
 - Removing a file from `docs/` does **not** remove its chunks in v1 (no
   corpus GC beyond `--reingest`).
+
+The write ordering that makes the `documents` row a reliable idempotency
+marker — sparse store first, transactional store last:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant L as loader.store_chunks
+    participant ES as Elasticsearch
+    participant PG as pgvector
+    L->>ES: bulk index chunks (addressed by chunk_id)
+    Note right of ES: overwrite, never duplicate
+    L->>PG: BEGIN
+    L->>PG: upsert documents row + chunks (ON CONFLICT DO UPDATE)
+    L->>PG: COMMIT
+    Note right of PG: documents row = idempotency marker
+    Note over L,PG: crash before COMMIT ⇒ no marker ⇒ file re-attempted next run<br/>(the chunk_id-addressed ES bulk already overwrote, so nothing duplicates)
+```
 
 ## Golden eval dataset
 

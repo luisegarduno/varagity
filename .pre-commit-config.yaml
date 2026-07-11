@@ -7,7 +7,11 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+      # --unsafe: syntax-only check. mkdocs.yml carries a `!!python/name:...`
+      # tag (the Material mermaid fence formatter) that the safe loader can't
+      # construct; --unsafe still catches genuine YAML syntax errors.
       - id: check-yaml
+        args: [--unsafe]
       - id: check-toml
       - id: check-added-large-files
       - id: check-merge-conflict
