@@ -31,6 +31,30 @@ class TestLoadGolden:
         assert entries[1].relevant[1].rel_source == "b.txt"
         assert entries[1].relevant[1].chunk_index == 2
 
+    def test_fact_field_is_optional_and_parsed(self, tmp_path: Path) -> None:
+        path = _write_golden(
+            tmp_path,
+            '{"query": "q", "relevant": [{"rel_source": "a.md", "chunk_index": 0, '
+            '"fact": "1.8-kilometer"}, {"rel_source": "b.txt", "chunk_index": 1}]}',
+        )
+        entry = load_golden(path)[0]
+        assert entry.relevant[0].fact == "1.8-kilometer"
+        assert entry.relevant[1].fact is None
+
+    def test_empty_fact_fails_validation(self, tmp_path: Path) -> None:
+        path = _write_golden(
+            tmp_path,
+            '{"query": "q", "relevant": [{"rel_source": "a.md", "chunk_index": 0, "fact": ""}]}',
+        )
+        with pytest.raises(ValueError, match="invalid golden entry"):
+            load_golden(path)
+
+    def test_shipped_golden_set_carries_a_fact_on_every_ref(self) -> None:
+        """The chunker sweep depends on every ref being content-anchored."""
+        for entry in load_golden(GOLDEN_PATH):
+            for ref in entry.relevant:
+                assert ref.fact, f"{entry.query!r} has a fact-less ref ({ref.rel_source})"
+
     def test_blank_lines_are_skipped(self, tmp_path: Path) -> None:
         path = _write_golden(tmp_path, VALID_LINE, "", "   ", VALID_LINE)
         assert len(load_golden(path)) == 2

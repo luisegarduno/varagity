@@ -1,20 +1,20 @@
-{"query": "At what depth is the Aurora research station anchored?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 0}]}
-{"query": "How much power does the Lantern micro-reactor produce at peak output?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 1}]}
-{"query": "How long can the backup batteries keep the underwater station running if its reactor goes offline?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 1}]}
-{"query": "Who is the lead scientist of the GLASS EEL project?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 2}]}
-{"query": "How much cargo can the Pelican-9 carry per run?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 3}]}
-{"query": "How often does the deep-sea station receive resupply, and from which port?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 3}]}
-{"query": "How much does a Brinewing maintenance drone weigh?", "relevant": [{"rel_source": "glossary.md", "chunk_index": 0}]}
-{"query": "How many underwater turbines does the Corvo Tidal Grid consist of, and what are its arrays called?", "relevant": [{"rel_source": "tidal_grid.txt", "chunk_index": 0}]}
-{"query": "How much energy does the tidal grid deliver per day at spring tide?", "relevant": [{"rel_source": "tidal_grid.txt", "chunk_index": 1}]}
-{"query": "Who is the chief engineer of the Corvo Tidal Grid?", "relevant": [{"rel_source": "tidal_grid.txt", "chunk_index": 2}]}
-{"query": "How long is the kelp corridor between the Bruma and Cinza arrays?", "relevant": [{"rel_source": "tidal_grid.txt", "chunk_index": 2}]}
-{"query": "What is a kelp corridor, and where is one deployed?", "relevant": [{"rel_source": "glossary.md", "chunk_index": 0}, {"rel_source": "tidal_grid.txt", "chunk_index": 2}]}
-{"query": "When was the Saltmere Coastal Observatory commissioned and what does it monitor?", "relevant": [{"rel_source": "saltmere_observatory.pdf", "chunk_index": 0}]}
-{"query": "How high can the Firefly ceilometer measure cloud-base height?", "relevant": [{"rel_source": "saltmere_observatory.pdf", "chunk_index": 1}]}
-{"query": "What is the calibration interval of the observatory's salinity probe?", "relevant": [{"rel_source": "saltmere_observatory.pdf", "chunk_index": 2}]}
-{"query": "How many terabytes of lidar returns does the observatory archive each winter?", "relevant": [{"rel_source": "saltmere_observatory.pdf", "chunk_index": 3}]}
-{"query": "To what depth did the dredger Moorhen clear the harbor approach channel?", "relevant": [{"rel_source": "moorhen_dredging_memo.pdf", "chunk_index": 0}]}
-{"query": "How many barge loads of silt were removed from the turning basin?", "relevant": [{"rel_source": "moorhen_dredging_memo.pdf", "chunk_index": 0}]}
-{"query": "How long is the Halcyon Breakwater and when was it completed?", "relevant": [{"rel_source": "breakwater_survey.pdf", "chunk_index": 0}]}
-{"query": "How many anchor blocks did divers count along the north face of the breakwater?", "relevant": [{"rel_source": "breakwater_survey.pdf", "chunk_index": 1}]}
+{"query": "At what depth is the Aurora research station anchored?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 0, "fact": "2,847 meters"}]}
+{"query": "How much power does the Lantern micro-reactor produce at peak output?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 1, "fact": "4.2 megawatts"}]}
+{"query": "How long can the backup batteries keep the underwater station running if its reactor goes offline?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 1, "fact": "96 hours"}]}
+{"query": "Who is the lead scientist of the GLASS EEL project?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 2, "fact": "Imogen Vasquez-Thorn"}]}
+{"query": "How much cargo can the Pelican-9 carry per run?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 3, "fact": "3.5 tonnes"}]}
+{"query": "How often does the deep-sea station receive resupply, and from which port?", "relevant": [{"rel_source": "aurora_station.md", "chunk_index": 3, "fact": "Puerto Williams"}]}
+{"query": "How much does a Brinewing maintenance drone weigh?", "relevant": [{"rel_source": "glossary.md", "chunk_index": 0, "fact": "19 kilograms"}]}
+{"query": "How many underwater turbines does the Corvo Tidal Grid consist of, and what are its arrays called?", "relevant": [{"rel_source": "tidal_grid.txt", "chunk_index": 0, "fact": "87 underwater turbines"}]}
+{"query": "How much energy does the tidal grid deliver per day at spring tide?", "relevant": [{"rel_source": "tidal_grid.txt", "chunk_index": 1, "fact": "310 megawatt-hours"}]}
+{"query": "Who is the chief engineer of the Corvo Tidal Grid?", "relevant": [{"rel_source": "tidal_grid.txt", "chunk_index": 2, "fact": "Rosa Andrade Peixoto"}]}
+{"query": "How long is the kelp corridor between the Bruma and Cinza arrays?", "relevant": [{"rel_source": "tidal_grid.txt", "chunk_index": 2, "fact": "1.8-kilometer"}]}
+{"query": "What is a kelp corridor, and where is one deployed?", "relevant": [{"rel_source": "glossary.md", "chunk_index": 0, "fact": "dampen turbulence"}, {"rel_source": "tidal_grid.txt", "chunk_index": 2, "fact": "1.8-kilometer"}]}
+{"query": "When was the Saltmere Coastal Observatory commissioned and what does it monitor?", "relevant": [{"rel_source": "saltmere_observatory.pdf", "chunk_index": 0, "fact": "in 2017"}]}
+{"query": "How high can the Firefly ceilometer measure cloud-base height?", "relevant": [{"rel_source": "saltmere_observatory.pdf", "chunk_index": 1, "fact": "12,400 meters"}]}
+{"query": "What is the calibration interval of the observatory's salinity probe?", "relevant": [{"rel_source": "saltmere_observatory.pdf", "chunk_index": 2, "fact": "SC-377"}]}
+{"query": "How many terabytes of lidar returns does the observatory archive each winter?", "relevant": [{"rel_source": "saltmere_observatory.pdf", "chunk_index": 3, "fact": "7.3 terabytes"}]}
+{"query": "To what depth did the dredger Moorhen clear the harbor approach channel?", "relevant": [{"rel_source": "moorhen_dredging_memo.pdf", "chunk_index": 0, "fact": "nine meters"}]}
+{"query": "How many barge loads of silt were removed from the turning basin?", "relevant": [{"rel_source": "moorhen_dredging_memo.pdf", "chunk_index": 0, "fact": "sixty two barge loads"}]}
+{"query": "How long is the Halcyon Breakwater and when was it completed?", "relevant": [{"rel_source": "breakwater_survey.pdf", "chunk_index": 0, "fact": "1,340 meters"}]}
+{"query": "How many anchor blocks did divers count along the north face of the breakwater?", "relevant": [{"rel_source": "breakwater_survey.pdf", "chunk_index": 1, "fact": "fifty eight anchor blocks"}]}

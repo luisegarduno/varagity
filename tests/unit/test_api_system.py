@@ -28,7 +28,13 @@ class TestConfig:
         assert response.status_code == 200
         data = response.json()
         assert data["retrievers"] == ["bm25", "hybrid", "reranked", "semantic"]
-        assert data["chunkers"] == ["recursive_character"]
+        assert data["chunkers"] == [
+            "docling_hybrid",
+            "markdown_aware",
+            "recursive_character",
+            "semantic",
+            "token_based",
+        ]
         assert data["ocr_engines"] == ["easyocr", "tesseract"]
         assert data["model_types"] == ["default", "embedding", "rerank", "reasoning", "tool"]
 

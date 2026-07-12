@@ -5,10 +5,15 @@ Each strategy module defines one implementation decorated with
 ``get_chunker(settings.CHUNKING_STRATEGY)``.
 """
 
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 from langchain_core.documents import Document
+
+from varagity.tokens import count_tokens
+
+logger = logging.getLogger(__name__)
 
 
 class ChunkingStrategy(Protocol):
@@ -50,6 +55,35 @@ def register[T: type[Any]](name: str) -> Callable[[T], T]:
         return cls
 
     return deco
+
+
+def warn_near_token_ceiling(chunks: Sequence[Document], *, strategy: str) -> None:
+    """Warn for chunks whose content nears e5's 512-token ceiling (research Q6).
+
+    The ingest-time warning :class:`~varagity.models.embeddings.EmbeddingsClient`
+    fires per *contextualized* passage, carried forward to chunking time (v2
+    plan Phase 6): a chunk already ≥ the threshold **before** its situating
+    blurb is prepended is guaranteed to truncate at embedding time, and the
+    strategy's sizing knobs — not the blurb length — are what to fix.
+
+    Args:
+        chunks: The chunks produced for one document.
+        strategy: Registry name of the producing strategy (names the knob
+            in the log line).
+    """
+    from varagity.models.embeddings import TOKEN_WARN_THRESHOLD
+
+    for chunk in chunks:
+        n_tokens = count_tokens(chunk.page_content)
+        if n_tokens >= TOKEN_WARN_THRESHOLD:
+            logger.warning(
+                "chunk %s is ~%d tokens (≥%d) before contextualization: e5 truncates "
+                "at 512 — check the %r sizing (CHUNK_SIZE / CHUNK_OVERLAP)",
+                chunk.metadata.get("chunk_index", "?"),
+                n_tokens,
+                TOKEN_WARN_THRESHOLD,
+                strategy,
+            )
 
 
 def get_chunker(name: str) -> ChunkingStrategy:

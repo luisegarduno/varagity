@@ -237,6 +237,23 @@ class TestFetchByIdentity:
         assert store.fetch_by_identity([]) == {}
 
 
+class TestDocumentChunks:
+    """Reading-order chunk listing (the chunker sweep's fact scan, spec_v2 §7.4)."""
+
+    def test_returns_chunks_in_reading_order(self, store: ContextualVectorDB) -> None:
+        _seed_document(
+            store, "docord000000000r", [_unit_vector(0), _unit_vector(1), _unit_vector(2)]
+        )
+        chunks = store.document_chunks("docord000000000r")
+        assert [c.chunk_id for c in chunks] == [f"docord000000000r::{i}" for i in range(3)]
+        assert chunks[0].content == "docord000000000r chunk 0"
+        assert chunks[0].metadata["file_type"] == "md"  # full metadata present
+        assert all(c.score == 0.0 for c in chunks)
+
+    def test_unknown_document_is_empty(self, store: ContextualVectorDB) -> None:
+        assert store.document_chunks("doc0000000000nil") == []
+
+
 class TestAtomicity:
     def test_store_document_rolls_back_on_mismatch(self, store: ContextualVectorDB) -> None:
         """A failed chunk write rolls back the documents row too.

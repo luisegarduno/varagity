@@ -10,19 +10,33 @@ Quantifies the retrieval-quality ladder, on the golden set over
 5. ``hybrid_rerank_contextual`` — + cross-encoder re-ranking (≈67% tier,
    spec_v2 §5.5).
 
+The **chunker sweep** (spec_v2 §7.4, v2 Phase 6) follows the matrix: every
+registered chunking strategy gets its own contextual ingest over the same
+ephemeral stores and is measured across the contextual retrieval configs.
+Because the golden set's ``chunk_index`` refs are authored against the
+pinned default boundaries, the sweep re-resolves each ref **by content**:
+a ref's ``fact`` snippet is located in the strategy-true chunks
+(:func:`resolve_golden_by_fact`), and a ref counts as retrieved when *any*
+chunk containing its fact is in the top-k — index-anchored scoring under
+foreign boundaries would measure nothing but the boundary mismatch.
+
 Measurement runs against **ephemeral testcontainers stores** (plan decision
 #4) so the live corpus is never touched, while embeddings, the
 contextualizing LLM, and the reranker are the real GPU services from the
 running compose stack (they are stateless). Two ingests cover all five
 configs: ingest A (``CONTEXTUALIZE=false``) backs config 1; ingest B
 (``CONTEXTUALIZE=true``, ``reingest`` over the same stores) backs configs
-2–5 against the same index.
+2–5 against the same index — and doubles as the sweep's
+``recursive_character`` row. Each remaining strategy adds one reingest.
 
 Metric semantics: :func:`recall_at_k` is the Anthropic cookbook's
 evaluation number (there called *Pass@n*) — the per-query fraction of
 golden chunks present in the top-k, averaged over queries.
 :func:`pass_at_k` is the stricter complement reported alongside it: the
-fraction of queries whose golden chunks are **all** in the top-k.
+fraction of queries whose golden chunks are **all** in the top-k. The
+sweep's :func:`recall_at_k_any` / :func:`pass_at_k_any` are the same two
+numbers with each golden ref generalized from one chunk id to an
+acceptable **set** (fact-containing chunks).
 
 The eval pipeline settings are pinned (:data:`PINNED_EVAL_SETTINGS`) rather
 than inherited from ``.env``: golden ``chunk_index`` values assume those
@@ -43,6 +57,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
+from varagity.chunking import CHUNKER_REGISTRY
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
 from varagity.eval.containers import EphemeralStores, ephemeral_stores
@@ -55,6 +72,7 @@ from varagity.retrieval.hybrid import HybridRetriever
 from varagity.retrieval.reranked import RerankedRetriever
 from varagity.retrieval.semantic import SemanticRetriever
 from varagity.stores.records import RetrievedChunk
+from varagity.stores.vector_store import ContextualVectorDB
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +113,40 @@ PINNED_EVAL_SETTINGS: dict[str, str] = {
 # An ingest-compatible callable: `ingest_corpus` or the Prefect-tracked
 # `ingest_flow` (same keyword surface), injected by the pipeline layer.
 IngestCallable = Callable[..., IngestSummary]
+
+# The retrieval configs each swept chunker is measured across (the matrix's
+# contextual ladder; the CONTEXTUALIZE dimension is orthogonal to chunking
+# and already measured by configs 1–2, so the sweep doesn't re-pay a
+# non-contextual ingest per strategy).
+SWEEP_RETRIEVAL_CONFIGS: tuple[str, ...] = ("semantic", "bm25", "hybrid", "reranked")
+
+
+class FactRef(BaseModel):
+    """One golden ref resolved to the chunks that satisfy it (sweep form).
+
+    Attributes:
+        label: Human-readable identity in reports — the ref's ``fact``
+            (or its index-anchored ``chunk_id`` for a fact-less ref).
+        chunk_ids: Every chunk id whose content contains the fact under the
+            currently ingested boundaries (overlap can spread a fact over
+            several); retrieval of **any** of them satisfies the ref. Empty
+            when the fact matched nothing — a guaranteed miss.
+    """
+
+    label: str
+    chunk_ids: list[str]
+
+
+class FactResolvedEntry(BaseModel):
+    """A golden entry re-resolved by content for one chunking strategy.
+
+    Attributes:
+        query: The evaluation question.
+        refs: One :class:`FactRef` per golden ref, in ref order.
+    """
+
+    query: str
+    refs: list[FactRef]
 
 
 def recall_at_k(golden: Collection[str], retrieved: Sequence[str], k: int) -> float:
@@ -141,6 +193,158 @@ def pass_at_k(golden: Collection[str], retrieved: Sequence[str], k: int) -> floa
         ValueError: If ``golden`` is empty or ``k`` is not positive.
     """
     return 1.0 if recall_at_k(golden, retrieved, k) == 1.0 else 0.0
+
+
+def recall_at_k_any(
+    acceptable: Sequence[Collection[str]], retrieved: Sequence[str], k: int
+) -> float:
+    """Fraction of golden refs with **any** acceptable chunk in the top-k.
+
+    :func:`recall_at_k` generalized for the chunker sweep: a ref is
+    satisfied by whichever strategy-true chunk carries its fact. An empty
+    acceptable set (the fact matched no chunk) can never be satisfied.
+
+    Args:
+        acceptable: Per golden ref, the chunk ids that satisfy it.
+        retrieved: Retrieved chunk ids, best first.
+        k: Retrieval depth to evaluate at.
+
+    Returns:
+        ``|satisfied refs| / |refs|``.
+
+    Raises:
+        ValueError: If ``acceptable`` is empty or ``k`` is not positive.
+    """
+    if not acceptable:
+        raise ValueError("recall_at_k_any needs at least one golden ref")
+    if k <= 0:
+        raise ValueError(f"k must be positive; got {k}")
+    top = set(retrieved[:k])
+    return sum(1 for ids in acceptable if top.intersection(ids)) / len(acceptable)
+
+
+def pass_at_k_any(acceptable: Sequence[Collection[str]], retrieved: Sequence[str], k: int) -> float:
+    """Whether **every** golden ref is satisfied in the top-k (0.0 or 1.0).
+
+    Args:
+        acceptable: Per golden ref, the chunk ids that satisfy it.
+        retrieved: Retrieved chunk ids, best first.
+        k: Retrieval depth to evaluate at.
+
+    Returns:
+        ``1.0`` if every ref has an acceptable id in ``retrieved[:k]``,
+        else ``0.0``.
+
+    Raises:
+        ValueError: If ``acceptable`` is empty or ``k`` is not positive.
+    """
+    return 1.0 if recall_at_k_any(acceptable, retrieved, k) == 1.0 else 0.0
+
+
+def resolve_golden_by_fact(
+    entries: Sequence[ResolvedGoldenEntry], store: ContextualVectorDB
+) -> list[FactResolvedEntry]:
+    """Re-resolve golden refs by content against the ingested boundaries.
+
+    For each ref with a ``fact``, scans its document's stored chunks
+    (case-insensitively — OCR extraction may case-shift) and collects every
+    chunk containing the fact. A ref without a fact falls back to its
+    index-anchored ``chunk_id`` (only honest under the pinned default
+    boundaries — the golden set carries facts precisely so the sweep never
+    relies on this). A fact that matches no chunk is logged and left with
+    an empty acceptable set: a guaranteed miss, mirroring the OCR
+    benchmark's drift posture rather than silently inflating scores.
+
+    Args:
+        entries: The index-resolved golden entries (their ``relevant`` refs
+            carry the facts; their ``chunk_ids`` carry the doc ids).
+        store: The vector store holding the current strategy's ingest.
+
+    Returns:
+        One fact-resolved entry per input entry, in order.
+    """
+    chunks_by_doc: dict[str, list[RetrievedChunk]] = {}
+    resolved: list[FactResolvedEntry] = []
+    for entry in entries:
+        refs: list[FactRef] = []
+        for ref, chunk_id in zip(entry.relevant, entry.chunk_ids, strict=True):
+            if ref.fact is None:
+                refs.append(FactRef(label=chunk_id, chunk_ids=[chunk_id]))
+                continue
+            doc_id = chunk_id.split("::", 1)[0]
+            if doc_id not in chunks_by_doc:
+                chunks_by_doc[doc_id] = store.document_chunks(doc_id)
+            needle = ref.fact.lower()
+            matches = [
+                chunk.chunk_id for chunk in chunks_by_doc[doc_id] if needle in chunk.content.lower()
+            ]
+            if not matches:
+                logger.warning(
+                    "golden fact %r not found in any ingested chunk of %s "
+                    "(%d chunks) — counted as a guaranteed miss",
+                    ref.fact,
+                    ref.rel_source,
+                    len(chunks_by_doc[doc_id]),
+                )
+            refs.append(FactRef(label=ref.fact, chunk_ids=matches))
+        resolved.append(FactResolvedEntry(query=entry.query, refs=refs))
+    return resolved
+
+
+def measure_retriever_facts(
+    retriever: Retriever,
+    entries: Sequence[FactResolvedEntry],
+    *,
+    k_values: Sequence[int] = K_VALUES,
+) -> tuple[dict[str, dict[str, float]], list[dict[str, int | None]]]:
+    """Score one retriever over fact-resolved entries at every depth.
+
+    The sweep counterpart of :func:`measure_retriever` — identical shape,
+    with each ref satisfied by *any* of its acceptable chunk ids.
+
+    Args:
+        retriever: The retrieval method under measurement.
+        entries: Fact-resolved golden entries.
+        k_values: Depths to report.
+
+    Returns:
+        A ``(summary, golden_ranks)`` pair; ``golden_ranks`` holds, per
+        entry in order, each ref label's best 1-based rank among its
+        acceptable ids (``None`` if none was retrieved).
+
+    Raises:
+        ValueError: If ``entries`` or ``k_values`` is empty.
+    """
+    if not entries:
+        raise ValueError("measure_retriever_facts needs at least one golden entry")
+    if not k_values:
+        raise ValueError("measure_retriever_facts needs at least one k value")
+    max_k = max(k_values)
+    recall_sums = dict.fromkeys(k_values, 0.0)
+    pass_sums = dict.fromkeys(k_values, 0.0)
+    golden_ranks: list[dict[str, int | None]] = []
+    for entry in entries:
+        chunks: list[RetrievedChunk] = retriever.retrieve(entry.query, k=max_k, verbose=0)
+        retrieved_ids = [chunk.chunk_id for chunk in chunks]
+        acceptable = [ref.chunk_ids for ref in entry.refs]
+        for k in k_values:
+            recall_sums[k] += recall_at_k_any(acceptable, retrieved_ids, k)
+            pass_sums[k] += pass_at_k_any(acceptable, retrieved_ids, k)
+        positions = {chunk_id: rank for rank, chunk_id in enumerate(retrieved_ids, start=1)}
+        golden_ranks.append(
+            {
+                ref.label: min(
+                    (positions[chunk_id] for chunk_id in ref.chunk_ids if chunk_id in positions),
+                    default=None,
+                )
+                for ref in entry.refs
+            }
+        )
+    summary = {
+        "recall": {str(k): recall_sums[k] / len(entries) for k in k_values},
+        "pass": {str(k): pass_sums[k] / len(entries) for k in k_values},
+    }
+    return summary, golden_ranks
 
 
 @contextmanager
@@ -299,11 +503,15 @@ def run_matrix(
     ingest: IngestCallable = ingest_corpus,
     verbose: int | None = None,
 ) -> dict[str, Any]:
-    """Run the 5-configuration retrieval matrix and persist its results.
+    """Run the 5-config retrieval matrix + the chunker sweep; persist results.
 
     Two ingests into ephemeral stores cover all five configs (see the
-    module docstring). Embeddings, the contextualizing LLM, and the
-    reranker resolve from settings — the live GPU services.
+    module docstring); the chunker sweep then reingests once per remaining
+    registered strategy (``recursive_character`` reuses ingest B) and
+    measures each across :data:`SWEEP_RETRIEVAL_CONFIGS` with fact-anchored
+    golden resolution. Embeddings, the contextualizing LLM, and the
+    reranker resolve from settings — the live GPU services (the ``semantic``
+    strategy additionally embeds at ingest time through the same service).
 
     Args:
         corpus_root: The eval corpus (defaults to the fixtures corpus the
@@ -397,6 +605,54 @@ def run_matrix(
                     retrievers[retriever_name], entries
                 )
 
+        # ── Chunker sweep (spec_v2 §7.4): one contextual ingest per
+        # strategy, measured across the contextual retrieval configs with
+        # fact-anchored golden resolution. recursive_character goes first,
+        # reusing ingest B's index before any reingest replaces it.
+        sweep: dict[str, dict[str, Any]] = {}
+        strategies = ["recursive_character"] + sorted(
+            name for name in CHUNKER_REGISTRY if name != "recursive_character"
+        )
+        for strategy in strategies:
+            with pinned_eval_settings(CONTEXTUALIZE="true", CHUNKING_STRATEGY=strategy):
+                if strategy == "recursive_character":
+                    chunks_ingested, seconds = summary_b.chunks, ingest_seconds["contextual"]
+                else:
+                    logger.info("chunker sweep: reingesting with %r", strategy)
+                    started = time.monotonic()
+                    summary = ingest(
+                        str(corpus_root),
+                        store=stores.store,
+                        bm25=stores.bm25,
+                        embeddings=embeddings,
+                        llm=llm,
+                        reingest=True,
+                        verbose=verbose,
+                    )
+                    seconds = round(time.monotonic() - started, 2)
+                    if summary.failed:
+                        raise RuntimeError(
+                            f"chunker-sweep ingest ({strategy}) failed for {summary.failed} file(s)"
+                        )
+                    chunks_ingested = summary.chunks
+                fact_entries = resolve_golden_by_fact(entries, stores.store)
+                unresolved = [
+                    ref.label for entry in fact_entries for ref in entry.refs if not ref.chunk_ids
+                ]
+                methods: dict[str, dict[str, dict[str, float]]] = {}
+                method_ranks: dict[str, list[dict[str, int | None]]] = {}
+                for name in SWEEP_RETRIEVAL_CONFIGS:
+                    methods[name], method_ranks[name] = measure_retriever_facts(
+                        retrievers[name], fact_entries
+                    )
+                sweep[strategy] = {
+                    "chunks": chunks_ingested,
+                    "ingest_seconds": seconds,
+                    "unresolved_facts": unresolved,
+                    "configs": methods,
+                    "golden_ranks": method_ranks,
+                }
+
     settings = get_settings()
     results: dict[str, Any] = {
         "kind": "retrieval_matrix",
@@ -411,6 +667,8 @@ def run_matrix(
         "chunks_ingested": summary_b.chunks,
         "ingest_seconds": ingest_seconds,
         "configs": configs,
+        "sweep_retrieval_configs": list(SWEEP_RETRIEVAL_CONFIGS),
+        "chunker_sweep": sweep,
         "per_query": [
             {
                 "query": entry.query,

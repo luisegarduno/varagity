@@ -69,6 +69,15 @@ JOIN unnest(%(doc_ids)s::text[], %(original_indexes)s::int[])
   ON c.doc_id = want.doc_id AND c.original_index = want.original_index
 """
 
+# One document's chunks in reading order (the eval harness's fact-anchored
+# golden resolution scans these — spec_v2 §7.4 chunker sweep).
+_DOCUMENT_CHUNKS_SQL = """
+SELECT chunk_id, doc_id, original_index, content, context, metadata
+FROM chunks
+WHERE doc_id = %(doc_id)s
+ORDER BY chunk_index
+"""
+
 
 def default_conninfo() -> str:
     """Build the connection string from settings.
@@ -318,6 +327,25 @@ class ContextualVectorDB:
         check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
         rows = self._conn.execute(_SEARCH_SQL, {"qvec": Vector(query_vector), "k": k}).fetchall()
         return [_row_to_retrieved(row) for row in rows]
+
+    def document_chunks(self, doc_id: str) -> list[RetrievedChunk]:
+        """Fetch one document's chunks in reading order.
+
+        Backs the eval harness's fact-anchored golden resolution (spec_v2
+        §7.4): a chunker sweep must locate which strategy-true chunk holds a
+        planted fact, so it scans the document's stored contents rather than
+        trusting index-anchored refs authored against other boundaries.
+
+        Args:
+            doc_id: The parent document id.
+
+        Returns:
+            The document's chunks ordered by ``chunk_index`` (empty when the
+            document is unknown or has no extractable text). Chunks carry
+            ``score = 0.0`` — there is no query here.
+        """
+        rows = self._conn.execute(_DOCUMENT_CHUNKS_SQL, {"doc_id": doc_id}).fetchall()
+        return [_row_to_retrieved((*row, 0.0)) for row in rows]
 
     def fetch_by_identity(
         self, keys: list[tuple[str, int]]

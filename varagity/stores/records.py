@@ -77,6 +77,9 @@ class ChunkRecord(BaseModel):
         extraction: How text was extracted: ``"text"`` (default) or
             ``"ocr_fallback"`` (set by Phase 7's OCR pass) — retrieval-quality
             provenance beyond spec §8.1.
+        heading_path: The chunk's markdown heading breadcrumb (e.g.
+            ``"Operations > Dredging"``), set by the heading-aware chunkers
+            (spec_v2 §7); ``None`` for strategies without structure.
     """
 
     doc_id: str
@@ -98,6 +101,7 @@ class ChunkRecord(BaseModel):
     content_hash: str
     created_at: datetime
     extraction: str = "text"
+    heading_path: str | None = None
 
     @classmethod
     def create(
@@ -118,6 +122,7 @@ class ChunkRecord(BaseModel):
         embedding_model: str,
         content_hash: str,
         extraction: str = "text",
+        heading_path: str | None = None,
     ) -> "ChunkRecord":
         r"""Build a record, deriving the dependent fields.
 
@@ -143,6 +148,8 @@ class ChunkRecord(BaseModel):
             embedding_model: Served embedding model name.
             content_hash: The parent document's content hash.
             extraction: Extraction provenance (``"text"`` or ``"ocr_fallback"``).
+            heading_path: Markdown heading breadcrumb, or ``None`` for
+                strategies without structure.
 
         Returns:
             The fully-populated record.
@@ -168,6 +175,7 @@ class ChunkRecord(BaseModel):
             content_hash=content_hash,
             created_at=datetime.now(UTC),
             extraction=extraction,
+            heading_path=heading_path,
         )
 
 

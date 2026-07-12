@@ -35,15 +35,29 @@ logger = logging.getLogger(__name__)
 class GoldenChunkRef(BaseModel):
     """Portable identity of one relevant chunk.
 
+    ``chunk_index`` anchors the ref to the **pinned** chunk boundaries (the
+    matrix's fixed configuration); ``fact`` anchors it to **content**, which
+    survives any boundary change — the chunker sweep re-resolves refs by
+    scanning the strategy-true chunks for the fact (spec_v2 §7.4), since an
+    index authored against one strategy's boundaries points at arbitrary
+    text under another's.
+
     Attributes:
         rel_source: Document path relative to the eval corpus root
             (POSIX-style, e.g. ``"aurora_station.md"`` — the same string
             the loader derives ``doc_id`` from).
-        chunk_index: The chunk's position within its document (0-based).
+        chunk_index: The chunk's position within its document (0-based),
+            under the pinned eval chunk boundaries.
+        fact: A short verbatim snippet of the chunk's source text that
+            uniquely identifies the golden content within its document
+            (matched case-insensitively — OCR extraction may case-shift).
+            Optional for the fixed matrix; required for a ref to
+            participate in the chunker sweep.
     """
 
     rel_source: str = Field(min_length=1)
     chunk_index: int = Field(ge=0)
+    fact: str | None = Field(default=None, min_length=1)
 
 
 class GoldenEntry(BaseModel):

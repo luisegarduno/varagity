@@ -227,6 +227,23 @@ def test_original_index_monotonic_from_store_watermark(pinned_settings: None, co
     assert len({(r.doc_id, r.original_index) for r in store.records}) == len(store.records)
 
 
+def test_heading_path_flows_from_chunk_metadata_to_records(
+    pinned_settings: None, settings_env: Callable[..., None], corpus: Path
+) -> None:
+    """A heading-aware strategy's breadcrumb lands on the stored record (v2 §7)."""
+    settings_env(CHUNKING_STRATEGY="markdown_aware")
+    store = FakeStore()
+    ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
+
+    aurora = [r for r in store.records if r.file_name == "aurora.md"]
+    assert aurora and all(r.heading_path == "Aurora" for r in aurora)
+    # The plain-text file has no headings — the field stays None.
+    tidal = [r for r in store.records if r.file_name == "tidal.txt"]
+    assert tidal and all(r.heading_path is None for r in tidal)
+    # And it survives the metadata JSONB dump the vector store persists.
+    assert aurora[0].model_dump(mode="json")["heading_path"] == "Aurora"
+
+
 def test_doc_id_is_relative_path_stable(pinned_settings: None, tmp_path: Path) -> None:
     """Same relative layout under two different roots → identical doc_ids."""
     doc_ids = []

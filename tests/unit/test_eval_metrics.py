@@ -5,9 +5,15 @@ import pytest
 from varagity.eval.datasets import GoldenChunkRef, ResolvedGoldenEntry
 from varagity.eval.evaluate import (
     K_VALUES,
+    FactRef,
+    FactResolvedEntry,
     measure_retriever,
+    measure_retriever_facts,
     pass_at_k,
+    pass_at_k_any,
     recall_at_k,
+    recall_at_k_any,
+    resolve_golden_by_fact,
 )
 from varagity.eval.ocr_benchmark import (
     character_error_rate,
@@ -155,6 +161,166 @@ class TestMeasureRetriever:
     def test_empty_k_values_raise(self) -> None:
         with pytest.raises(ValueError, match="at least one k value"):
             measure_retriever(ScriptedRetriever({}), [_entry("q", ["doc-a::0"])], k_values=())
+
+
+class TestRecallAtKAny:
+    def test_any_acceptable_id_satisfies_a_ref(self) -> None:
+        acceptable = [["doc-a::0", "doc-a::1"], ["doc-b::4"]]
+        assert recall_at_k_any(acceptable, ["doc-a::1", "doc-b::4"], k=2) == 1.0
+
+    def test_unsatisfied_ref_counts_against(self) -> None:
+        acceptable = [["doc-a::0"], ["doc-b::4"]]
+        assert recall_at_k_any(acceptable, ["doc-a::0", "doc-x::0"], k=2) == 0.5
+
+    def test_empty_acceptable_set_is_a_guaranteed_miss(self) -> None:
+        acceptable: list[list[str]] = [["doc-a::0"], []]
+        assert recall_at_k_any(acceptable, ["doc-a::0"], k=5) == 0.5
+
+    def test_k_cutoff_applies(self) -> None:
+        acceptable = [["doc-a::5"]]
+        assert recall_at_k_any(acceptable, ["doc-x::0", "doc-a::5"], k=1) == 0.0
+        assert recall_at_k_any(acceptable, ["doc-x::0", "doc-a::5"], k=2) == 1.0
+
+    def test_empty_refs_raise(self) -> None:
+        with pytest.raises(ValueError, match="at least one golden ref"):
+            recall_at_k_any([], ["doc-a::0"], k=5)
+
+    def test_nonpositive_k_raises(self) -> None:
+        with pytest.raises(ValueError, match="k must be positive"):
+            recall_at_k_any([["doc-a::0"]], ["doc-a::0"], k=0)
+
+
+class TestPassAtKAny:
+    def test_all_refs_satisfied_passes(self) -> None:
+        acceptable = [["doc-a::0", "doc-a::1"], ["doc-b::4"]]
+        assert pass_at_k_any(acceptable, ["doc-a::0", "doc-b::4"], k=2) == 1.0
+
+    def test_one_unsatisfied_ref_fails(self) -> None:
+        acceptable = [["doc-a::0"], ["doc-b::4"]]
+        assert pass_at_k_any(acceptable, ["doc-a::0", "doc-x::0"], k=2) == 0.0
+
+
+class _StubStore:
+    """document_chunks stub: doc_id → [(chunk_id, content)]."""
+
+    def __init__(self, chunks_by_doc: dict[str, list[tuple[str, str]]]) -> None:
+        self.chunks_by_doc = chunks_by_doc
+        self.calls: list[str] = []
+
+    def document_chunks(self, doc_id: str) -> list[RetrievedChunk]:
+        self.calls.append(doc_id)
+        return [
+            RetrievedChunk(
+                chunk_id=chunk_id,
+                doc_id=doc_id,
+                original_index=index,
+                content=content,
+                context=None,
+                metadata={},
+                score=0.0,
+            )
+            for index, (chunk_id, content) in enumerate(self.chunks_by_doc.get(doc_id, []))
+        ]
+
+
+def _fact_entry(query: str, refs: list[tuple[str, int, str | None]]) -> ResolvedGoldenEntry:
+    return ResolvedGoldenEntry(
+        query=query,
+        relevant=[
+            GoldenChunkRef(rel_source=f"{doc}.md", chunk_index=index, fact=fact)
+            for doc, index, fact in refs
+        ],
+        chunk_ids=[f"{doc}::{index}" for doc, index, _ in refs],
+    )
+
+
+class TestResolveGoldenByFact:
+    def test_fact_matches_collect_every_containing_chunk(self) -> None:
+        store = _StubStore(
+            {
+                "doc-a": [
+                    ("doc-a::0", "The corridor is a 1.8-kilometer strip."),
+                    ("doc-a::1", "strip. The 1.8-kilometer corridor dampens turbulence."),
+                    ("doc-a::2", "Unrelated tail text."),
+                ]
+            }
+        )
+        entries = [_fact_entry("q", [("doc-a", 2, "1.8-kilometer")])]
+        resolved = resolve_golden_by_fact(entries, store)  # type: ignore[arg-type]
+        assert resolved[0].refs == [
+            FactRef(label="1.8-kilometer", chunk_ids=["doc-a::0", "doc-a::1"])
+        ]
+
+    def test_matching_is_case_insensitive(self) -> None:
+        store = _StubStore({"doc-a": [("doc-a::0", "CLEARED TO NINE METERS ON THE FOURTH")]})
+        entries = [_fact_entry("q", [("doc-a", 0, "nine meters")])]
+        resolved = resolve_golden_by_fact(entries, store)  # type: ignore[arg-type]
+        assert resolved[0].refs[0].chunk_ids == ["doc-a::0"]
+
+    def test_unmatched_fact_yields_empty_set_and_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        store = _StubStore({"doc-a": [("doc-a::0", "nothing relevant")]})
+        entries = [_fact_entry("q", [("doc-a", 0, "purple submarine")])]
+        with caplog.at_level(logging.WARNING, logger="varagity.eval.evaluate"):
+            resolved = resolve_golden_by_fact(entries, store)  # type: ignore[arg-type]
+        assert resolved[0].refs[0].chunk_ids == []
+        assert any("purple submarine" in record.getMessage() for record in caplog.records)
+
+    def test_factless_ref_falls_back_to_index_anchoring(self) -> None:
+        store = _StubStore({"doc-a": [("doc-a::0", "text")]})
+        entries = [_fact_entry("q", [("doc-a", 0, None)])]
+        resolved = resolve_golden_by_fact(entries, store)  # type: ignore[arg-type]
+        assert resolved[0].refs == [FactRef(label="doc-a::0", chunk_ids=["doc-a::0"])]
+        assert store.calls == []  # no scan needed for an index-anchored ref
+
+    def test_document_chunks_fetched_once_per_doc(self) -> None:
+        store = _StubStore({"doc-a": [("doc-a::0", "alpha beta")]})
+        entries = [_fact_entry("q", [("doc-a", 0, "alpha"), ("doc-a", 0, "beta")])]
+        resolve_golden_by_fact(entries, store)  # type: ignore[arg-type]
+        assert store.calls == ["doc-a"]
+
+
+class TestMeasureRetrieverFacts:
+    def test_any_of_scoring_and_best_ranks(self) -> None:
+        entries = [
+            FactResolvedEntry(
+                query="q1",
+                refs=[FactRef(label="fact-1", chunk_ids=["doc-a::0", "doc-a::1"])],
+            ),
+            FactResolvedEntry(
+                query="q2",
+                refs=[
+                    FactRef(label="fact-2", chunk_ids=["doc-b::0"]),
+                    FactRef(label="gone", chunk_ids=[]),
+                ],
+            ),
+        ]
+        retriever = ScriptedRetriever(
+            {
+                "q1": ["doc-x::0", "doc-a::1", "doc-a::0"],  # best acceptable at rank 2
+                "q2": ["doc-b::0"],
+            }
+        )
+        summary, ranks = measure_retriever_facts(retriever, entries, k_values=(1, 5))
+        # q1: satisfied at k=5 only; q2: fact-2 at rank 1, "gone" never.
+        assert summary["recall"]["1"] == pytest.approx(0.25)  # (0 + 0.5) / 2
+        assert summary["recall"]["5"] == pytest.approx(0.75)  # (1 + 0.5) / 2
+        assert summary["pass"]["5"] == pytest.approx(0.5)  # q1 passes; the empty ref fails q2
+        assert retriever.calls == [("q1", 5), ("q2", 5)]
+        assert ranks[0] == {"fact-1": 2}
+        assert ranks[1] == {"fact-2": 1, "gone": None}
+
+    def test_empty_entries_raise(self) -> None:
+        with pytest.raises(ValueError, match="at least one golden entry"):
+            measure_retriever_facts(ScriptedRetriever({}), [])
+
+    def test_empty_k_values_raise(self) -> None:
+        entry = FactResolvedEntry(query="q", refs=[FactRef(label="f", chunk_ids=["doc-a::0"])])
+        with pytest.raises(ValueError, match="at least one k value"):
+            measure_retriever_facts(ScriptedRetriever({}), [entry], k_values=())
 
 
 class TestNormalizeOcrText:

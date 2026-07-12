@@ -248,7 +248,7 @@ _MATRIX_CONFIG_LABELS: tuple[tuple[str, str], ...] = (
 
 
 def _show_matrix_results(results: dict[str, Any]) -> None:
-    """Render the retrieval matrix as a config × k table.
+    """Render the retrieval matrix and the chunker sweep as tables.
 
     Args:
         results: The :func:`varagity.eval.evaluate.run_matrix` document.
@@ -271,7 +271,47 @@ def _show_matrix_results(results: dict[str, Any]) -> None:
             *(f"{scores['pass'][str(k)]:.3f}" for k in k_values),
         )
     console.print(table)
+    _show_chunker_sweep(results)
     console.print(f"Results written to [bold]{results['results_path']}[/]")
+
+
+def _show_chunker_sweep(results: dict[str, Any]) -> None:
+    """Render the chunker sweep as a strategy × method table (spec_v2 §7.4).
+
+    Args:
+        results: The :func:`varagity.eval.evaluate.run_matrix` document
+            (older result files without a sweep render nothing).
+    """
+    sweep: dict[str, Any] = results.get("chunker_sweep") or {}
+    if not sweep:
+        return
+    k_values: list[int] = results["k_values"]
+    table = Table(title="Chunker sweep — contextual ingest per strategy, fact-anchored golden refs")
+    table.add_column("Strategy", style="bold")
+    table.add_column("Chunks", justify="right")
+    table.add_column("Ingest s", justify="right")
+    table.add_column("Method")
+    for k in k_values:
+        table.add_column(f"recall@{k}", justify="right")
+    for k in k_values:
+        table.add_column(f"pass@{k}", justify="right", style="dim")
+    for strategy, data in sweep.items():
+        for row, (method, scores) in enumerate(data["configs"].items()):
+            table.add_row(
+                strategy if row == 0 else "",
+                str(data["chunks"]) if row == 0 else "",
+                f"{data['ingest_seconds']:.1f}" if row == 0 else "",
+                method,
+                *(f"{scores['recall'][str(k)]:.3f}" for k in k_values),
+                *(f"{scores['pass'][str(k)]:.3f}" for k in k_values),
+            )
+    console.print(table)
+    for strategy, data in sweep.items():
+        if data["unresolved_facts"]:
+            console.print(
+                f"[yellow]{strategy}: {len(data['unresolved_facts'])} golden fact(s) not "
+                f"found in any chunk (guaranteed misses): {data['unresolved_facts']}[/]"
+            )
 
 
 def _show_ocr_results(results: dict[str, Any]) -> None:

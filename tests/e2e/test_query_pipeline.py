@@ -488,6 +488,68 @@ def test_office_web_facts_are_retrievable_and_answerable(
             assert state["answer"] == answer
 
 
+def test_every_chunking_strategy_answers_a_planted_fact(
+    pinned_settings: None,
+    settings_env: Callable[..., None],
+    pg_conninfo: str,
+    bm25_store: ElasticsearchBM25,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ The Phase-6 (v2) milestone: every registered strategy answers end-to-end.
+
+    A corpus ingested under each new chunking strategy flows through ingest →
+    hybrid retrieval → grounded answer on the planted kelp-corridor fact, with
+    ``chunking_strategy`` provenance on every stored chunk and — for the
+    heading-aware strategies — ``heading_path`` breadcrumbs in the metadata
+    JSONB. Text-only corpus: per-strategy reingest must not re-pay PDF OCR.
+    """
+    settings_env(ALLOWED_EXTENSIONS=".txt,.md")
+    embeddings = FakeEmbeddings()
+    # The semantic chunker resolves its boundary-detection embeddings via the
+    # model registry at split time; point it at the same deterministic fake.
+    monkeypatch.setattr("varagity.chunking.semantic.get_model", lambda model_type: embeddings)
+
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("TRUNCATE documents CASCADE")
+
+    heading_aware = {"markdown_aware", "docling_hybrid"}
+    with ContextualVectorDB(pg_conninfo) as store:
+        for strategy in ("token_based", "markdown_aware", "docling_hybrid", "semantic"):
+            settings_env(CHUNKING_STRATEGY=strategy)
+            summary = ingest_flow(
+                str(CORPUS_PATH),
+                store=store,
+                bm25=bm25_store,
+                embeddings=embeddings,
+                reingest=True,  # boundaries change but content hashes don't (the v1 gotcha)
+                verbose=0,
+            )
+            assert summary.discovered == 3, strategy  # aurora.md, glossary.md, tidal_grid.txt
+            assert summary.ingested == 3, strategy
+            assert summary.failed == 0, strategy
+            assert summary.chunks > 0, strategy
+
+            with psycopg.connect(pg_conninfo) as conn:
+                strategies = conn.execute(
+                    "SELECT DISTINCT metadata->>'chunking_strategy' FROM chunks"
+                ).fetchall()
+                n_breadcrumbs = conn.execute(
+                    "SELECT count(*) FROM chunks WHERE metadata->>'heading_path' IS NOT NULL"
+                ).fetchone()
+            assert strategies == [(strategy,)], strategy  # provenance on every chunk
+            assert n_breadcrumbs is not None
+            if strategy in heading_aware:  # aurora_station.md is heading-rich
+                assert n_breadcrumbs[0] > 0, f"{strategy} stored no heading_path"
+
+            retriever = HybridRetriever(store=store, bm25=bm25_store, embeddings=embeddings)
+            llm = ScriptedLLM(SCRIPTED_ANSWER)
+            state = query_flow(QUESTION, retriever=retriever, llm=llm, verbose=0)  # type: ignore[arg-type]
+            assert any(PLANTED_FACT in chunk.content for chunk in state["retrieved"]), (
+                f"{strategy} missed the planted kelp-corridor chunk"
+            )
+            assert state["answer"] == SCRIPTED_ANSWER
+
+
 def test_all_three_retrieval_methods_answer(
     pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25
 ) -> None:

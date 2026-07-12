@@ -91,6 +91,12 @@ class TestChunkRecordCreate:
         assert _record().extraction == "text"
         assert _record(extraction="ocr_fallback").extraction == "ocr_fallback"
 
+    def test_heading_path_defaults_to_none_and_round_trips(self) -> None:
+        assert _record().heading_path is None
+        record = _record(heading_path="Operations > Dredging")
+        assert record.heading_path == "Operations > Dredging"
+        assert record.model_dump(mode="json")["heading_path"] == "Operations > Dredging"
+
     def test_metadata_dump_round_trips_json(self) -> None:
         dumped = _record().model_dump(mode="json")
         assert dumped["page"] is None

@@ -55,10 +55,18 @@ class Settings(BaseSettings):
             primary language first (mapped per engine, e.g. ``en`` →
             Tesseract's ``eng``).
         CHUNKING_STRATEGY: Registry name of the chunking strategy
-            (see ``varagity.chunking``).
-        CHUNK_SIZE: Chunk size in **characters** — not tokens —
-            (``RecursiveCharacterTextSplitter`` counts characters, spec §9.3).
-        CHUNK_OVERLAP: Overlap between consecutive chunks, in characters.
+            (``recursive_character`` | ``token_based`` | ``markdown_aware``
+            | ``docling_hybrid`` | ``semantic`` — see ``varagity.chunking``;
+            spec_v2 §7). Changing it doesn't change content hashes, so an
+            unchanged corpus needs ``ingest --reingest`` to re-chunk.
+        CHUNK_SIZE: Chunk size budget. The **unit is per strategy**
+            (each module documents its own): characters for
+            ``recursive_character`` and ``markdown_aware`` (spec §9.3);
+            **tokens** for ``token_based``, ``docling_hybrid``, and
+            ``semantic`` (aligned to e5's 512-token ceiling — spec_v2 §7).
+        CHUNK_OVERLAP: Overlap between consecutive chunks, in the same
+            unit as ``CHUNK_SIZE`` for that strategy (unused by
+            ``docling_hybrid``, which merges instead of overlapping).
         CONTEXTUALIZE: Whether ingestion generates an LLM situating blurb per
             chunk (Contextual Retrieval, spec §9.4). ``False`` keeps the
             identity path (``contextualized_content = content``) — the
