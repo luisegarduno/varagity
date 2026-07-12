@@ -15,23 +15,40 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib import metadata
+from typing import Any
 
 import psycopg
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+from pydantic.json_schema import models_json_schema
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from varagity.api.routes import chat, conversations, system
-from varagity.api.schemas import ErrorBody, ErrorResponse
+from varagity.api.schemas import (
+    DeltaEvent,
+    DoneEvent,
+    ErrorBody,
+    ErrorEvent,
+    ErrorResponse,
+    RetrievalEvent,
+)
 from varagity.config import get_settings
 from varagity.logging_setup import setup_logging
 from varagity.stores.migrate import run_migrations
 from varagity.stores.vector_store import default_conninfo
 
 logger = logging.getLogger(__name__)
+
+# The SSE chat protocol's event payloads (spec_v2 §4.3). No route returns
+# them directly (they ride inside the event stream), so FastAPI would omit
+# them from the OpenAPI schema — and the web app's generated TypeScript
+# types are the *whole* wire contract, SSE payloads included (schemas.py).
+# create_app() merges their JSON schemas into components/schemas.
+_SSE_EVENT_MODELS = (RetrievalEvent, DeltaEvent, DoneEvent, ErrorEvent)
 
 # Stable codes for statuses raised with a plain-string detail; handlers fall
 # back to http_<status> beyond these.
@@ -151,6 +168,43 @@ async def _handle_validation_error(request: Request, exc: Exception) -> JSONResp
     )
 
 
+def _install_sse_event_schemas(app: FastAPI) -> None:
+    """Publish the SSE event payload models in the app's OpenAPI schema.
+
+    The chat protocol's payloads (:data:`_SSE_EVENT_MODELS`, plus whatever
+    they reference — ``RetrievedChunk``, ``RetrievalTrace``, ``UsageInfo``)
+    cross the wire inside ``text/event-stream`` frames, which FastAPI's
+    route inspection never sees. Merging their JSON schemas into
+    ``components/schemas`` keeps the generated TypeScript types
+    (``openapi-typescript``) covering the *entire* contract, so the web
+    app's SSE handling can't drift by hand-editing either.
+
+    Args:
+        app: The application whose ``openapi()`` gets the merged schema.
+    """
+
+    def openapi_with_sse_events() -> dict[str, Any]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        _, definitions = models_json_schema(
+            [(model, "serialization") for model in _SSE_EVENT_MODELS],
+            ref_template="#/components/schemas/{model}",
+        )
+        components = schema.setdefault("components", {}).setdefault("schemas", {})
+        for name, model_schema in definitions.get("$defs", {}).items():
+            components.setdefault(name, model_schema)
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = openapi_with_sse_events  # type: ignore[method-assign]
+
+
 def create_app() -> FastAPI:
     """Build the configured FastAPI application.
 
@@ -181,4 +235,5 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(conversations.router)
     app.include_router(chat.router)
+    _install_sse_event_schemas(app)
     return app

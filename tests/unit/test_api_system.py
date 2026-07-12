@@ -135,3 +135,22 @@ class TestErrorEnvelope:
         assert schema["openapi"].startswith("3.")
         assert "/api/chat" in schema["paths"]
         assert "/api/conversations/{conversation_id}" in schema["paths"]
+
+    async def test_openapi_schema_carries_the_sse_event_payloads(self, app: FastAPI) -> None:
+        """The stream payloads are in components/schemas (generated TS types)."""
+        schema = (await get(app, "/openapi.json")).json()
+        components = schema["components"]["schemas"]
+        for name in (
+            "RetrievalEvent",
+            "DeltaEvent",
+            "DoneEvent",
+            "ErrorEvent",
+            "RetrievedChunk",
+            "RetrievalTrace",
+            "UsageInfo",
+        ):
+            assert name in components, f"SSE payload model {name} missing from OpenAPI"
+        trace = components["RetrievalTrace"]["properties"]
+        assert {"semantic_rank", "bm25_rank", "fused_rank", "rerank_delta", "final_rank"} <= set(
+            trace
+        )
