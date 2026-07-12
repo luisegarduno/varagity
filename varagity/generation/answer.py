@@ -5,15 +5,20 @@ Each retrieved chunk is formatted with its provenance
 fed to the LLM under the grounding prompt: answer from the context only,
 admit ignorance otherwise, cite sources. :func:`answer_query` threads the
 whole query pipeline through the spec §10.1 state dict.
+:func:`generate_answer_stream` is :func:`generate_answer`'s streaming twin
+(spec_v2 §4.3): same prompt, but deltas flow to a callback as they arrive.
 """
 
 from collections.abc import Callable
 from typing import TypedDict
 
+from openai.types import CompletionUsage
+
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
 from varagity.models.llm import LLMClient, clean_response
 from varagity.models.registry import get_model
+from varagity.models.stream import Kind, ThinkStreamSplitter
 from varagity.retrieval.base import Retriever, get_retriever
 from varagity.stores.records import RetrievedChunk
 
@@ -117,6 +122,118 @@ def generate_answer(
     prompt = ANSWER_PROMPT.format(formatted_context=formatted_context, query=query)
     response = client.generate([{"role": "user", "content": prompt}], verbose=verbose)
     return clean_response(response)
+
+
+class StreamedAnswer(TypedDict):
+    """Outcome of one streamed generation (spec_v2 §4.3).
+
+    Attributes:
+        answer: The final answer — ``clean_response`` over the accumulated
+            raw text, so it is exact even when the streamed classification
+            was best-effort (the orphaned-``</think>`` shape).
+        reasoning: The captured ``<think>`` stream (``""`` when the model
+            emitted none) — persisted per spec_v2 §9.1.
+        aborted: ``True`` when ``should_abort`` stopped generation early
+            (client disconnect); ``answer`` then holds the partial text.
+        usage: Server-reported token counts (``prompt_tokens``,
+            ``completion_tokens``), or ``None`` when the server sent none.
+    """
+
+    answer: str
+    reasoning: str
+    aborted: bool
+    usage: dict[str, int] | None
+
+
+def generate_answer_stream(
+    query: str,
+    chunks: list[RetrievedChunk],
+    *,
+    on_delta: Callable[[Kind, str], None],
+    llm: LLMClient | None = None,
+    formatted_context: str | None = None,
+    should_abort: Callable[[], bool] | None = None,
+    verbose: int | None = None,
+) -> StreamedAnswer:
+    """Generate a grounded answer, streaming deltas to a callback.
+
+    The streaming twin of :func:`generate_answer`: the same spec §10.2
+    grounding prompt, but each text delta is classified by
+    :class:`~varagity.models.stream.ThinkStreamSplitter` and handed to
+    ``on_delta`` as it arrives — reasoning deltas for a collapsible
+    "reasoning" surface, answer deltas for the visible answer.
+
+    Args:
+        query: The user's question.
+        chunks: The retrieved chunks to ground the answer in.
+        on_delta: Called with ``(kind, text)`` per classified fragment, in
+            stream order (``kind`` is ``"reasoning"`` or ``"answer"``).
+        llm: Chat client; resolved via the model registry when omitted.
+        formatted_context: Pre-computed :func:`format_context` output, if the
+            caller already built it; formatted from ``chunks`` when omitted.
+        should_abort: Polled between deltas; returning ``True`` stops
+            generation (the underlying HTTP stream closes, which frees the
+            model server) and marks the result ``aborted``.
+        verbose: Console verbosity (0–2); defaults to
+            ``settings.DEFAULT_VERBOSE``.
+
+    Returns:
+        The completed :class:`StreamedAnswer`.
+
+    Raises:
+        ValueError: If ``verbose`` is invalid.
+        openai.APIError: If establishing the stream fails after retries, or
+            the stream breaks mid-generation.
+    """
+    verbose = check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
+    client = llm if llm is not None else get_model("default")
+    if formatted_context is None:
+        formatted_context = format_context(chunks)
+    prompt = ANSWER_PROMPT.format(formatted_context=formatted_context, query=query)
+
+    usage_holder: list[CompletionUsage] = []
+    raw_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    splitter = ThinkStreamSplitter()
+    aborted = False
+
+    def _dispatch(fragments: list[tuple[Kind, str]]) -> None:
+        for kind, text in fragments:
+            if kind == "reasoning":
+                reasoning_parts.append(text)
+            on_delta(kind, text)
+
+    deltas = client.generate_stream(
+        [{"role": "user", "content": prompt}],
+        verbose=verbose,
+        on_usage=usage_holder.append,
+    )
+    try:
+        for delta in deltas:
+            if should_abort is not None and should_abort():
+                aborted = True
+                break
+            raw_parts.append(delta)
+            _dispatch(splitter.feed(delta))
+    finally:
+        deltas.close()  # closing aborts the server-side generation
+    if not aborted:
+        _dispatch(splitter.finalize())
+
+    usage = usage_holder[-1] if usage_holder else None
+    return StreamedAnswer(
+        answer=clean_response("".join(raw_parts)),
+        reasoning="".join(reasoning_parts).strip(),
+        aborted=aborted,
+        usage=(
+            None
+            if usage is None
+            else {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+            }
+        ),
+    )
 
 
 def answer_query(

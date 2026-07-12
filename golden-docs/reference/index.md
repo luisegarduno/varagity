@@ -16,5 +16,6 @@ One page per package:
 - [Retrieval](retrieval.md) — semantic / bm25 / hybrid + fusion
 - [Generation](generation.md) — context prompt & grounded answers
 - [Orchestration](pipeline.md) — the Prefect flows
+- [HTTP API](api.md) — the FastAPI service: SSE chat, conversations, health
 - [Evaluation](eval.md) — golden set, metrics, OCR benchmark, testcontainers
 - [CLI & debug output](cli.md) — subcommands and the `v_<name>` renderers

@@ -44,6 +44,10 @@ SETTINGS_ENV_VARS = (
     "RERANK_TOP_N",
     "RERANK_BASE_METHOD",
     "RERANK_CANDIDATES",
+    "API_HOST",
+    "API_PORT",
+    "API_CORS_ORIGINS",
+    "UPLOAD_MAX_MB",
 )
 
 
@@ -298,3 +302,32 @@ def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert get_settings() is first
     get_settings.cache_clear()
     assert get_settings() is not first
+
+
+class TestApiSettings:
+    def test_defaults(self) -> None:
+        settings = Settings(_env_file=None)
+        assert settings.API_HOST == "0.0.0.0"
+        assert settings.API_PORT == 8000
+        assert settings.UPLOAD_MAX_MB == 50
+        assert settings.cors_origin_list == ["http://localhost:3000"]
+
+    @pytest.mark.parametrize("bad_port", [0, -1, 65536])
+    def test_out_of_range_api_port_fails_fast(self, bad_port: int) -> None:
+        with pytest.raises(ValidationError, match="API_PORT"):
+            Settings(_env_file=None, API_PORT=bad_port)
+
+    @pytest.mark.parametrize("bad_mb", [0, -5])
+    def test_non_positive_upload_cap_fails_fast(self, bad_mb: int) -> None:
+        with pytest.raises(ValidationError, match="UPLOAD_MAX_MB"):
+            Settings(_env_file=None, UPLOAD_MAX_MB=bad_mb)
+
+    def test_cors_origins_parse_strip_and_dedupe(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            API_CORS_ORIGINS=" http://localhost:3000/ ,https://varagity.local, http://localhost:3000",
+        )
+        assert settings.cors_origin_list == [
+            "http://localhost:3000",
+            "https://varagity.local",
+        ]

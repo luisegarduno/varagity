@@ -79,5 +79,6 @@ nav:
       - Retrieval: reference/retrieval.md
       - Generation: reference/generation.md
       - Orchestration: reference/pipeline.md
+      - HTTP API: reference/api.md
       - Evaluation: reference/eval.md
       - CLI & debug: reference/cli.md

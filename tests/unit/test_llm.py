@@ -7,11 +7,13 @@ client's test conventions.
 
 import json
 from collections.abc import Iterator
+from typing import Any
 
 import httpx
 import openai
 import pytest
 import respx
+from openai.types import CompletionUsage
 from tenacity import wait_none
 
 from varagity.models.llm import LLMClient, clean_response
@@ -51,14 +53,50 @@ def _completion(content: str | None) -> httpx.Response:
     )
 
 
+def _stream_chunk(
+    *,
+    content: str | None = None,
+    reasoning_content: str | None = None,
+    usage: dict[str, int] | None = None,
+    finish: str | None = None,
+) -> dict[str, Any]:
+    delta: dict[str, Any] = {}
+    if content is not None:
+        delta["content"] = content
+    if reasoning_content is not None:
+        delta["reasoning_content"] = reasoning_content
+    chunk: dict[str, Any] = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "test-model.gguf",
+        "choices": (
+            [] if usage is not None else [{"index": 0, "delta": delta, "finish_reason": finish}]
+        ),
+    }
+    if usage is not None:
+        chunk["usage"] = {"total_tokens": sum(usage.values()), **usage}
+    return chunk
+
+
+def _stream_response(chunks: list[dict[str, Any]]) -> httpx.Response:
+    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body.encode())
+
+
 @pytest.fixture
 def no_retry_wait() -> Iterator[None]:
     """Zero out the tenacity backoff so retry tests run instantly."""
-    retrying = LLMClient._create.retry  # type: ignore[attr-defined]
-    original = retrying.wait
-    retrying.wait = wait_none()
+    retryings = [
+        LLMClient._create.retry,  # type: ignore[attr-defined]
+        LLMClient._create_stream.retry,  # type: ignore[attr-defined]
+    ]
+    originals = [retrying.wait for retrying in retryings]
+    for retrying in retryings:
+        retrying.wait = wait_none()
     yield
-    retrying.wait = original
+    for retrying, original in zip(retryings, originals, strict=True):
+        retrying.wait = original
 
 
 class TestCleanResponse:
@@ -173,4 +211,126 @@ class TestVerbose:
         route = respx.post(ENDPOINT).mock(return_value=_completion("ok"))
         with pytest.raises(ValueError, match="verbose"):
             _client().generate([{"role": "user", "content": "q"}], verbose=7)
+        assert route.call_count == 0
+
+
+class TestGenerateStream:
+    @respx.mock
+    def test_yields_deltas_in_order(self) -> None:
+        respx.post(ENDPOINT).mock(
+            return_value=_stream_response(
+                [
+                    _stream_chunk(content="The "),
+                    _stream_chunk(content="answer."),
+                    _stream_chunk(content=None, finish="stop"),
+                ]
+            )
+        )
+        deltas = list(_client().generate_stream([{"role": "user", "content": "q"}], verbose=0))
+        assert deltas == ["The ", "answer."]
+
+    @respx.mock
+    def test_payload_requests_stream_with_usage(self) -> None:
+        route = respx.post(ENDPOINT).mock(
+            return_value=_stream_response([_stream_chunk(content="x")])
+        )
+        list(_client().generate_stream([{"role": "user", "content": "q"}], verbose=0))
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["stream"] is True
+        assert sent["stream_options"] == {"include_usage": True}
+        assert sent["model"] == "test-model.gguf"
+
+    @respx.mock
+    def test_think_tags_pass_through_raw(self) -> None:
+        respx.post(ENDPOINT).mock(
+            return_value=_stream_response(
+                [
+                    _stream_chunk(content="<think>hmm</think>"),
+                    _stream_chunk(content="Answer"),
+                ]
+            )
+        )
+        deltas = list(_client().generate_stream([{"role": "user", "content": "q"}], verbose=0))
+        assert deltas == ["<think>hmm</think>", "Answer"]
+
+    @respx.mock
+    def test_reasoning_content_normalized_to_think_tags(self) -> None:
+        """A server extracting reasoning into reasoning_content is re-wrapped."""
+        respx.post(ENDPOINT).mock(
+            return_value=_stream_response(
+                [
+                    _stream_chunk(reasoning_content="step one "),
+                    _stream_chunk(reasoning_content="step two"),
+                    _stream_chunk(content="The answer."),
+                ]
+            )
+        )
+        deltas = list(_client().generate_stream([{"role": "user", "content": "q"}], verbose=0))
+        assert deltas == ["<think>", "step one ", "step two", "</think>", "The answer."]
+
+    @respx.mock
+    def test_reasoning_only_stream_closes_synthesized_tag(self) -> None:
+        respx.post(ENDPOINT).mock(
+            return_value=_stream_response([_stream_chunk(reasoning_content="thinking…")])
+        )
+        deltas = list(_client().generate_stream([{"role": "user", "content": "q"}], verbose=0))
+        assert deltas == ["<think>", "thinking…", "</think>"]
+
+    @respx.mock
+    def test_usage_callback_fires_from_final_chunk(self) -> None:
+        respx.post(ENDPOINT).mock(
+            return_value=_stream_response(
+                [
+                    _stream_chunk(content="ok"),
+                    _stream_chunk(usage={"prompt_tokens": 11, "completion_tokens": 7}),
+                ]
+            )
+        )
+        seen: list[CompletionUsage] = []
+        deltas = list(
+            _client().generate_stream(
+                [{"role": "user", "content": "q"}], verbose=0, on_usage=seen.append
+            )
+        )
+        assert deltas == ["ok"]
+        assert len(seen) == 1
+        assert (seen[0].prompt_tokens, seen[0].completion_tokens) == (11, 7)
+
+    @respx.mock
+    def test_establishment_retries_on_5xx_then_streams(self, no_retry_wait: None) -> None:
+        route = respx.post(ENDPOINT)
+        route.side_effect = [
+            httpx.Response(500, json={"error": "boom"}),
+            _stream_response([_stream_chunk(content="recovered")]),
+        ]
+        deltas = list(_client().generate_stream([{"role": "user", "content": "q"}], verbose=0))
+        assert deltas == ["recovered"]
+        assert route.call_count == 2
+
+    @respx.mock
+    def test_establishment_errors_raise_eagerly(self, no_retry_wait: None) -> None:
+        """The request is sent (and fails) at call time, not at first next()."""
+        route = respx.post(ENDPOINT).mock(return_value=httpx.Response(500, json={"error": "x"}))
+        with pytest.raises(openai.InternalServerError):
+            _client().generate_stream([{"role": "user", "content": "q"}], verbose=0)
+        assert route.call_count == 4  # stop_after_attempt(4)
+
+    @respx.mock
+    def test_abandoning_the_iterator_closes_the_stream(self) -> None:
+        respx.post(ENDPOINT).mock(
+            return_value=_stream_response([_stream_chunk(content="a"), _stream_chunk(content="b")])
+        )
+        client = _client()
+        deltas = client.generate_stream([{"role": "user", "content": "q"}], verbose=0)
+        assert next(deltas) == "a"
+        deltas.close()  # must not raise; underlying HTTP stream is closed
+        assert list(deltas) == []
+
+    @respx.mock
+    def test_invalid_verbose_raises_before_any_request(self) -> None:
+        route = respx.post(ENDPOINT).mock(
+            return_value=_stream_response([_stream_chunk(content="x")])
+        )
+        with pytest.raises(ValueError, match="verbose"):
+            _client().generate_stream([{"role": "user", "content": "q"}], verbose=9)
         assert route.call_count == 0

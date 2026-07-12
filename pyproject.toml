@@ -10,6 +10,8 @@ dependencies = [
     # standard bundle; tesseract needs only the system binary (Dockerfile).
     "docling[easyocr]>=2.112.0",
     "elasticsearch>=9,<10", # client major must match the ES server major (9.x ↔ 9.x)
+    # Native SSE (EventSourceResponse landed in 0.135) — v2 plan decision #7.
+    "fastapi>=0.135",
     "httpx>=0.28.1",
     "langchain-core>=1.4.9",
     "langchain-text-splitters>=1.1.2",
@@ -18,6 +20,9 @@ dependencies = [
     "prefect>=3,<4",
     "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.14.2",
+    # Multipart form parsing for the Phase 8 upload route (FastAPI requires it
+    # at import time for File/UploadFile parameters).
+    "python-multipart>=0.0.20",
     "rich>=15.0.0",
     "tenacity>=9.1.4",
     "tiktoken>=0.13.0",
@@ -25,6 +30,7 @@ dependencies = [
     # CPU-wheel pin below applies — uv sources only bind to declared deps.
     "torch>=2.6",
     "torchvision>=0.21",
+    "uvicorn[standard]>=0.30",
 ]
 
 [dependency-groups]
@@ -35,6 +41,7 @@ dev = [
     "mypy>=2.2.0",
     "pre-commit>=4.6.0",
     "pytest>=9.1.1",
+    "pytest-asyncio>=1.0",
     "pytest-cov>=7.1.0",
     "pytest-mock>=3.15.1",
     "respx>=0.23.1",
@@ -88,6 +95,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Async tests (the httpx.AsyncClient API suites) run under pytest-asyncio
+# without per-test markers.
+asyncio_mode = "auto"
 markers = [
     "integration: needs real backing services via testcontainers (Docker)",
     "e2e: full ingest→query pipeline over the fixtures corpus (Docker)",

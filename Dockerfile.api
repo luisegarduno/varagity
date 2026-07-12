@@ -1,0 +1,26 @@
+# The HTTP API service (spec_v2 §4.1): uvicorn serving the FastAPI factory.
+# To build: docker build -f Dockerfile.api -t varagity-api .
+
+# Use a Python image with uv pre-installed (same base as the app image)
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+# Setup a non-root user
+RUN groupadd --system --gid 999 user \
+ && useradd --system --gid 999 --uid 999 --create-home user
+
+# Copy the project into the image
+ADD . /app
+
+# Install the runtime dependencies into `/app/.venv` (no dev group — the API
+# image serves, it doesn't lint/test/build docs)
+WORKDIR /app
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --no-dev
+
+# Use the non-root user to run the server
+USER user
+
+# Single worker (v2 plan decision #11) — scale by container replicas. The
+# venv binary is invoked directly so startup never re-syncs dependencies.
+CMD ["/app/.venv/bin/python", "-m", "uvicorn", "varagity.api.main:create_app", \
+     "--factory", "--host", "0.0.0.0", "--port", "8000"]

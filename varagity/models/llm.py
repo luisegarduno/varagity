@@ -3,15 +3,19 @@
 The llama.cpp server speaks the OpenAI ``/v1`` surface, so the ``openai`` SDK
 pointed at ``BASE_MODEL_API_URL`` is the client. Responses from reasoning
 models carry ``<think>…</think>`` blocks; callers strip them with
-:func:`clean_response` (answers in Phase 4, context blurbs in Phase 5).
+:func:`clean_response` (answers in Phase 4, context blurbs in Phase 5) or,
+on the streaming path (spec_v2 §4.3), classify them delta-by-delta with
+:class:`varagity.models.stream.ThinkStreamSplitter`.
 """
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Generator, Sequence
 
 import openai
-from openai.types.chat import ChatCompletionMessageParam
+from openai import Stream
+from openai.types import CompletionUsage
+from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
 from tenacity import (
     before_sleep_log,
     retry,
@@ -38,6 +42,11 @@ _RETRYABLE_ERRORS = (
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 # An opener the model never closed (e.g. generation hit MAX_TOKENS mid-think).
 _UNCLOSED_THINK_RE = re.compile(r"<think>.*\Z", re.DOTALL)
+
+# Synthesized around `reasoning_content` deltas so the streaming path sees
+# one reasoning transport (see LLMClient.generate_stream).
+_OPEN_THINK_TAG = "<think>"
+_CLOSE_THINK_TAG = "</think>"
 
 
 def clean_response(text: str) -> str:
@@ -148,6 +157,98 @@ class LLMClient:
             temperature=self.temperature if temperature is None else temperature,
         )
 
+    def generate_stream(
+        self,
+        messages: Sequence[ChatCompletionMessageParam],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        verbose: int | None = None,
+        on_usage: Callable[[CompletionUsage], None] | None = None,
+    ) -> Generator[str, None, None]:
+        """Generate one chat completion, streamed as raw text deltas.
+
+        The stream's *establishment* (request sent, response headers read) is
+        retried like :meth:`generate`; once tokens flow, a mid-stream failure
+        surfaces immediately — replaying a half-consumed stream would emit
+        duplicate text. Reasoning stages are **not** stripped: ``<think>``
+        tags pass through in the deltas for
+        :class:`~varagity.models.stream.ThinkStreamSplitter` to classify.
+        Servers that extract reasoning into the non-standard
+        ``reasoning_content`` delta field instead (llama.cpp under some
+        ``--reasoning-format`` settings) are normalized to the same shape:
+        those deltas are re-wrapped in synthesized ``<think>…</think>`` tags,
+        so downstream sees one contract either way.
+
+        Closing the returned iterator (``.close()``, or abandoning a ``for``
+        loop) closes the underlying HTTP stream, which is what aborts a
+        llama.cpp generation early — the client-disconnect path (spec_v2
+        §4.3 cancellation) relies on it.
+
+        Args:
+            messages: OpenAI-format chat messages.
+            max_tokens: Generation cap for this call; defaults to the
+                client's ``max_tokens``.
+            temperature: Sampling temperature for this call; defaults to the
+                client's ``temperature``.
+            verbose: Console verbosity (0–2); defaults to
+                ``settings.DEFAULT_VERBOSE``.
+            on_usage: Called with the server-reported token usage when the
+                final stream chunk carries it (requested via
+                ``stream_options.include_usage``; servers that don't report
+                usage simply never trigger it).
+
+        Returns:
+            A generator of raw text deltas, in generation order —
+            specifically a *generator*: ``close()`` is part of the contract
+            (fakes standing in for this method must return one too).
+
+        Raises:
+            ValueError: If ``verbose`` is invalid.
+            openai.APIError: If establishing the stream still fails after
+                retries, or the stream breaks mid-generation.
+        """
+        check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
+        stream = self._create_stream(
+            messages,
+            max_tokens=self.max_tokens if max_tokens is None else max_tokens,
+            temperature=self.temperature if temperature is None else temperature,
+        )
+        return _iter_stream_deltas(stream, on_usage)
+
+    @retry(
+        retry=retry_if_exception_type(_RETRYABLE_ERRORS),
+        wait=wait_exponential(multiplier=0.5, max=10),
+        stop=stop_after_attempt(4),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _create_stream(
+        self,
+        messages: Sequence[ChatCompletionMessageParam],
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> Stream[ChatCompletionChunk]:
+        """Open one streaming chat-completions request, retrying establishment.
+
+        Args:
+            messages: OpenAI-format chat messages.
+            max_tokens: Generation cap for this request.
+            temperature: Sampling temperature for this request.
+
+        Returns:
+            The established SDK stream (not yet consumed).
+        """
+        return self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+
     @retry(
         retry=retry_if_exception_type(_RETRYABLE_ERRORS),
         wait=wait_exponential(multiplier=0.5, max=10),
@@ -179,3 +280,50 @@ class LLMClient:
             temperature=temperature,
         )
         return response.choices[0].message.content or ""
+
+
+def _iter_stream_deltas(
+    stream: Stream[ChatCompletionChunk],
+    on_usage: Callable[[CompletionUsage], None] | None,
+) -> Generator[str, None, None]:
+    """Yield text deltas from an established SDK stream, closing it on exit.
+
+    Normalizes the two reasoning transports into one (see
+    :meth:`LLMClient.generate_stream`): a non-standard ``reasoning_content``
+    delta field is re-wrapped in synthesized ``<think>…</think>`` tags around
+    the contiguous reasoning run.
+
+    Args:
+        stream: The established streaming response.
+        on_usage: Optional callback for the final chunk's token usage.
+
+    Yields:
+        Raw text deltas in generation order.
+    """
+    in_synthesized_think = False
+    try:
+        for chunk in stream:
+            if chunk.usage is not None and on_usage is not None:
+                on_usage(chunk.usage)
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            # llama.cpp extension field — absent from the SDK model, so it
+            # arrives via pydantic's extra="allow" attribute access.
+            reasoning_content = getattr(delta, "reasoning_content", None)
+            if reasoning_content:
+                if not in_synthesized_think:
+                    in_synthesized_think = True
+                    yield _OPEN_THINK_TAG
+                yield str(reasoning_content)
+            if delta.content:
+                if in_synthesized_think:
+                    in_synthesized_think = False
+                    yield _CLOSE_THINK_TAG
+                yield delta.content
+        if in_synthesized_think:
+            # Generation ended while still reasoning: close the synthesized
+            # block so the accumulated raw text stays well-formed.
+            yield _CLOSE_THINK_TAG
+    finally:
+        stream.close()

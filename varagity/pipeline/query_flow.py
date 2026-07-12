@@ -8,6 +8,11 @@ into its own tracked stage here via the retrievers'
 fills the state's ``query_vector`` (``None`` for ``bm25``: nothing to
 encode).
 
+:func:`query_stream_flow` is the flow's streaming twin (spec_v2 §4.3): the
+same embed/retrieve stages, with generation swapped for a tracked task that
+hands deltas to a callback while it runs — the task boundary (and its run
+log) is preserved while tokens flow out to the HTTP API's SSE stream.
+
 Unlike the ingestion flow's model/store tasks, these tasks carry no
 Prefect-level retries: the query path is interactive, the clients already
 retry transient HTTP failures internally (``tenacity``), and stacking task
@@ -25,8 +30,15 @@ from prefect.logging import get_run_logger
 
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
-from varagity.generation.answer import QueryState, format_context, generate_answer
+from varagity.generation.answer import (
+    QueryState,
+    StreamedAnswer,
+    format_context,
+    generate_answer,
+    generate_answer_stream,
+)
 from varagity.models.llm import LLMClient
+from varagity.models.stream import Kind
 from varagity.retrieval import get_retriever
 from varagity.retrieval.base import Retriever
 from varagity.stores.records import RetrievedChunk
@@ -116,6 +128,150 @@ def generate_answer_task(
     )
     get_run_logger().info("generated %d-char answer from %d chunk(s)", len(answer), len(chunks))
     return answer
+
+
+@task(name="generate_answer_stream", cache_policy=NO_CACHE)
+def generate_answer_stream_task(
+    query: str,
+    chunks: list[RetrievedChunk],
+    *,
+    llm: LLMClient | None,
+    formatted_context: str,
+    on_delta: Callable[[Kind, str], None],
+    should_abort: Callable[[], bool] | None,
+    verbose: int,
+) -> StreamedAnswer:
+    """Task wrapper over streamed answer generation (spec_v2 §4.3).
+
+    The task boundary is preserved while deltas flow out through
+    ``on_delta`` — the run log records the outcome exactly like the
+    non-streaming twin. A client-side abort is a deliberate stop, not a
+    failure: the task completes normally with ``aborted=True``.
+
+    Args:
+        query: The user's question.
+        chunks: The retrieved chunks grounding the answer.
+        llm: Chat client; resolved via the model registry when ``None``.
+        formatted_context: The pre-built context block (spec §10.2).
+        on_delta: Called with each classified ``(kind, text)`` fragment.
+        should_abort: Polled between deltas; ``True`` stops generation.
+        verbose: Validated console verbosity.
+
+    Returns:
+        The completed :class:`~varagity.generation.answer.StreamedAnswer`.
+    """
+    result = generate_answer_stream(
+        query,
+        chunks,
+        on_delta=on_delta,
+        llm=llm,
+        formatted_context=formatted_context,
+        should_abort=should_abort,
+        verbose=verbose,
+    )
+    logger = get_run_logger()
+    if result["aborted"]:
+        logger.info("generation aborted by the client after %d chars", len(result["answer"]))
+    else:
+        logger.info(
+            "streamed %d-char answer (%d-char reasoning) from %d chunk(s)",
+            len(result["answer"]),
+            len(result["reasoning"]),
+            len(chunks),
+        )
+    return result
+
+
+class StreamedQueryState(QueryState):
+    """The spec §10.1 state dict, extended with streaming outcomes.
+
+    Attributes:
+        reasoning: The captured ``<think>`` stream (``""`` when none).
+        aborted: ``True`` when the client aborted generation mid-stream.
+        usage: Server-reported token counts, or ``None`` when unreported.
+    """
+
+    reasoning: str
+    aborted: bool
+    usage: dict[str, int] | None
+
+
+@flow(name="query-stream", validate_parameters=False)
+def query_stream_flow(
+    query: str,
+    *,
+    retriever: Retriever | None = None,
+    llm: LLMClient | None = None,
+    k: int | None = None,
+    verbose: int | None = None,
+    on_retrieved: Callable[[list[RetrievedChunk]], None] | None = None,
+    on_delta: Callable[[Kind, str], None],
+    should_abort: Callable[[], bool] | None = None,
+) -> StreamedQueryState:
+    """Answer one question with tracked stages, streaming generation deltas.
+
+    :func:`query_flow`'s streaming twin, backing ``POST /api/chat``
+    (spec_v2 §4.3): identical embed/retrieve staging (``on_retrieved``
+    still fires before generation — the SSE ``retrieval`` event), then the
+    streaming generate task hands each classified delta to ``on_delta``
+    while it runs.
+
+    Args:
+        query: The user's question.
+        retriever: Retrieval method; resolved from
+            ``settings.RETRIEVAL_METHOD`` when omitted.
+        llm: Chat client; resolved via the model registry when omitted.
+        k: Chunks to retrieve; defaults to ``settings.TOP_K``.
+        verbose: Console verbosity (0–2); defaults to
+            ``settings.DEFAULT_VERBOSE``.
+        on_retrieved: Optional hook called with the retrieved chunks before
+            generation.
+        on_delta: Called with each classified ``(kind, text)`` fragment, in
+            stream order (``kind`` is ``"reasoning"`` or ``"answer"``).
+        should_abort: Polled between deltas; returning ``True`` stops
+            generation early and marks the state ``aborted``.
+
+    Returns:
+        The completed :class:`StreamedQueryState`.
+
+    Raises:
+        ValueError: If ``verbose`` is invalid.
+        KeyError: If ``settings.RETRIEVAL_METHOD`` names an unregistered
+            retrieval method.
+    """
+    settings = get_settings()
+    verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
+    active_retriever = (
+        retriever if retriever is not None else get_retriever(settings.RETRIEVAL_METHOD)
+    )
+    top_k = settings.TOP_K if k is None else k
+
+    query_vector = embed_query_task(active_retriever, query, verbose=verbose)
+    chunks = retrieve_task(
+        active_retriever, query, k=top_k, query_vector=query_vector, verbose=verbose
+    )
+    if on_retrieved is not None:
+        on_retrieved(chunks)
+    formatted_context = format_context(chunks)
+    result = generate_answer_stream_task(
+        query,
+        chunks,
+        llm=llm,
+        formatted_context=formatted_context,
+        on_delta=on_delta,
+        should_abort=should_abort,
+        verbose=verbose,
+    )
+    return StreamedQueryState(
+        query=query,
+        query_vector=query_vector,
+        retrieved=chunks,
+        formatted_context=formatted_context,
+        answer=result["answer"],
+        reasoning=result["reasoning"],
+        aborted=result["aborted"],
+        usage=result["usage"],
+    )
 
 
 @flow(name="query", validate_parameters=False)

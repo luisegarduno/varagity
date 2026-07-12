@@ -120,6 +120,12 @@ class Settings(BaseSettings):
             retriever and cross-encoded per query (v2 plan decision #3 —
             the Anthropic cookbook's 150→20 over-fetch, scaled to this
             corpus).
+        API_HOST: Bind address of the HTTP API server (spec_v2 §4.1).
+        API_PORT: Port of the HTTP API server.
+        API_CORS_ORIGINS: Comma-separated origins allowed CORS access to
+            the API (the web app's origin; dev-only posture — spec_v2 §14).
+        UPLOAD_MAX_MB: Per-file size cap for corpus uploads
+            (``POST /api/documents``, spec_v2 §4.2).
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -179,6 +185,11 @@ class Settings(BaseSettings):
     RERANK_BASE_METHOD: str = "hybrid"
     RERANK_CANDIDATES: int = 40
 
+    API_HOST: str = "0.0.0.0"
+    API_PORT: int = 8000
+    API_CORS_ORIGINS: str = "http://localhost:3000"
+    UPLOAD_MAX_MB: int = 50
+
     @property
     def allowed_extension_set(self) -> frozenset[str]:
         """Parsed ``ALLOWED_EXTENSIONS`` as a normalized set.
@@ -213,6 +224,40 @@ class Settings(BaseSettings):
             if code and code not in languages:
                 languages.append(code)
         return languages
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """Parsed ``API_CORS_ORIGINS`` as an ordered, deduplicated list.
+
+        Entries are stripped; trailing slashes are removed (an origin is
+        scheme://host[:port], never a path).
+
+        Returns:
+            The allowed origins, e.g. ``["http://localhost:3000"]``.
+        """
+        origins: list[str] = []
+        for raw in self.API_CORS_ORIGINS.split(","):
+            origin = raw.strip().rstrip("/")
+            if origin and origin not in origins:
+                origins.append(origin)
+        return origins
+
+    @model_validator(mode="after")
+    def _validate_api(self) -> "Settings":
+        """Reject HTTP API parameters outside their domains (spec_v2 §10).
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If ``API_PORT`` is not a valid TCP port or
+                ``UPLOAD_MAX_MB`` is not positive.
+        """
+        if not 0 < self.API_PORT < 65536:
+            raise ValueError(f"API_PORT must be a valid TCP port (1–65535); got {self.API_PORT}")
+        if self.UPLOAD_MAX_MB <= 0:
+            raise ValueError(f"UPLOAD_MAX_MB must be positive; got {self.UPLOAD_MAX_MB}")
+        return self
 
     @field_validator("OCR_LANGUAGES")
     @classmethod

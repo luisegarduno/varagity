@@ -147,6 +147,47 @@ services:
       - varagity-net
     restart: unless-stopped
 
+  api:
+    container_name: varagity-api
+    build:
+      context: ./
+      dockerfile: Dockerfile.api
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      # Uploads land here via POST /api/documents (v2 Phase 8); mounted now so
+      # the API and the CLI app agree on the corpus from day one.
+      - ./docs:/app/docs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      infinity-embeddings:
+        condition: service_healthy
+      llamacpp:
+        condition: service_healthy
+      prefect:
+        condition: service_healthy
+    healthcheck:
+      # /api/health answers 200 whenever the API process is alive (dependency
+      # state rides in the body); the image ships no curl, so probe with the
+      # venv python's stdlib, as the prefect service does.
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=4)",
+        ]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+    networks:
+      - varagity-net
+    restart: unless-stopped
+
   app:
     container_name: varagity
     build: ./

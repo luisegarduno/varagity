@@ -70,8 +70,12 @@ JOIN unnest(%(doc_ids)s::text[], %(original_indexes)s::int[])
 """
 
 
-def _default_conninfo() -> str:
+def default_conninfo() -> str:
     """Build the connection string from settings.
+
+    Shared by every Postgres-backed store (this one, the conversation
+    store) and the migration runner, so ``POSTGRES_*`` is interpreted in
+    exactly one place.
 
     Returns:
         A libpq conninfo string for the configured PostgreSQL instance.
@@ -104,7 +108,7 @@ class ContextualVectorDB:
         Raises:
             psycopg.OperationalError: If the database is unreachable.
         """
-        self._conn = psycopg.connect(conninfo or _default_conninfo(), autocommit=True)
+        self._conn = psycopg.connect(conninfo or default_conninfo(), autocommit=True)
         register_vector(self._conn)
 
     def close(self) -> None:
