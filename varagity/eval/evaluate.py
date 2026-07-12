@@ -1,20 +1,22 @@
-"""Retrieval evaluation: recall@k / pass@k over the 4-config matrix (spec §16).
+"""Retrieval evaluation: recall@k / pass@k over the 5-config matrix (spec §16).
 
-Quantifies the retrieval-quality ladder Phases 4→5→6 climbed, on the golden
-set over ``tests/fixtures/corpus``:
+Quantifies the retrieval-quality ladder, on the golden set over
+``tests/fixtures/corpus``:
 
-1. ``semantic_noncontextual`` — the Phase 4 baseline,
+1. ``semantic_noncontextual`` — the v1 Phase 4 baseline,
 2. ``semantic_contextual`` — contextual embeddings (≈35% tier),
 3. ``bm25_contextual`` — contextual BM25,
-4. ``hybrid_contextual`` — rank fusion (≈49% tier, the v1 default).
+4. ``hybrid_contextual`` — rank fusion (≈49% tier, the default),
+5. ``hybrid_rerank_contextual`` — + cross-encoder re-ranking (≈67% tier,
+   spec_v2 §5.5).
 
 Measurement runs against **ephemeral testcontainers stores** (plan decision
-#4) so the live corpus is never touched, while embeddings and the
-contextualizing LLM are the real GPU services from the running compose
-stack (they are stateless). Two ingests cover all four configs: ingest A
-(``CONTEXTUALIZE=false``) backs config 1; ingest B (``CONTEXTUALIZE=true``,
-``reingest`` over the same stores) backs configs 2–4 against the same
-index.
+#4) so the live corpus is never touched, while embeddings, the
+contextualizing LLM, and the reranker are the real GPU services from the
+running compose stack (they are stateless). Two ingests cover all five
+configs: ingest A (``CONTEXTUALIZE=false``) backs config 1; ingest B
+(``CONTEXTUALIZE=true``, ``reingest`` over the same stores) backs configs
+2–5 against the same index.
 
 Metric semantics: :func:`recall_at_k` is the Anthropic cookbook's
 evaluation number (there called *Pass@n*) — the per-query fraction of
@@ -50,6 +52,7 @@ from varagity.models.registry import get_model
 from varagity.retrieval.base import Retriever
 from varagity.retrieval.bm25 import BM25Retriever
 from varagity.retrieval.hybrid import HybridRetriever
+from varagity.retrieval.reranked import RerankedRetriever
 from varagity.retrieval.semantic import SemanticRetriever
 from varagity.stores.records import RetrievedChunk
 
@@ -66,7 +69,10 @@ RESULTS_DIR = Path("data/eval/results")
 
 # The pipeline settings every eval run pins (see the module docstring).
 # CONTEXTUALIZE is deliberately absent — it is the variable under test —
-# as are the model endpoints, which name the live GPU services.
+# as are the model endpoints, which name the live GPU services. The rerank
+# pins (spec_v2 §5.5) hold RERANK_TOP_N at max(K_VALUES) so the reranked
+# config fills the deepest reported cut, and TOP_K alongside it so the
+# combination stays valid whatever RETRIEVAL_METHOD the host env selects.
 PINNED_EVAL_SETTINGS: dict[str, str] = {
     "ALLOWED_EXTENSIONS": ".pdf,.txt,.md",
     "CHUNKING_STRATEGY": "recursive_character",
@@ -79,6 +85,11 @@ PINNED_EVAL_SETTINGS: dict[str, str] = {
     "OCR_LANGUAGES": "en",
     "SEMANTIC_WEIGHT": "0.8",
     "BM25_WEIGHT": "0.2",
+    "TOP_K": "20",
+    "RERANK_ENABLED": "true",
+    "RERANK_BASE_METHOD": "hybrid",
+    "RERANK_CANDIDATES": "40",
+    "RERANK_TOP_N": "20",
 }
 
 # An ingest-compatible callable: `ingest_corpus` or the Prefect-tracked
@@ -288,11 +299,11 @@ def run_matrix(
     ingest: IngestCallable = ingest_corpus,
     verbose: int | None = None,
 ) -> dict[str, Any]:
-    """Run the 4-configuration retrieval matrix and persist its results.
+    """Run the 5-configuration retrieval matrix and persist its results.
 
-    Two ingests into ephemeral stores cover all four configs (see the
-    module docstring). Embeddings and the contextualizing LLM resolve from
-    settings — the live GPU services.
+    Two ingests into ephemeral stores cover all five configs (see the
+    module docstring). Embeddings, the contextualizing LLM, and the
+    reranker resolve from settings — the live GPU services.
 
     Args:
         corpus_root: The eval corpus (defaults to the fixtures corpus the
@@ -324,16 +335,21 @@ def run_matrix(
     # should fail before containers spin, not after an ingest.
     embeddings = get_model("embedding")
     llm = get_model("default")
+    rerank = get_model("rerank")
 
     configs: dict[str, dict[str, dict[str, float]]] = {}
     ranks_by_config: dict[str, list[dict[str, int | None]]] = {}
     ingest_seconds: dict[str, float] = {}
 
     with ephemeral_stores() as stores:
+        hybrid = HybridRetriever(store=stores.store, bm25=stores.bm25, embeddings=embeddings)
         retrievers: dict[str, Retriever] = {
             "semantic": SemanticRetriever(store=stores.store, embeddings=embeddings),
             "bm25": BM25Retriever(bm25=stores.bm25, store=stores.store),
-            "hybrid": HybridRetriever(store=stores.store, bm25=stores.bm25, embeddings=embeddings),
+            "hybrid": hybrid,
+            # Config 5 composes the same store-wired hybrid; the reranker
+            # is the live infinity container's /rerank (spec_v2 §5.5).
+            "reranked": RerankedRetriever(base=hybrid, rerank=rerank),
         }
 
         # Ingest A — non-contextual baseline → config 1.
@@ -355,7 +371,7 @@ def run_matrix(
                 measure_retriever(retrievers["semantic"], entries)
             )
 
-        # Ingest B — contextual (LLM blurbs) → configs 2–4 on one index.
+        # Ingest B — contextual (LLM blurbs) → configs 2–5 on one index.
         with pinned_eval_settings(CONTEXTUALIZE="true"):
             logger.info("ingest B (contextual) into the same ephemeral stores (reingest)")
             started = time.monotonic()
@@ -375,6 +391,7 @@ def run_matrix(
                 ("semantic_contextual", "semantic"),
                 ("bm25_contextual", "bm25"),
                 ("hybrid_contextual", "hybrid"),
+                ("hybrid_rerank_contextual", "reranked"),
             ):
                 configs[config], ranks_by_config[config] = measure_retriever(
                     retrievers[retriever_name], entries
@@ -389,6 +406,7 @@ def run_matrix(
         "n_queries": len(entries),
         "k_values": list(K_VALUES),
         "embedding_model": settings.EMBEDDING_MODEL,
+        "rerank_model": settings.RERANK_MODEL,
         "pinned_settings": dict(PINNED_EVAL_SETTINGS),
         "chunks_ingested": summary_b.chunks,
         "ingest_seconds": ingest_seconds,

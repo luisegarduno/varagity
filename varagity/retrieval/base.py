@@ -2,9 +2,10 @@
 
 Each retrieval method module defines one implementation decorated with
 ``@register("name")``; callers resolve the configured method with
-``get_retriever(settings.RETRIEVAL_METHOD)``. v1 registers ``semantic``,
-``bm25``, and ``hybrid``; adding a method later (e.g. a reranking retriever,
-post-v1) means one new file plus its import line — no caller edits.
+``get_retriever(settings.RETRIEVAL_METHOD)``. Registered: ``semantic``,
+``bm25``, ``hybrid`` (v1), and ``reranked`` (v2, spec_v2 §5); adding a
+method later means one new file plus its import line — no caller edits,
+exactly as the ``reranked`` addition proved.
 """
 
 from collections.abc import Callable

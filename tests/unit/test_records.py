@@ -2,7 +2,13 @@
 
 from datetime import UTC
 
-from varagity.stores.records import ChunkRecord, RetrievedChunk, content_hash, derive_doc_id
+from varagity.stores.records import (
+    ChunkRecord,
+    RetrievalTrace,
+    RetrievedChunk,
+    content_hash,
+    derive_doc_id,
+)
 
 
 def _record(**overrides: object) -> ChunkRecord:
@@ -105,3 +111,54 @@ class TestRetrievedChunk:
         )
         assert retrieved.score == 0.87
         assert retrieved.metadata["file_name"] == "a.md"
+
+    def test_trace_defaults_to_none(self) -> None:
+        """Backward compatible (spec_v2 §9.2): pre-trace payloads still validate."""
+        retrieved = RetrievedChunk(
+            chunk_id="abc::0",
+            doc_id="abc",
+            original_index=0,
+            content="text",
+            context=None,
+            metadata={},
+            score=0.5,
+        )
+        assert retrieved.trace is None
+
+
+class TestRetrievalTrace:
+    def test_minimal_trace_defaults_optional_arms_to_none(self) -> None:
+        trace = RetrievalTrace(fused_score=0.8, fused_rank=1, final_rank=1)
+        assert trace.semantic_rank is None
+        assert trace.bm25_rank is None
+        assert trace.rerank_score is None
+        assert trace.rerank_delta is None
+
+    def test_full_trace_round_trips(self) -> None:
+        """The trace serializes losslessly (the API snapshots it as JSONB later)."""
+        trace = RetrievalTrace(
+            semantic_rank=1,
+            semantic_score=0.91,
+            bm25_rank=3,
+            bm25_score=7.5,
+            fused_score=0.94,
+            fused_rank=2,
+            rerank_score=0.88,
+            rerank_delta=+1,
+            final_rank=1,
+        )
+        assert RetrievalTrace.model_validate(trace.model_dump()) == trace
+
+    def test_attaches_to_retrieved_chunk(self) -> None:
+        trace = RetrievalTrace(fused_score=0.8, fused_rank=1, final_rank=1)
+        retrieved = RetrievedChunk(
+            chunk_id="abc::0",
+            doc_id="abc",
+            original_index=0,
+            content="text",
+            context=None,
+            metadata={},
+            score=0.8,
+            trace=trace,
+        )
+        assert retrieved.trace == trace

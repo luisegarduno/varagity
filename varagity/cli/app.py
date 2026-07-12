@@ -23,7 +23,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from varagity.config import get_settings
-from varagity.debug.show import console
+from varagity.debug.show import console, trace_badges
 from varagity.ingest.loader import IngestSummary
 from varagity.logging_setup import setup_logging
 from varagity.models.registry import get_model
@@ -97,10 +97,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_verbose_option(chat, default=argparse.SUPPRESS)
     evaluate = subparsers.add_parser(
         "eval",
-        help="measure retrieval quality (recall@k/pass@k, 4-config matrix) on ephemeral stores",
+        help="measure retrieval quality (recall@k/pass@k, 5-config matrix) on ephemeral stores",
         description="Run the spec §16 evaluation harness against ephemeral testcontainers "
         "stores (Docker required) and the live GPU services. Without a target, runs the "
-        "4-configuration retrieval matrix; `eval ocr` benchmarks the OCR engines.",
+        "5-configuration retrieval matrix; `eval ocr` benchmarks the OCR engines.",
     )
     _add_verbose_option(evaluate, default=argparse.SUPPRESS)
     eval_targets = evaluate.add_subparsers(dest="eval_command", metavar="TARGET")
@@ -209,7 +209,7 @@ def _run_chat(verbose: int) -> int:
 
 
 def _run_eval(verbose: int) -> int:
-    """Execute the ``eval`` subcommand: the 4-configuration retrieval matrix.
+    """Execute the ``eval`` subcommand: the 5-configuration retrieval matrix.
 
     Args:
         verbose: Effective console verbosity.
@@ -236,12 +236,14 @@ def _run_eval_ocr(verbose: int) -> int:
     return 0
 
 
-# Matrix config keys in ladder order, with their table labels (spec §16).
+# Matrix config keys in ladder order, with their table labels (spec §16 +
+# spec_v2 §5.5).
 _MATRIX_CONFIG_LABELS: tuple[tuple[str, str], ...] = (
     ("semantic_noncontextual", "1. semantic, non-contextual"),
     ("semantic_contextual", "2. semantic, contextual"),
     ("bm25_contextual", "3. BM25, contextual"),
     ("hybrid_contextual", "4. hybrid, contextual"),
+    ("hybrid_rerank_contextual", "5. hybrid + rerank, contextual"),
 )
 
 
@@ -327,19 +329,23 @@ def _show_matches(chunks: list[RetrievedChunk]) -> None:
     """Render the retrieved matches as a table (spec §10.1 step 4).
 
     Args:
-        chunks: The retrieved chunks, best first.
+        chunks: The retrieved chunks, best first (the ``Trace`` column shows
+            each chunk's compact rank provenance when the retriever attached
+            one — spec_v2 §9.2).
     """
     table = Table(title=f"Top {len(chunks)} matches")
     table.add_column("#", justify="right", style="dim")
     table.add_column("Score", justify="right")
     table.add_column("Source", style="bold")
+    table.add_column("Trace", style="dim")
     table.add_column("Snippet")
     for rank, chunk in enumerate(chunks, start=1):
         source = str(chunk.metadata.get("file_name") or chunk.metadata.get("source", "<unknown>"))
         page = chunk.metadata.get("page")
         if page is not None:
             source = f"{source} p.{page}"
-        table.add_row(str(rank), f"{chunk.score:.4f}", source, _snippet(chunk.content))
+        trace = trace_badges(chunk.trace) if chunk.trace is not None else "—"
+        table.add_row(str(rank), f"{chunk.score:.4f}", source, trace, _snippet(chunk.content))
     console.print(table)
 
 

@@ -89,14 +89,37 @@ class Settings(BaseSettings):
             ``prefect`` is imported (Prefect captures its environment at
             import time), so flow/task runs are tracked by the compose
             ``prefect`` service.
-        RETRIEVAL_METHOD: Registry name of the retrieval method (spec §10.1:
-            ``semantic`` | ``bm25`` | ``hybrid``; the v1 default is
-            ``hybrid``).
+        RETRIEVAL_METHOD: Registry name of the retrieval method (spec §10.1
+            + spec_v2 §5: ``semantic`` | ``bm25`` | ``hybrid`` |
+            ``reranked``; the default is ``hybrid``).
         TOP_K: Number of chunks retrieved per query.
         SEMANTIC_WEIGHT: Hybrid rank-fusion weight of the semantic (pgvector)
             arm (spec §11.4). Must sum to 1.0 with ``BM25_WEIGHT``.
         BM25_WEIGHT: Hybrid rank-fusion weight of the BM25 (Elasticsearch)
             arm. Must sum to 1.0 with ``SEMANTIC_WEIGHT``.
+        RERANK_ENABLED: Kill switch for the cross-encoder stage, orthogonal
+            to method selection (spec_v2 §5.2): with
+            ``RETRIEVAL_METHOD=reranked`` and this off, the ``reranked``
+            retriever degrades to its base method's ranking and logs it.
+        RERANK_MODEL: Served reranker name passed to the infinity
+            ``/rerank`` endpoint, verbatim. Must be a cross-encoder
+            (``bge-reranker-v2-m3``); infinity structurally rejects
+            bi-encoders (e5, jina) at ``/rerank``.
+        RERANK_API_URL: OpenAI-style base URL of the infinity server
+            serving the reranker (``/rerank`` lives under the same ``/v1``
+            prefix as embeddings).
+        RERANK_API_KEY: Bearer token for the reranker (the same infinity
+            key as embeddings).
+        RERANK_TOP_N: Documents kept after re-ranking. Must be positive and
+            ≤ ``RERANK_CANDIDATES``; with ``RETRIEVAL_METHOD=reranked``
+            also ≤ ``TOP_K`` (rerank narrows; it can't invent candidates).
+        RERANK_BASE_METHOD: Registry name of the retriever the ``reranked``
+            method composes (``semantic`` | ``bm25`` | ``hybrid``; not
+            ``reranked`` — no recursion).
+        RERANK_CANDIDATES: Candidate-pool size over-fetched from the base
+            retriever and cross-encoded per query (v2 plan decision #3 —
+            the Anthropic cookbook's 150→20 over-fetch, scaled to this
+            corpus).
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -147,6 +170,14 @@ class Settings(BaseSettings):
     TOP_K: int = 10
     SEMANTIC_WEIGHT: float = 0.8
     BM25_WEIGHT: float = 0.2
+
+    RERANK_ENABLED: bool = False
+    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    RERANK_API_URL: str = "http://infinity-embeddings:8081/v1"
+    RERANK_API_KEY: str = "change-me"
+    RERANK_TOP_N: int = 5
+    RERANK_BASE_METHOD: str = "hybrid"
+    RERANK_CANDIDATES: int = 40
 
     @property
     def allowed_extension_set(self) -> frozenset[str]:
@@ -269,7 +300,7 @@ class Settings(BaseSettings):
     @field_validator("RETRIEVAL_METHOD")
     @classmethod
     def _validate_retrieval_method(cls, value: str) -> str:
-        """Reject retrieval methods outside the spec §10.1 vocabulary.
+        """Reject retrieval methods outside the spec §10.1 / spec_v2 §5 vocabulary.
 
         Membership in the vocabulary is validated here; registry membership
         is enforced by :func:`varagity.retrieval.get_retriever` at lookup
@@ -282,13 +313,57 @@ class Settings(BaseSettings):
             The validated value, unchanged.
 
         Raises:
-            ValueError: If ``value`` is not ``semantic``, ``bm25``, or
-                ``hybrid``.
+            ValueError: If ``value`` is not ``semantic``, ``bm25``,
+                ``hybrid``, or ``reranked``.
         """
-        allowed = ("semantic", "bm25", "hybrid")
+        allowed = ("semantic", "bm25", "hybrid", "reranked")
         if value not in allowed:
             raise ValueError(f"RETRIEVAL_METHOD must be one of {allowed}; got {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def _validate_rerank(self) -> "Settings":
+        """Reject rerank parameters that cannot produce a valid rerank stage.
+
+        The cross-method constraints (spec_v2 §5.3): re-ranking *narrows* a
+        wider candidate pool, so ``RERANK_TOP_N`` can never exceed the pool,
+        and when the ``reranked`` method is selected it can't promise more
+        results than ``TOP_K`` nor rerank a pool smaller than ``TOP_K``.
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If ``RERANK_TOP_N`` is not in
+                ``(0, RERANK_CANDIDATES]``, if ``RERANK_BASE_METHOD`` is not
+                ``semantic``/``bm25``/``hybrid`` (``reranked`` would
+                recurse), or if ``RETRIEVAL_METHOD == "reranked"`` with
+                ``RERANK_TOP_N > TOP_K`` or ``RERANK_CANDIDATES < TOP_K``.
+        """
+        if not 0 < self.RERANK_TOP_N <= self.RERANK_CANDIDATES:
+            raise ValueError(
+                f"RERANK_TOP_N ({self.RERANK_TOP_N}) must be positive and at most "
+                f"RERANK_CANDIDATES ({self.RERANK_CANDIDATES})"
+            )
+        allowed_bases = ("semantic", "bm25", "hybrid")
+        if self.RERANK_BASE_METHOD not in allowed_bases:
+            raise ValueError(
+                f"RERANK_BASE_METHOD must be one of {allowed_bases} (not 'reranked' — "
+                f"no recursion); got {self.RERANK_BASE_METHOD!r}"
+            )
+        if self.RETRIEVAL_METHOD == "reranked":
+            if self.RERANK_TOP_N > self.TOP_K:
+                raise ValueError(
+                    f"RERANK_TOP_N ({self.RERANK_TOP_N}) must not exceed TOP_K "
+                    f"({self.TOP_K}) when RETRIEVAL_METHOD is 'reranked' — rerank "
+                    "narrows; it can't invent candidates"
+                )
+            if self.RERANK_CANDIDATES < self.TOP_K:
+                raise ValueError(
+                    f"RERANK_CANDIDATES ({self.RERANK_CANDIDATES}) must be at least "
+                    f"TOP_K ({self.TOP_K}) when RETRIEVAL_METHOD is 'reranked'"
+                )
+        return self
 
     @model_validator(mode="after")
     def _validate_fusion_weights(self) -> "Settings":

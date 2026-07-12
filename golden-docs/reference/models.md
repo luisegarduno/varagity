@@ -4,4 +4,6 @@
 
 ::: varagity.models.embeddings
 
+::: varagity.models.rerank
+
 ::: varagity.models.llm

@@ -31,7 +31,7 @@ if TYPE_CHECKING:  # imported for annotations only — avoids a runtime cycle
     from langchain_core.documents import Document
 
     from varagity.ingest.discovery import Buckets
-    from varagity.stores.records import RetrievedChunk
+    from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
 VERBOSE_LEVELS: tuple[int, ...] = (0, 1, 2)
 
@@ -83,17 +83,41 @@ def v_discover(buckets: "Buckets", verbose: int) -> None:
                 console.print(f"  [dim]{bucket_name}[/dim] {path}")
 
 
+def trace_badges(trace: "RetrievalTrace") -> str:
+    """Format a retrieval trace as one-line rank badges (spec_v2 §4.6).
+
+    The terminal counterpart of the provenance panel's ``RankBadges``:
+    ``sem #1 · bm25 #3 · fused 0.94 · rerank +2``. An arm that never
+    surfaced the chunk shows ``—``; the rerank badge appears only when the
+    rerank stage ran.
+
+    Args:
+        trace: The chunk's rank provenance.
+
+    Returns:
+        The badge string.
+    """
+    semantic = f"sem #{trace.semantic_rank}" if trace.semantic_rank is not None else "sem —"
+    bm25 = f"bm25 #{trace.bm25_rank}" if trace.bm25_rank is not None else "bm25 —"
+    parts = [semantic, bm25, f"fused {trace.fused_score:.2f}"]
+    if trace.rerank_delta is not None:
+        parts.append(f"rerank {trace.rerank_delta:+d}")
+    return " · ".join(parts)
+
+
 def v_retrieve(chunks: "Sequence[RetrievedChunk]", verbose: int) -> None:
     """Render retrieval results (for a retriever's ``retrieve``).
 
     Mirrors the reference's ``v_retrieve_docs``: at level 2 each retrieved
-    chunk becomes a panel with its score, source, content, and (when the
-    chunk was ingested with ``CONTEXTUALIZE`` on) its situating context.
+    chunk becomes a panel with its score, source, content, (when the chunk
+    was ingested with ``CONTEXTUALIZE`` on) its situating context, and
+    (when the retriever attached one) its :func:`trace_badges` rank
+    provenance.
 
     Args:
         chunks: The retrieved chunks, best first.
         verbose: 0 = nothing; 1 = retrieved count; 2 = a panel per chunk
-            (score/source/content/context).
+            (score/source/content/context/trace).
 
     Raises:
         ValueError: If ``verbose`` is invalid.
@@ -106,9 +130,13 @@ def v_retrieve(chunks: "Sequence[RetrievedChunk]", verbose: int) -> None:
         for rank, chunk in enumerate(chunks, start=1):
             source = str(chunk.metadata.get("source", "<unknown>"))
             page = chunk.metadata.get("page")
-            body: RenderableType = Text(chunk.content)
+            renderables: list[RenderableType] = []
+            if chunk.trace is not None:
+                renderables.append(Text(trace_badges(chunk.trace), style="bold dim"))
             if chunk.context:
-                body = Group(Panel(Text(chunk.context), title="context", style="dim"), body)
+                renderables.append(Panel(Text(chunk.context), title="context", style="dim"))
+            renderables.append(Text(chunk.content))
+            body: RenderableType = renderables[0] if len(renderables) == 1 else Group(*renderables)
             console.print(
                 Panel(
                     body,

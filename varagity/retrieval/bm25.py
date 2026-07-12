@@ -13,7 +13,7 @@ from varagity.config import get_settings
 from varagity.debug.show import check_verbose, v_retrieve
 from varagity.retrieval.base import register
 from varagity.stores.bm25_store import BM25Hit, ElasticsearchBM25
-from varagity.stores.records import RetrievedChunk
+from varagity.stores.records import RetrievalTrace, RetrievedChunk
 from varagity.stores.vector_store import ContextualVectorDB
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 def hydrate(
     scored_keys: list[tuple[tuple[str, int], float]],
     store: ContextualVectorDB,
+    traces: dict[tuple[str, int], RetrievalTrace] | None = None,
 ) -> list[RetrievedChunk]:
     """Hydrate identity tuples into full chunk records (spec §11.4).
 
@@ -31,6 +32,8 @@ def hydrate(
         scored_keys: ``((doc_id, original_index), score)`` pairs, best first;
             the score becomes the returned chunk's score.
         store: The vector store holding the full rows.
+        traces: Per-identity rank provenance to attach (spec_v2 §9.2); when
+            omitted the chunks carry ``trace=None`` (the pre-v2 shape).
 
     Returns:
         The hydrated chunks in the given order. A key missing from pgvector
@@ -48,7 +51,10 @@ def hydrate(
                 key,
             )
             continue
-        chunks.append(row.model_copy(update={"score": score}))
+        update: dict[str, object] = {"score": score}
+        if traces is not None:
+            update["trace"] = traces.get(key)
+        chunks.append(row.model_copy(update=update))
     return chunks
 
 
@@ -128,11 +134,22 @@ class BM25Retriever:
         verbose = check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
         hits = self._search_bm25(query, k, verbose)
         scored_keys = [((hit.doc_id, hit.original_index), hit.score) for hit in hits]
+        # Single-arm trace (spec_v2 §9.2): the BM25 ranking is the ranking.
+        traces = {
+            key: RetrievalTrace(
+                bm25_rank=rank,
+                bm25_score=score,
+                fused_score=score,
+                fused_rank=rank,
+                final_rank=rank,
+            )
+            for rank, (key, score) in enumerate(scored_keys, start=1)
+        }
         if self._store is not None:
-            chunks = hydrate(scored_keys, self._store)
+            chunks = hydrate(scored_keys, self._store, traces=traces)
         else:
             with ContextualVectorDB() as store:
-                chunks = hydrate(scored_keys, store)
+                chunks = hydrate(scored_keys, store, traces=traces)
         v_retrieve(chunks, verbose)
         return chunks
 

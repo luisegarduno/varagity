@@ -6,6 +6,7 @@ from varagity.models import get_model
 from varagity.models.embeddings import EmbeddingsClient
 from varagity.models.llm import LLMClient
 from varagity.models.registry import MODEL_TYPES
+from varagity.models.rerank import RerankClient
 
 
 def test_embedding_returns_embeddings_client() -> None:
@@ -16,6 +17,12 @@ def test_embedding_returns_embeddings_client() -> None:
 def test_default_returns_llm_client() -> None:
     client = get_model("default")
     assert isinstance(client, LLMClient)
+
+
+def test_rerank_returns_rerank_client() -> None:
+    """v2 registers the infinity cross-encoder as model_type="rerank" (spec_v2 §5.4)."""
+    client = get_model("rerank")
+    assert isinstance(client, RerankClient)
 
 
 @pytest.mark.parametrize("alias", ["reasoning", "tool"])
@@ -34,6 +41,7 @@ def test_dispatch_reacts_to_the_parameter() -> None:
     branch.
     """
     assert isinstance(get_model("embedding"), EmbeddingsClient)
+    assert isinstance(get_model("rerank"), RerankClient)
     assert isinstance(get_model("default"), LLMClient)
     assert isinstance(get_model("reasoning"), LLMClient)
     assert isinstance(get_model("tool"), LLMClient)
@@ -47,5 +55,6 @@ def test_unknown_type_raises_listing_available(bad_type: str) -> None:
         get_model(bad_type)
 
 
-def test_phase_4_registers_llm_and_embedding_types() -> None:
-    assert MODEL_TYPES == ("default", "embedding", "reasoning", "tool")
+def test_registered_model_types() -> None:
+    """v1's four types plus v2's rerank (spec_v2 §5.4)."""
+    assert MODEL_TYPES == ("default", "embedding", "rerank", "reasoning", "tool")

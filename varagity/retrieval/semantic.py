@@ -10,7 +10,7 @@ from varagity.debug.show import check_verbose, v_retrieve
 from varagity.models.embeddings import EmbeddingsClient
 from varagity.models.registry import get_model
 from varagity.retrieval.base import register
-from varagity.stores.records import RetrievedChunk
+from varagity.stores.records import RetrievalTrace, RetrievedChunk
 from varagity.stores.vector_store import ContextualVectorDB
 
 
@@ -94,5 +94,20 @@ class SemanticRetriever:
         else:
             with ContextualVectorDB() as store:
                 chunks = store.search(query_vector, k, verbose=verbose)
+        # Single-arm trace (spec_v2 §9.2): the cosine ranking is the ranking.
+        chunks = [
+            chunk.model_copy(
+                update={
+                    "trace": RetrievalTrace(
+                        semantic_rank=rank,
+                        semantic_score=chunk.score,
+                        fused_score=chunk.score,
+                        fused_rank=rank,
+                        final_rank=rank,
+                    )
+                }
+            )
+            for rank, chunk in enumerate(chunks, start=1)
+        ]
         v_retrieve(chunks, verbose)
         return chunks

@@ -171,6 +171,40 @@ class ChunkRecord(BaseModel):
         )
 
 
+class RetrievalTrace(BaseModel):
+    """Why one retrieved chunk ranked where it did (spec_v2 §9.2).
+
+    Query-time only — computed per answer by the retrievers, never persisted
+    on the immutable chunk rows. Ranks are 1-based (display-ready); an arm's
+    rank/score are ``None`` when that arm's ranked list never surfaced the
+    chunk. Single-arm retrievers report their arm's score/rank as the fused
+    values (there is nothing to fuse).
+
+    Attributes:
+        semantic_rank: Rank in the semantic (pgvector) arm.
+        semantic_score: Cosine similarity in the semantic arm.
+        bm25_rank: Rank in the BM25 (Elasticsearch) arm.
+        bm25_score: BM25 relevance in that arm.
+        fused_score: Weighted reciprocal-rank fusion score (spec §11.4).
+        fused_rank: Rank after fusion.
+        rerank_score: Cross-encoder relevance (``None`` when reranking is
+            off the path).
+        rerank_delta: Positions moved by reranking, ``pre − post`` (+ moved
+            up / − moved down; ``None`` when reranking is off the path).
+        final_rank: The rank actually returned to the caller.
+    """
+
+    semantic_rank: int | None = None
+    semantic_score: float | None = None
+    bm25_rank: int | None = None
+    bm25_score: float | None = None
+    fused_score: float
+    fused_rank: int
+    rerank_score: float | None = None
+    rerank_delta: int | None = None
+    final_rank: int
+
+
 class RetrievedChunk(BaseModel):
     """A chunk returned by a store search, with its relevance score.
 
@@ -187,6 +221,9 @@ class RetrievedChunk(BaseModel):
         metadata: Full persisted metadata record.
         score: Similarity score — cosine similarity ``1 - distance`` for the
             vector store (higher is better).
+        trace: Rank provenance attached by the retrievers (spec_v2 §9.2);
+            ``None`` on raw store results, so pre-trace callers are
+            unaffected.
     """
 
     chunk_id: str
@@ -196,3 +233,4 @@ class RetrievedChunk(BaseModel):
     context: str | None
     metadata: dict[str, Any]
     score: float
+    trace: RetrievalTrace | None = None

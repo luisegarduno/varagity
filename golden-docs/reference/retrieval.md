@@ -7,3 +7,5 @@
 ::: varagity.retrieval.bm25
 
 ::: varagity.retrieval.hybrid
+
+::: varagity.retrieval.reranked

@@ -9,12 +9,13 @@ from varagity.debug.show import (
     VERBOSE_LEVELS,
     check_verbose,
     console,
+    trace_badges,
     v_chunk,
     v_discover,
     v_retrieve,
 )
 from varagity.ingest.discovery import Buckets
-from varagity.stores.records import RetrievedChunk
+from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
 
 def test_supported_levels_are_0_1_2() -> None:
@@ -105,8 +106,50 @@ class TestVChunk:
         assert capture.get() == ""
 
 
+class TestTraceBadges:
+    def test_full_trace_renders_all_badges(self) -> None:
+        trace = RetrievalTrace(
+            semantic_rank=1,
+            semantic_score=0.91,
+            bm25_rank=3,
+            bm25_score=7.5,
+            fused_score=0.94,
+            fused_rank=2,
+            rerank_score=0.88,
+            rerank_delta=+2,
+            final_rank=1,
+        )
+        assert trace_badges(trace) == "sem #1 · bm25 #3 · fused 0.94 · rerank +2"
+
+    def test_missing_arm_shows_dash(self) -> None:
+        trace = RetrievalTrace(
+            bm25_rank=1, bm25_score=7.5, fused_score=7.5, fused_rank=1, final_rank=1
+        )
+        assert trace_badges(trace) == "sem — · bm25 #1 · fused 7.50"
+
+    def test_negative_delta_keeps_its_sign(self) -> None:
+        trace = RetrievalTrace(
+            semantic_rank=1,
+            semantic_score=0.9,
+            fused_score=0.8,
+            fused_rank=1,
+            rerank_score=0.1,
+            rerank_delta=-2,
+            final_rank=3,
+        )
+        assert "rerank -2" in trace_badges(trace)
+
+    def test_no_rerank_stage_omits_the_badge(self) -> None:
+        trace = RetrievalTrace(
+            semantic_rank=1, semantic_score=0.9, fused_score=0.8, fused_rank=1, final_rank=1
+        )
+        assert "rerank" not in trace_badges(trace)
+
+
 class TestVRetrieve:
-    def _chunks(self, *, context: str | None = None) -> list[RetrievedChunk]:
+    def _chunks(
+        self, *, context: str | None = None, trace: RetrievalTrace | None = None
+    ) -> list[RetrievedChunk]:
         return [
             RetrievedChunk(
                 chunk_id=f"docaaa000000000a::{i}",
@@ -116,6 +159,7 @@ class TestVRetrieve:
                 context=context,
                 metadata={"source": "/docs/a.md", "file_name": "a.md", "page": None},
                 score=0.91 - i / 10,
+                trace=trace,
             )
             for i in range(2)
         ]
@@ -145,6 +189,29 @@ class TestVRetrieve:
         with console.capture() as capture:
             v_retrieve(self._chunks(context="situating blurb"), verbose=2)
         assert "situating blurb" in capture.get()
+
+    def test_level_2_shows_trace_badges_when_present(self) -> None:
+        trace = RetrievalTrace(
+            semantic_rank=1,
+            semantic_score=0.9,
+            bm25_rank=3,
+            bm25_score=7.5,
+            fused_score=0.94,
+            fused_rank=1,
+            rerank_score=0.88,
+            rerank_delta=+2,
+            final_rank=1,
+        )
+        with console.capture() as capture:
+            v_retrieve(self._chunks(trace=trace), verbose=2)
+        out = capture.get()
+        assert "sem #1 · bm25 #3 · fused 0.94 · rerank +2" in out
+        assert "retrieved body 0" in out  # content still renders below the badges
+
+    def test_level_2_without_trace_renders_no_badges(self) -> None:
+        with console.capture() as capture:
+            v_retrieve(self._chunks(), verbose=2)
+        assert "sem" not in capture.get()
 
     def test_invalid_level_raises(self) -> None:
         with pytest.raises(ValueError, match="verbose"):

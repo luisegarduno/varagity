@@ -1,4 +1,4 @@
-"""Unit tests for the retriever registry and the three retrieval methods."""
+"""Unit tests for the retriever registry and the store-backed retrieval methods."""
 
 from collections.abc import Callable
 
@@ -6,10 +6,10 @@ import pytest
 
 from varagity.retrieval import RETRIEVER_REGISTRY, get_retriever
 from varagity.retrieval.bm25 import BM25Retriever, hydrate
-from varagity.retrieval.hybrid import OVERSAMPLE, HybridRetriever, fuse
+from varagity.retrieval.hybrid import OVERSAMPLE, HybridRetriever, fuse, fuse_with_traces
 from varagity.retrieval.semantic import SemanticRetriever
 from varagity.stores.bm25_store import BM25Hit
-from varagity.stores.records import RetrievedChunk
+from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
 
 def _chunk(i: int, score: float, doc_id: str = "doc0000000000aaa") -> RetrievedChunk:
@@ -110,7 +110,25 @@ class TestSemanticRetriever:
         # mode — instruction wrapping is asserted in the embeddings tests).
         assert embeddings.queries == ["what powers Aurora?"]
         assert store.searches == [([0.5, -0.5, 0.25], 2)]
-        assert result == chunks
+        # The store's results come back unchanged apart from the attached trace.
+        assert [c.model_copy(update={"trace": None}) for c in result] == chunks
+
+    def test_fills_single_arm_trace(self) -> None:
+        """The cosine ranking is the ranking: fused == semantic, bm25 absent."""
+        store = FakeStore([_chunk(0, 0.9), _chunk(1, 0.7)])
+        retriever = SemanticRetriever(store=store, embeddings=FakeEmbeddings())  # type: ignore[arg-type]
+        result = retriever.retrieve("q", k=2, verbose=0)
+        assert result[0].trace == RetrievalTrace(
+            semantic_rank=1,
+            semantic_score=0.9,
+            fused_score=0.9,
+            fused_rank=1,
+            final_rank=1,
+        )
+        assert result[1].trace is not None
+        assert result[1].trace.semantic_rank == 2
+        assert result[1].trace.bm25_rank is None
+        assert result[1].trace.rerank_score is None
 
     def test_k_is_passed_through(self) -> None:
         store = FakeStore([_chunk(i, 1.0 - i / 10) for i in range(5)])
@@ -188,6 +206,66 @@ class TestFusionMath:
         assert fuse([], [], semantic_weight=0.8, bm25_weight=0.2, k=5) == []
 
 
+class TestFuseWithTraces:
+    """The trace-building sibling keeps the per-arm ranks fuse() discards."""
+
+    A, B, C = ("docA", 0), ("docB", 1), ("docC", 2)
+
+    def _fused(self) -> tuple[list, dict]:
+        return fuse_with_traces(
+            [(self.A, 0.91), (self.B, 0.55)],  # semantic arm with cosine scores
+            [(self.B, 9.0), (self.C, 4.0)],  # bm25 arm with ES scores
+            semantic_weight=0.8,
+            bm25_weight=0.2,
+            k=10,
+        )
+
+    def test_fusion_result_matches_fuse(self) -> None:
+        """Fusion math is delegated — identical ranking and scores."""
+        fused, _ = self._fused()
+        assert fused == fuse(
+            [self.A, self.B], [self.B, self.C], semantic_weight=0.8, bm25_weight=0.2, k=10
+        )
+
+    def test_both_arm_ranks_and_scores_preserved(self) -> None:
+        """B sits in both arms: rank 2 semantic, rank 1 bm25, raw scores kept."""
+        _, traces = self._fused()
+        trace_b = traces[self.B]
+        assert trace_b.semantic_rank == 2
+        assert trace_b.semantic_score == 0.55
+        assert trace_b.bm25_rank == 1
+        assert trace_b.bm25_score == 9.0
+        assert trace_b.fused_score == pytest.approx(0.8 / 2 + 0.2)
+        assert trace_b.fused_rank == 2  # A fused first (0.8), B second (0.6)
+        assert trace_b.final_rank == 2
+
+    def test_single_arm_survivors_leave_the_other_arm_none(self) -> None:
+        _, traces = self._fused()
+        trace_a = traces[self.A]  # semantic-only
+        assert (trace_a.semantic_rank, trace_a.semantic_score) == (1, 0.91)
+        assert trace_a.bm25_rank is None
+        assert trace_a.bm25_score is None
+        trace_c = traces[self.C]  # bm25-only
+        assert trace_c.semantic_rank is None
+        assert (trace_c.bm25_rank, trace_c.bm25_score) == (2, 4.0)
+
+    def test_rerank_fields_start_empty(self) -> None:
+        """Fusion never fills the rerank fields — that's the reranked stage."""
+        _, traces = self._fused()
+        assert all(t.rerank_score is None and t.rerank_delta is None for t in traces.values())
+
+    def test_only_fused_survivors_get_traces(self) -> None:
+        fused, traces = fuse_with_traces(
+            [(self.A, 0.9), (self.B, 0.8)],
+            [],
+            semantic_weight=1.0,
+            bm25_weight=0.0,
+            k=1,
+        )
+        assert [key for key, _ in fused] == [self.A]
+        assert set(traces) == {self.A}
+
+
 class TestHydrate:
     def test_missing_identity_dropped_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         """A chunk in ES but not pgvector is dropped, not surfaced uncitable."""
@@ -198,7 +276,25 @@ class TestHydrate:
             chunks = hydrate([(known, 0.5), (ghost, 0.4)], store)  # type: ignore[arg-type]
         assert [(c.doc_id, c.original_index) for c in chunks] == [known]
         assert chunks[0].score == 0.5  # caller's score attached
+        assert chunks[0].trace is None  # no traces given — the pre-v2 shape
         assert any("missing from pgvector" in r.message for r in caplog.records)
+
+    def test_attaches_traces_by_identity(self) -> None:
+        store = FakeStore([_chunk(0, 0.0), _chunk(1, 0.0)])
+        keys = [("doc0000000000aaa", 0), ("doc0000000000aaa", 1)]
+        traces = {
+            keys[0]: RetrievalTrace(fused_score=0.8, fused_rank=1, final_rank=1),
+            keys[1]: RetrievalTrace(fused_score=0.6, fused_rank=2, final_rank=2),
+        }
+        chunks = hydrate([(keys[0], 0.8), (keys[1], 0.6)], store, traces=traces)  # type: ignore[arg-type]
+        assert chunks[0].trace == traces[keys[0]]
+        assert chunks[1].trace == traces[keys[1]]
+
+    def test_identity_absent_from_traces_hydrates_with_none(self) -> None:
+        store = FakeStore([_chunk(0, 0.0)])
+        key = ("doc0000000000aaa", 0)
+        chunks = hydrate([(key, 0.5)], store, traces={})  # type: ignore[arg-type]
+        assert chunks[0].trace is None
 
 
 class TestBM25Retriever:
@@ -222,6 +318,23 @@ class TestBM25Retriever:
         with pytest.raises(ValueError, match="verbose"):
             retriever.retrieve("q", k=1, verbose=7)
         assert bm25.searches == []
+
+    def test_fills_single_arm_trace(self) -> None:
+        """The ES ranking is the ranking: fused == bm25, semantic absent."""
+        bm25 = FakeBM25([_hit(1, 7.5), _hit(0, 3.25)])
+        retriever = BM25Retriever(bm25=bm25, store=FakeStore([_chunk(0, 0.0), _chunk(1, 0.0)]))  # type: ignore[arg-type]
+        result = retriever.retrieve("q", k=2, verbose=0)
+        assert result[0].trace == RetrievalTrace(
+            bm25_rank=1,
+            bm25_score=7.5,
+            fused_score=7.5,
+            fused_rank=1,
+            final_rank=1,
+        )
+        assert result[1].trace is not None
+        assert result[1].trace.bm25_rank == 2
+        assert result[1].trace.semantic_rank is None
+        assert result[1].trace.rerank_score is None
 
 
 class TestHybridRetriever:
@@ -266,3 +379,38 @@ class TestHybridRetriever:
         result = retriever.retrieve("rare term", k=3, verbose=0)
         assert [c.original_index for c in result] == [5]
         assert result[0].score == pytest.approx(0.2)  # bm25 weight * 1/1
+
+    def test_traces_carry_per_arm_ranks_through_hydration(self, pinned_weights: None) -> None:
+        """The spec_v2 §9.2 seam: fuse no longer discards the per-arm ranks."""
+        semantic_chunks = [_chunk(0, 0.99), _chunk(1, 0.55)]
+        bm25 = FakeBM25([_hit(1, 9.0), _hit(2, 4.0)])
+        # Hydration pool holds all three; the semantic *arm* returns only 0–1.
+        store = FakeStore(semantic_chunks + [_chunk(2, 0.0)], search_results=semantic_chunks)
+        retriever = HybridRetriever(
+            store=store,  # type: ignore[arg-type]
+            bm25=bm25,  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),  # type: ignore[arg-type]
+        )
+
+        result = retriever.retrieve("q", k=3, verbose=0)
+
+        # chunk 0: semantic-only, fused rank 1.
+        trace0 = result[0].trace
+        assert trace0 is not None
+        assert (trace0.semantic_rank, trace0.semantic_score) == (1, 0.99)
+        assert trace0.bm25_rank is None
+        assert trace0.fused_score == pytest.approx(0.8)
+        assert (trace0.fused_rank, trace0.final_rank) == (1, 1)
+        # chunk 1: in both arms — both ranks and raw scores preserved.
+        trace1 = result[1].trace
+        assert trace1 is not None
+        assert (trace1.semantic_rank, trace1.semantic_score) == (2, 0.55)
+        assert (trace1.bm25_rank, trace1.bm25_score) == (1, 9.0)
+        assert trace1.fused_score == pytest.approx(0.6)
+        # chunk 2: bm25-only.
+        trace2 = result[2].trace
+        assert trace2 is not None
+        assert trace2.semantic_rank is None
+        assert (trace2.bm25_rank, trace2.bm25_score) == (2, 4.0)
+        # No rerank stage on the hybrid path.
+        assert trace1.rerank_score is None and trace1.rerank_delta is None

@@ -37,6 +37,13 @@ SETTINGS_ENV_VARS = (
     "TOP_K",
     "SEMANTIC_WEIGHT",
     "BM25_WEIGHT",
+    "RERANK_ENABLED",
+    "RERANK_MODEL",
+    "RERANK_API_URL",
+    "RERANK_API_KEY",
+    "RERANK_TOP_N",
+    "RERANK_BASE_METHOD",
+    "RERANK_CANDIDATES",
 )
 
 
@@ -77,6 +84,12 @@ def test_defaults_load() -> None:
     assert settings.TOP_K == 10
     assert settings.SEMANTIC_WEIGHT == 0.8
     assert settings.BM25_WEIGHT == 0.2
+    assert settings.RERANK_ENABLED is False  # kill switch off by default (spec_v2 §5)
+    assert settings.RERANK_MODEL == "BAAI/bge-reranker-v2-m3"
+    assert settings.RERANK_API_URL == "http://infinity-embeddings:8081/v1"
+    assert settings.RERANK_TOP_N == 5
+    assert settings.RERANK_BASE_METHOD == "hybrid"
+    assert settings.RERANK_CANDIDATES == 40
 
 
 class TestAllowedExtensionSet:
@@ -108,16 +121,75 @@ class TestSizeValidation:
 
 
 class TestRetrievalMethodValidation:
-    @pytest.mark.parametrize("method", ["semantic", "bm25", "hybrid"])
+    @pytest.mark.parametrize("method", ["semantic", "bm25", "hybrid", "reranked"])
     def test_spec_vocabulary_accepted(self, method: str) -> None:
-        """All three spec §10.1 values pass config validation."""
+        """All spec §10.1 + spec_v2 §5 values pass config validation."""
         settings = Settings(_env_file=None, RETRIEVAL_METHOD=method)
         assert method == settings.RETRIEVAL_METHOD
 
-    @pytest.mark.parametrize("bad", ["keyword", "SEMANTIC", "", "hybrid "])
+    @pytest.mark.parametrize("bad", ["keyword", "SEMANTIC", "", "hybrid ", "rerank"])
     def test_unknown_method_fails_fast(self, bad: str) -> None:
         with pytest.raises(ValidationError, match="RETRIEVAL_METHOD"):
             Settings(_env_file=None, RETRIEVAL_METHOD=bad)
+
+
+class TestRerankValidation:
+    """Rerank narrows a wider pool — the spec_v2 §5.3 cross-constraints."""
+
+    def test_defaults_are_valid(self) -> None:
+        settings = Settings(_env_file=None)
+        assert settings.RERANK_TOP_N <= settings.RERANK_CANDIDATES
+
+    @pytest.mark.parametrize("top_n", [0, -1])
+    def test_nonpositive_top_n_fails_fast(self, top_n: int) -> None:
+        with pytest.raises(ValidationError, match="RERANK_TOP_N"):
+            Settings(_env_file=None, RERANK_TOP_N=top_n)
+
+    def test_top_n_beyond_candidates_fails_fast(self) -> None:
+        with pytest.raises(ValidationError, match="RERANK_CANDIDATES"):
+            Settings(_env_file=None, RERANK_TOP_N=50, RERANK_CANDIDATES=40)
+
+    @pytest.mark.parametrize("base", ["semantic", "bm25", "hybrid"])
+    def test_base_method_vocabulary_accepted(self, base: str) -> None:
+        settings = Settings(_env_file=None, RERANK_BASE_METHOD=base)
+        assert base == settings.RERANK_BASE_METHOD
+
+    @pytest.mark.parametrize("bad", ["reranked", "keyword", ""])
+    def test_bad_base_method_fails_fast(self, bad: str) -> None:
+        """`reranked` as its own base would recurse — rejected outright."""
+        with pytest.raises(ValidationError, match="RERANK_BASE_METHOD"):
+            Settings(_env_file=None, RERANK_BASE_METHOD=bad)
+
+    def test_reranked_method_caps_top_n_at_top_k(self) -> None:
+        with pytest.raises(ValidationError, match="TOP_K"):
+            Settings(_env_file=None, RETRIEVAL_METHOD="reranked", RERANK_TOP_N=15, TOP_K=10)
+
+    def test_reranked_method_needs_pool_at_least_top_k(self) -> None:
+        with pytest.raises(ValidationError, match="RERANK_CANDIDATES"):
+            Settings(
+                _env_file=None,
+                RETRIEVAL_METHOD="reranked",
+                TOP_K=50,
+                RERANK_TOP_N=5,
+                RERANK_CANDIDATES=40,
+            )
+
+    def test_other_methods_ignore_the_top_k_coupling(self) -> None:
+        """A hybrid config with unused rerank staging must not be rejected."""
+        settings = Settings(
+            _env_file=None, RETRIEVAL_METHOD="hybrid", TOP_K=50, RERANK_CANDIDATES=40
+        )
+        assert settings.TOP_K == 50
+
+    def test_valid_reranked_config_accepted(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            RETRIEVAL_METHOD="reranked",
+            TOP_K=10,
+            RERANK_TOP_N=5,
+            RERANK_CANDIDATES=40,
+        )
+        assert settings.RETRIEVAL_METHOD == "reranked"
 
 
 class TestFusionWeightValidation:

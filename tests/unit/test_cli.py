@@ -17,7 +17,7 @@ from varagity.config import get_settings
 from varagity.debug.show import console
 from varagity.generation.answer import answer_query
 from varagity.ingest.loader import IngestSummary
-from varagity.stores.records import RetrievedChunk
+from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
 
 @pytest.fixture(autouse=True)
@@ -222,3 +222,37 @@ class TestChatCommand:
         with console.capture():
             assert cli_app.run(["-v", "0"]) == 0
         assert chat_harness["retriever"].calls == [("still answerable?", 10)]
+
+
+class TestShowMatches:
+    def test_trace_column_renders_badges(self) -> None:
+        """A traced chunk's rank provenance reaches the matches table (spec_v2 §9.2)."""
+        traced = _chunk(0, "Lantern output details.").model_copy(
+            update={
+                "trace": RetrievalTrace(
+                    semantic_rank=1,
+                    semantic_score=0.9,
+                    bm25_rank=3,
+                    bm25_score=7.5,
+                    fused_score=0.94,
+                    fused_rank=2,
+                    rerank_score=0.88,
+                    rerank_delta=+2,
+                    final_rank=1,
+                )
+            }
+        )
+        with console.capture() as capture:
+            cli_app._show_matches([traced])
+        out = capture.get()
+        assert "Trace" in out  # the column header
+        # Cells wrap at terminal width — assert the badge tokens, not the line.
+        for token in ("sem", "#1", "bm25", "#3", "fused", "rerank", "+2"):
+            assert token in out
+
+    def test_traceless_chunk_shows_a_dash(self) -> None:
+        with console.capture() as capture:
+            cli_app._show_matches([_chunk(0, "no trace here")])
+        out = capture.get()
+        assert "Trace" in out
+        assert "—" in out

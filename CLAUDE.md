@@ -46,7 +46,7 @@ bash scripts/smoke.sh              # sequenced infra checks
 uv run main.py ingest              # ingest DOCS_PATH into both stores
 uv run main.py ingest --reingest   # re-process (config changes don't change content hashes)
 uv run main.py chat                # ingest, then terminal Q&A (default command; :quit exits)
-uv run --group eval main.py eval       # 4-config retrieval matrix (needs Docker + live GPU services)
+uv run --group eval main.py eval       # 5-config retrieval matrix (needs Docker + live GPU services)
 uv run --group eval main.py eval ocr   # OCR engine benchmark
 
 uv run pytest                      # unit suite (default; coverage floor 80%)
