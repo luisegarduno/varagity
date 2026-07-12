@@ -29,7 +29,8 @@ class Settings(BaseSettings):
             metadata, panels).
         DOCS_PATH: Directory scanned for the ingest corpus.
         ALLOWED_EXTENSIONS: Comma-separated whitelist of ingestable file
-            extensions (v1: ``.pdf``, ``.txt``, ``.md``).
+            extensions (v2 widens the v1 ``.pdf``/``.txt``/``.md`` set with
+            the office/web formats — spec_v2 §8.1).
         PDF_OCR_FALLBACK: Whether a PDF whose text-layer extraction comes
             up (near-)empty is automatically re-converted with OCR (plan
             decision #10). Off = pass 1's result stands and a textless PDF
@@ -134,7 +135,7 @@ class Settings(BaseSettings):
     DEFAULT_VERBOSE: int = 1
 
     DOCS_PATH: str = "./docs"
-    ALLOWED_EXTENSIONS: str = ".pdf,.txt,.md"
+    ALLOWED_EXTENSIONS: str = ".pdf,.txt,.md,.docx,.pptx,.xlsx,.html,.htm"
 
     PDF_OCR_FALLBACK: bool = True
     PDF_OCR_MIN_CHARS: int = 50

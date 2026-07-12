@@ -67,7 +67,12 @@ logger = logging.getLogger(__name__)
 MIN_EXTRACTED_CHARS = 50
 
 # Discovery bucket attribute → parser registry name.
-_BUCKET_PARSERS: tuple[tuple[str, str], ...] = (("text_like", "text"), ("pdf", "pdf"))
+_BUCKET_PARSERS: tuple[tuple[str, str], ...] = (
+    ("text_like", "text"),
+    ("pdf", "pdf"),
+    ("office", "office"),
+    ("web", "web"),
+)
 
 
 @dataclass

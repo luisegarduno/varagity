@@ -3,9 +3,10 @@
 Pass 1 converts with OCR disabled — the fast path, since OCR is a
 multi-× slowdown. If the result has (near-)no text, too many textless
 pages, or pass 1 raised, pass 2 re-converts with OCR enabled (plan
-decision #10). Both passes share Docling's structure-aware markdown
-export (headings, tables) and page provenance, so the fallback changes
-*how* text is recovered, never its downstream shape.
+decision #10). Both passes share the ``docling_base`` markdown/table/
+provenance core (spec_v2 §8.2), so the fallback changes *how* text is
+recovered, never its downstream shape — and the office/web parsers
+share the exact same pipeline.
 
 The OCR engine is pluggable via the ``OCR_ENGINE`` setting: a small
 factory maps engine names to Docling ``ocr_options`` (EasyOCR is the
@@ -26,17 +27,20 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
 from varagity.ingest.parsers.base import RawDocument, register
-from varagity.ingest.parsers.text import remove_hyphen_space
+from varagity.ingest.parsers.docling_base import (
+    export_markdown,
+    page_char_counts,
+    raw_document,
+)
 
 if TYPE_CHECKING:  # heavy imports, type-only (runtime imports are lazy)
     from docling.datamodel.pipeline_options import OcrOptions
     from docling.document_converter import DocumentConverter
-    from docling_core.types.doc.document import DoclingDocument
 
 logger = logging.getLogger(__name__)
 
@@ -183,36 +187,6 @@ def needs_ocr_fallback(
     return stats.total_pages > 0 and stats.textless_pages / stats.total_pages >= textless_page_ratio
 
 
-def _page_char_counts(document: "DoclingDocument") -> dict[int, int]:
-    """Count extracted non-whitespace characters per page.
-
-    Uses Docling item provenance: every content item (including table
-    cells) is attributed to the page(s) it appears on. Pages that no item
-    references keep a zero count — the textless-page signal.
-
-    Args:
-        document: The converted Docling document.
-
-    Returns:
-        ``{page_no: char_count}`` covering every page of the document.
-    """
-    counts: dict[int, int] = dict.fromkeys(document.pages, 0)
-    for item, _level in document.iterate_items():
-        chars = 0
-        text = getattr(item, "text", None)
-        if text:
-            chars += len(text.strip())
-        data = getattr(item, "data", None)  # tables carry text in cells
-        table_cells = getattr(data, "table_cells", None) if data is not None else None
-        if table_cells:
-            chars += sum(len(cell.text.strip()) for cell in table_cells if cell.text)
-        if not chars:
-            continue
-        for prov in getattr(item, "prov", None) or []:
-            counts[prov.page_no] = counts.get(prov.page_no, 0) + chars
-    return counts
-
-
 @register("pdf")
 class PdfParser:
     """Parser for the ``pdf`` bucket: Docling with the two-pass OCR fallback.
@@ -305,8 +279,7 @@ class PdfParser:
         """
         result = self._converter(ocr=ocr).convert(path)  # raises ConversionError on failure
         document = result.document
-        text = document.export_to_markdown().replace("\r\n", "\n").replace("\r", "\n")
-        return remove_hyphen_space(text), _page_char_counts(document)
+        return export_markdown(document), page_char_counts(document)
 
     def _converter(self, *, ocr: bool) -> "DocumentConverter":
         """Return the cached converter for a pass type, building it lazily.
@@ -358,14 +331,7 @@ class PdfParser:
             extraction: ``"text"`` or ``"ocr_fallback"``.
 
         Returns:
-            The :class:`RawDocument` handed to the chunker.
+            The :class:`RawDocument` handed to the chunker (assembled by the
+            shared :func:`~varagity.ingest.parsers.docling_base.raw_document`).
         """
-        pages_with_text = [page for page, count in sorted(page_counts.items()) if count > 0]
-        source_meta: dict[str, Any] = {
-            "source": str(path.resolve()),
-            "file_name": path.name,
-            "file_type": path.suffix.lower().lstrip("."),
-            "page": pages_with_text[0] if pages_with_text else None,
-            "extraction": extraction,
-        }
-        return RawDocument(text=text, source_meta=source_meta)
+        return raw_document(path, text, page_counts, extraction=extraction)

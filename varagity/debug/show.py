@@ -73,12 +73,12 @@ def v_discover(buckets: "Buckets", verbose: int) -> None:
     check_verbose(verbose)
     if verbose == 0:
         return
-    console.print(
-        f"[bold]Discovered[/] {buckets.total} document(s) "
-        f"({len(buckets.text_like)} text-like, {len(buckets.pdf)} pdf)"
+    counts = ", ".join(
+        f"{len(paths)} {name.replace('_', '-')}" for name, paths in buckets.by_bucket()
     )
+    console.print(f"[bold]Discovered[/] {buckets.total} document(s) ({counts})")
     if verbose == 2:
-        for bucket_name, paths in (("text_like", buckets.text_like), ("pdf", buckets.pdf)):
+        for bucket_name, paths in buckets.by_bucket():
             for path in paths:
                 console.print(f"  [dim]{bucket_name}[/dim] {path}")
 

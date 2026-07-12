@@ -5,8 +5,10 @@ Importing this package imports every implementation module so each
 means adding the module and its import line here — no caller edits.
 """
 
+from varagity.ingest.parsers import office as _office  # noqa: F401  (self-registration import)
 from varagity.ingest.parsers import pdf as _pdf  # noqa: F401  (self-registration import)
 from varagity.ingest.parsers import text as _text  # noqa: F401  (self-registration import)
+from varagity.ingest.parsers import web as _web  # noqa: F401  (self-registration import)
 from varagity.ingest.parsers.base import (
     PARSER_REGISTRY,
     Parser,

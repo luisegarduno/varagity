@@ -19,14 +19,33 @@ def corpus(tmp_path: Path) -> Path:
     (root / "d.pdf").write_bytes(b"%PDF-fake")
     (root / "e.png").write_bytes(b"\x89PNG")
     (root / "f.TXT").write_text("case-insensitive extension")
+    (root / "g.docx").write_bytes(b"PK-fake-docx")
+    (root / "h.pptx").write_bytes(b"PK-fake-pptx")
+    (root / "i.xlsx").write_bytes(b"PK-fake-xlsx")
+    (root / "j.html").write_text("<h1>web</h1>")
+    (root / "sub" / "k.htm").write_text("<p>nested, short extension</p>")
+    (root / "l.PPTX").write_bytes(b"PK-case-insensitive")
     return root
 
 
 def test_bucketing(corpus: Path, settings_env: Callable[..., None]) -> None:
-    settings_env(ALLOWED_EXTENSIONS=".pdf,.txt,.md")
+    settings_env(ALLOWED_EXTENSIONS=".pdf,.txt,.md,.docx,.pptx,.xlsx,.html,.htm")
     buckets = discover_documents(str(corpus), verbose=0)
     assert [p.name for p in buckets.text_like] == ["a.txt", "b.md", "f.TXT", "c.md"]
     assert [p.name for p in buckets.pdf] == ["d.pdf"]
+    assert [p.name for p in buckets.office] == ["g.docx", "h.pptx", "i.xlsx", "l.PPTX"]
+    assert [p.name for p in buckets.web] == ["j.html", "k.htm"]
+    assert buckets.total == 11
+
+
+def test_v1_whitelist_keeps_office_and_web_out(
+    corpus: Path, settings_env: Callable[..., None]
+) -> None:
+    """A narrow ALLOWED_EXTENSIONS still gates the new buckets (whitelist first)."""
+    settings_env(ALLOWED_EXTENSIONS=".pdf,.txt,.md")
+    buckets = discover_documents(str(corpus), verbose=0)
+    assert buckets.office == []
+    assert buckets.web == []
     assert buckets.total == 5
 
 
@@ -71,8 +90,8 @@ def test_allowed_but_unbucketed_extension_warns(
 ) -> None:
     root = tmp_path / "docs"
     root.mkdir()
-    (root / "slides.docx").write_text("not really a docx")
-    settings_env(ALLOWED_EXTENSIONS=".docx")
+    (root / "notes.rtf").write_text("not a bucketed format")
+    settings_env(ALLOWED_EXTENSIONS=".rtf")
     with caplog.at_level(logging.WARNING):
         buckets = discover_documents(str(root), verbose=0)
     assert buckets.total == 0
@@ -87,4 +106,20 @@ def test_invalid_verbose_raises(corpus: Path, settings_env: Callable[..., None])
 
 def test_buckets_total() -> None:
     assert Buckets().total == 0
-    assert Buckets(text_like=[Path("a.txt")], pdf=[Path("b.pdf")]).total == 2
+    assert (
+        Buckets(
+            text_like=[Path("a.txt")],
+            pdf=[Path("b.pdf")],
+            office=[Path("c.docx"), Path("d.xlsx")],
+            web=[Path("e.html")],
+        ).total
+        == 5
+    )
+
+
+def test_by_bucket_enumerates_every_bucket() -> None:
+    """The render seam names each bucket exactly once, in a stable order."""
+    buckets = Buckets(office=[Path("c.docx")])
+    named = dict(buckets.by_bucket())
+    assert list(named) == ["text_like", "pdf", "office", "web"]
+    assert named["office"] == [Path("c.docx")]

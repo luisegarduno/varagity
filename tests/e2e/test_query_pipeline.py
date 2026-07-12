@@ -415,6 +415,79 @@ def test_pdf_facts_are_retrievable_and_answerable(
         assert state["answer"] == scanned_answer
 
 
+def test_office_web_facts_are_retrievable_and_answerable(
+    pinned_settings: None,
+    settings_env: Callable[..., None],
+    pg_conninfo: str,
+    bm25_store: ElasticsearchBM25,
+) -> None:
+    """★ The Phase-5 (v2) milestone: office/web-only facts reach grounded answers.
+
+    With the widened whitelist, a fact answerable **only** from each new
+    format (``.docx``/``.pptx``/``.xlsx``/``.html``) flows through ingest →
+    hybrid retrieval → grounded answer, with format-true ``file_type``/
+    ``page``/``extraction`` provenance on the retrieved metadata.
+    """
+    settings_env(ALLOWED_EXTENSIONS=".pdf,.txt,.md,.docx,.pptx,.xlsx,.html,.htm")
+    embeddings = FakeEmbeddings()
+
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("TRUNCATE documents CASCADE")
+
+    with ContextualVectorDB(pg_conninfo) as store:
+        summary = ingest_flow(
+            str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
+        )
+        assert summary.discovered == 11  # 3 text/md + 4 PDFs + 3 office + 1 web
+        assert summary.ingested == 10
+        assert summary.no_text == 1  # blank_pages.pdf, as ever
+        assert summary.failed == 0
+
+        retriever = HybridRetriever(store=store, bm25=bm25_store, embeddings=embeddings)
+        cases = [
+            (
+                "At what distance before docking does the Gullwing ferry switch to battery power?",
+                "800 meters",
+                "gullwing_ferry_manual.docx",
+                "docx",
+                None,
+            ),
+            (
+                "How much power does the Petrel-6 tidal turbine produce at peak flow?",
+                "3.4 megawatts",
+                "petrel_turbine_briefing.pptx",
+                "pptx",
+                1,  # slide → page (the plan's non-null .pptx criterion)
+            ),
+            (
+                "How many mooring bollards are stored at the East Quay?",
+                "Mooring bollard",
+                "quayside_inventory.xlsx",
+                "xlsx",
+                1,  # sheet → page
+            ),
+            (
+                "By how much did the seagrass meadow off Wrenhaven expand in 2025?",
+                "12 hectares",
+                "seagrass_survey.html",
+                "html",
+                None,
+            ),
+        ]
+        for question, fact, file_name, file_type, page in cases:
+            answer = f"{fact}. [SOURCE]: {file_name}"
+            llm = ScriptedLLM(answer)
+            state = query_flow(question, retriever=retriever, llm=llm, verbose=0)  # type: ignore[arg-type]
+            hits = [c for c in state["retrieved"] if fact in c.content]
+            assert hits, f"the {file_type} chunk with {fact!r} was not retrieved"
+            assert hits[0].metadata["file_name"] == file_name
+            assert hits[0].metadata["file_type"] == file_type
+            assert hits[0].metadata["page"] == page
+            assert hits[0].metadata["extraction"] == "text"  # digital text, never OCR
+            assert fact in llm.prompts[0]  # grounded, not parroted
+            assert state["answer"] == answer
+
+
 def test_all_three_retrieval_methods_answer(
     pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25
 ) -> None:
