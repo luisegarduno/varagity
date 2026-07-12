@@ -188,6 +188,36 @@ services:
       - varagity-net
     restart: unless-stopped
 
+  web:
+    container_name: varagity-web
+    build:
+      context: ./web
+      args:
+        # Browser→API origin, inlined at BUILD time (NEXT_PUBLIC_*); changing
+        # it requires `docker compose build web`. The default serves the
+        # same-host browser; LAN browsers need the host's address here.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # The alpine image ships no curl — probe with node's global fetch.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3000').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    networks:
+      - varagity-net
+    restart: unless-stopped
+
   app:
     container_name: varagity
     build: ./
