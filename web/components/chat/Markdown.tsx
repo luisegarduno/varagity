@@ -2,7 +2,10 @@
 
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { memo, useEffect, useState } from "react";
-import ReactMarkdown, { type ExtraProps } from "react-markdown";
+import ReactMarkdown, {
+  type Components,
+  type ExtraProps,
+} from "react-markdown";
 import ShikiHighlighter, {
   isInlineCode,
   type Element as ShikiElement,
@@ -84,14 +87,22 @@ function CodeBlock({
  * with copy + shiki highlighting, and KaTeX math. Memoized — during
  * streaming, pass the text through `useDebouncedValue` so partial markdown
  * (half-fenced code, unclosed emphasis) doesn't flash re-styles per token.
+ * `components` (memoize it — this component is `memo`ed on prop identity)
+ * lets callers override elements, e.g. the citation-chip `a` renderer.
  */
-export const Markdown = memo(function Markdown({ text }: { text: string }) {
+export const Markdown = memo(function Markdown({
+  text,
+  components,
+}: {
+  text: string;
+  components?: Components;
+}) {
   return (
     <div className="space-y-3 leading-relaxed [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:text-base [&_h2]:font-semibold [&_h3]:font-semibold [&_li]:my-0.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_table]:block [&_table]:overflow-x-auto [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc [&_ul]:pl-5">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
-        components={{ code: CodeBlock }}
+        components={{ code: CodeBlock, ...components }}
       >
         {text}
       </ReactMarkdown>

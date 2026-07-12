@@ -14,6 +14,7 @@ import {
   type StreamingTurn,
 } from "@/lib/chat-reducer";
 import { notifyConversationsChanged } from "@/lib/conversations-bus";
+import { assistantMessageFromTurn } from "@/lib/evidence";
 
 /** What `useChat` exposes to the conversation UI. */
 export interface ChatState {
@@ -107,10 +108,14 @@ export function useChat(conversationId: string): ChatState {
           }
           if (current.done) {
             const done = current.done;
+            const settled = current;
             setMessages((previous) => [
               ...(previous ?? []),
               localMessage("user", trimmed, `${done.message_id}-user`),
-              localMessage("assistant", done.answer, done.message_id),
+              // Fold the turn in as the server persisted it — evidence
+              // snapshot, reasoning, latency — so the just-answered turn
+              // renders exactly like a reload (the evidence panel included).
+              assistantMessageFromTurn(done, settled.retrieval, settled.reasoning),
             ]);
             setTurn(null);
             notifyConversationsChanged(); // list order + the async auto-title
