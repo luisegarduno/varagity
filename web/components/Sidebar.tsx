@@ -1,9 +1,10 @@
 "use client";
 
-import { PlusIcon, Trash2Icon } from "lucide-react";
+import { DatabaseIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
+import { SettingsDrawer } from "@/components/settings/SettingsDrawer";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import {
@@ -137,11 +138,28 @@ export function Sidebar() {
         )}
       </nav>
 
-      <div className="flex items-center justify-between border-t border-border p-2">
-        <ThemeToggle />
-        <span className="pr-1 text-[10px] text-muted-foreground">
-          local · single-user
-        </span>
+      <div className="flex flex-col gap-1 border-t border-border p-2">
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              "flex-1 justify-start",
+              pathname === "/corpus" && "bg-sidebar-accent",
+            )}
+            onClick={() => router.push("/corpus")}
+          >
+            <DatabaseIcon aria-hidden />
+            Corpus
+          </Button>
+          <SettingsDrawer />
+        </div>
+        <div className="flex items-center justify-between">
+          <ThemeToggle />
+          <span className="pr-1 text-[10px] text-muted-foreground">
+            local · single-user
+          </span>
+        </div>
       </div>
     </aside>
   );

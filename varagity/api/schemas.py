@@ -14,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from varagity.stores.records import RetrievedChunk
 
+# The JSON scalar types a setting value can take on the wire (spec_v2 §4.7).
+# bool precedes int so pydantic's smart union keeps True/False boolean.
+SettingValue = bool | int | float | str
+
 
 class ErrorBody(BaseModel):
     """The machine-readable error inside the envelope (spec_v2 §4.1).
@@ -294,12 +298,268 @@ class ConfigResponse(BaseModel):
         chunkers: Registered chunking strategy names.
         ocr_engines: Available OCR engine names.
         model_types: Valid ``get_model`` types.
+        llm_model_types: The chat-capable subset of ``model_types`` — the
+            ``CHAT_MODEL_TYPE`` vocabulary the composer quick-toggle offers.
         ranges: Valid ranges for the numeric query-time knobs, keyed by
             setting name (lowercase).
+        upload_max_mb: Effective per-file upload cap (``UPLOAD_MAX_MB``) —
+            the dropzone validates against it client-side.
+        allowed_extensions: Effective ingestable extensions
+            (``ALLOWED_EXTENSIONS``, normalized with leading dots), sorted.
     """
 
     retrievers: list[str]
     chunkers: list[str]
     ocr_engines: list[str]
     model_types: list[str]
+    llm_model_types: list[str]
     ranges: dict[str, NumericRange]
+    upload_max_mb: int
+    allowed_extensions: list[str]
+
+
+class SettingOut(BaseModel):
+    """One effective setting in the ``GET /api/settings`` catalog (spec_v2 §4.7).
+
+    Attributes:
+        name: The ``Settings`` field name (e.g. ``"RETRIEVAL_METHOD"``).
+        value: The effective value (env defaults merged with any override).
+        group: Drawer group — ``retrieval`` | ``generation`` | ``ingestion``.
+        overridden: Whether a persisted runtime override is in effect (the
+            drawer shows a reset affordance).
+        reingest_affecting: Whether changing it marks the corpus stale (it
+            doesn't change content hashes — the surfaced v1 footgun).
+        choices: Valid values for enum-like settings (registry-derived, so a
+            new implementation appears automatically); ``None`` for numeric
+            and free-form settings (ranges live in ``GET /api/config``).
+    """
+
+    name: str
+    value: SettingValue
+    group: str
+    overridden: bool
+    reingest_affecting: bool
+    choices: list[str] | None = None
+
+
+class SettingsResponse(BaseModel):
+    """Response of ``GET /api/settings`` and ``PATCH /api/settings``.
+
+    Attributes:
+        settings: The full overridable catalog with effective values.
+        corpus_stale: Whether a reingest-affecting setting changed since the
+            corpus was last (re)ingested — the "Re-ingest to apply" banner.
+    """
+
+    settings: list[SettingOut]
+    corpus_stale: bool
+
+
+class SettingsPatchRequest(BaseModel):
+    """Body of ``PATCH /api/settings``.
+
+    Attributes:
+        overrides: Setting name → new value, or ``None`` to clear that
+            override (reverting to the env value). Linked settings (the
+            fusion weight pair) must be patched together — validation runs
+            on the merged whole.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    overrides: dict[str, SettingValue | None] = Field(min_length=1)
+
+
+class DocumentOut(BaseModel):
+    """One corpus document in the ``GET /api/documents`` list (spec_v2 §4.2).
+
+    Attributes:
+        doc_id: The document's stable id.
+        file_name: Base name of the source file.
+        source: Absolute file path recorded at ingest time.
+        file_type: File extension without the dot (``pdf``, ``docx``, …).
+        n_chunks: Chunks ingested (``0`` = no extractable text).
+        ingested_at: When the document (last) landed in the stores.
+        extraction_mix: Chunk count per extraction method (``text`` /
+            ``ocr_fallback``).
+    """
+
+    doc_id: str
+    file_name: str
+    source: str
+    file_type: str
+    n_chunks: int
+    ingested_at: datetime
+    extraction_mix: dict[str, int]
+
+
+class UploadedFileOut(BaseModel):
+    """Outcome for one file of a ``POST /api/documents`` upload.
+
+    Attributes:
+        file_name: The stored (sanitized) file name.
+        size_bytes: Bytes written (``0`` when rejected).
+        stored: Whether the file landed in ``DOCS_PATH``.
+        replaced: Whether an existing same-named file was overwritten (a
+            re-upload; the next ingest re-processes it under a new hash).
+        reason: Rejection reason when ``stored`` is false
+            (``extension_not_allowed`` | ``file_too_large`` |
+            ``invalid_filename`` | ``write_failed`` — the last is a server-
+            side problem, escalated to a structured ``500`` when no file in
+            the batch landed).
+    """
+
+    file_name: str
+    size_bytes: int
+    stored: bool
+    replaced: bool = False
+    reason: str | None = None
+
+
+class UploadResponse(BaseModel):
+    """Response of ``POST /api/documents``.
+
+    Attributes:
+        files: Per-file outcomes, in upload order.
+    """
+
+    files: list[UploadedFileOut]
+
+
+class DocumentDeleteResponse(BaseModel):
+    """Response of ``DELETE /api/documents/{doc_id}`` (spec_v2 §4.2).
+
+    Attributes:
+        doc_id: The deleted document.
+        chunks_deleted: Chunks removed (the pgvector count; the
+            Elasticsearch ``delete_by_query`` removes the same identity-
+            addressed set).
+        file_removed: Whether the source file was also deleted from
+            ``DOCS_PATH`` (requested via ``?remove_file=true`` and only
+            honored inside the corpus directory).
+    """
+
+    doc_id: str
+    chunks_deleted: int
+    file_removed: bool
+
+
+class IngestStartRequest(BaseModel):
+    """Body of ``POST /api/ingest``.
+
+    Attributes:
+        reingest: Delete each discovered document's previous ingest and
+            re-process it (required after reingest-affecting setting
+            changes — content hashes don't change, so unchanged files are
+            otherwise skipped).
+    """
+
+    reingest: bool = False
+
+
+class IngestSummaryOut(BaseModel):
+    """The ingest run counters (mirrors the loader's ``IngestSummary``).
+
+    Attributes:
+        discovered: Files found in the corpus buckets.
+        ingested: Files parsed, chunked, embedded, and stored this run.
+        skipped: Unchanged files skipped via the idempotency check.
+        no_text: Files with no extractable text.
+        unsupported: Files whose bucket has no registered parser.
+        failed: Files that raised during ingestion (run continued).
+        chunks: Total chunks stored this run.
+    """
+
+    discovered: int
+    ingested: int
+    skipped: int
+    no_text: int
+    unsupported: int
+    failed: int
+    chunks: int
+
+
+class IngestRunOut(BaseModel):
+    """One ingest run's state (``POST /api/ingest`` + the status stream).
+
+    Attributes:
+        run_id: The run handle.
+        state: ``running`` | ``completed`` | ``failed``.
+        reingest: Whether the run re-processes unchanged files.
+        started_at: When the run started.
+        finished_at: When it reached a terminal state (``None`` while
+            running).
+        summary: The final counters (terminal states only; ``failed`` runs
+            may carry ``None`` when the flow died before summarizing).
+        error: The flow-level failure (``failed`` only; per-file failures
+            ride in ``summary.failed`` and the ``log`` events instead).
+    """
+
+    run_id: str
+    state: str
+    reingest: bool
+    started_at: datetime
+    finished_at: datetime | None = None
+    summary: IngestSummaryOut | None = None
+    error: str | None = None
+
+
+class IngestStatusEvent(BaseModel):
+    """Payload of the ingest-status SSE ``status`` event.
+
+    The stream's first frame (a snapshot on connect) and its last (the
+    terminal state). ``run=None`` means no ingest has run in this API
+    process — the stream closes immediately after.
+
+    Attributes:
+        run: The current (or last) run, if any.
+    """
+
+    run: IngestRunOut | None = None
+
+
+class IngestProgressEvent(BaseModel):
+    """Payload of the ingest-status SSE ``progress`` event.
+
+    One frame per pipeline stage transition, mirroring the CLI's ``rich``
+    display: ``discover`` (with ``total`` files), then per file ``parse`` →
+    ``chunk`` → ``contextualize`` (with per-chunk ``current``/``total``
+    ticks) → ``embed`` → ``store``, and a ``file_done`` frame carrying the
+    file's outcome plus the run-level progress counters.
+
+    Attributes:
+        stage: ``discover`` | ``parse`` | ``chunk`` | ``contextualize`` |
+            ``embed`` | ``store`` | ``file_done``.
+        file: The file being processed (``None`` for ``discover``).
+        outcome: ``file_done`` only — ``ingested`` | ``skipped`` |
+            ``no_text`` | ``failed``.
+        current: Intra-stage progress (contextualized chunks so far).
+        total: Stage denominator (files for ``discover``, chunks for
+            ``chunk``/``contextualize``, texts for ``embed``).
+        files_done: Files finished so far (``file_done`` only).
+        files_total: Files discovered (``file_done`` only).
+    """
+
+    stage: str
+    file: str | None = None
+    outcome: str | None = None
+    current: int | None = None
+    total: int | None = None
+    files_done: int | None = None
+    files_total: int | None = None
+
+
+class IngestLogEvent(BaseModel):
+    """Payload of the ingest-status SSE ``log`` event.
+
+    Relayed ``varagity.ingest`` log records (the per-file outcome lines the
+    terminal shows: skipped-unchanged, no-text, failure tracebacks' heads),
+    so the browser progress view mirrors the CLI run.
+
+    Attributes:
+        level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).
+        message: The formatted log message.
+    """
+
+    level: str
+    message: str

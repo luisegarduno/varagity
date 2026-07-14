@@ -18,7 +18,7 @@ from psycopg.types.json import Json
 
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
-from varagity.stores.records import ChunkRecord, RetrievedChunk
+from varagity.stores.records import ChunkRecord, DocumentInfo, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,26 @@ SELECT chunk_id, doc_id, original_index, content, context, metadata
 FROM chunks
 WHERE doc_id = %(doc_id)s
 ORDER BY chunk_index
+"""
+
+# The corpus-management list (spec_v2 §4.2 GET /api/documents): every
+# documents row with its chunks' extraction mix, newest ingest first. The
+# FILTER keeps 0-chunk documents (no extractable text) in the list with an
+# empty mix instead of a {null: 0} artifact.
+_LIST_DOCUMENTS_SQL = """
+SELECT d.doc_id, d.source, d.file_type, d.n_chunks, d.ingested_at,
+       COALESCE(
+           jsonb_object_agg(e.extraction, e.cnt) FILTER (WHERE e.extraction IS NOT NULL),
+           '{}'::jsonb
+       ) AS extraction_mix
+FROM documents d
+LEFT JOIN (
+    SELECT doc_id, COALESCE(metadata->>'extraction', 'text') AS extraction, count(*) AS cnt
+    FROM chunks
+    GROUP BY doc_id, COALESCE(metadata->>'extraction', 'text')
+) e USING (doc_id)
+GROUP BY d.doc_id, d.source, d.file_type, d.n_chunks, d.ingested_at
+ORDER BY d.ingested_at DESC, d.source
 """
 
 
@@ -181,6 +201,44 @@ class ContextualVectorDB:
             "SELECT n_chunks FROM documents WHERE doc_id = %s", (doc_id,)
         ).fetchone()
         return None if row is None else int(row[0])
+
+    def document_count(self) -> int:
+        """Count the ingested documents.
+
+        Backs the settings route's corpus-stale check (spec_v2 §4.7): an
+        empty corpus has nothing to go stale, so a reingest-affecting
+        override change only raises the flag when this is positive.
+
+        Returns:
+            Number of ``documents`` rows.
+        """
+        row = self._conn.execute("SELECT count(*) FROM documents").fetchone()
+        return 0 if row is None else int(row[0])
+
+    def list_documents(self) -> list[DocumentInfo]:
+        """List every ingested document with its extraction mix.
+
+        Backs ``GET /api/documents`` (spec_v2 §4.2): the corpus-management
+        table of file, type, chunk count, ingested-at, and how many chunks
+        came through OCR versus the digital text layer.
+
+        Returns:
+            One :class:`~varagity.stores.records.DocumentInfo` per
+            ``documents`` row, newest ingest first (0-chunk documents
+            included, with an empty mix).
+        """
+        rows = self._conn.execute(_LIST_DOCUMENTS_SQL).fetchall()
+        return [
+            DocumentInfo(
+                doc_id=doc_id,
+                source=source,
+                file_type=file_type,
+                n_chunks=n_chunks,
+                ingested_at=ingested_at,
+                extraction_mix={name: int(count) for name, count in mix.items()},
+            )
+            for doc_id, source, file_type, n_chunks, ingested_at, mix in rows
+        ]
 
     def delete_document(self, doc_id: str) -> int:
         """Delete a document row and, via FK cascade, all its chunks.

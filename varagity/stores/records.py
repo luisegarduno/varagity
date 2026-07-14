@@ -242,3 +242,28 @@ class RetrievedChunk(BaseModel):
     metadata: dict[str, Any]
     score: float
     trace: RetrievalTrace | None = None
+
+
+class DocumentInfo(BaseModel):
+    """One ingested document, as listed by ``GET /api/documents`` (spec_v2 §4.2).
+
+    A ``documents``-table row joined with its chunks' extraction mix — the
+    corpus-management view (file, type, chunk count, ingested-at, how much
+    of it came through OCR).
+
+    Attributes:
+        doc_id: The document's stable id.
+        source: Absolute file path recorded at ingest time.
+        file_type: File extension without the dot (``pdf``, ``docx``, …).
+        n_chunks: Chunks ingested (``0`` = no extractable text).
+        ingested_at: When the document (last) landed in the stores.
+        extraction_mix: Chunk count per extraction method (``text`` /
+            ``ocr_fallback``); empty for a 0-chunk document.
+    """
+
+    doc_id: str
+    source: str
+    file_type: str
+    n_chunks: int
+    ingested_at: datetime
+    extraction_mix: dict[str, int]

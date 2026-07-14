@@ -58,3 +58,11 @@ def test_unknown_type_raises_listing_available(bad_type: str) -> None:
 def test_registered_model_types() -> None:
     """v1's four types plus v2's rerank (spec_v2 §5.4)."""
     assert MODEL_TYPES == ("default", "embedding", "rerank", "reasoning", "tool")
+
+
+def test_llm_model_types_are_the_chat_capable_subset() -> None:
+    """The CHAT_MODEL_TYPE vocabulary (spec_v2 §4.7's model-type knob)."""
+    from varagity.models.registry import LLM_MODEL_TYPES
+
+    assert LLM_MODEL_TYPES == ("default", "reasoning", "tool")
+    assert set(LLM_MODEL_TYPES) <= set(MODEL_TYPES)

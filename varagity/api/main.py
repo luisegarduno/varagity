@@ -1,10 +1,11 @@
 """FastAPI app factory: CORS, lifespan, structured errors, routers.
 
 ``create_app`` is served by a single uvicorn worker (plan decision #11):
-``uvicorn varagity.api.main:create_app --factory``. The lifespan runs the
-idempotent migration runner (so an existing ``pgdata`` volume gains the v2
-tables without ``down -v``) and warms the registries; every error response
-carries the ``{error: {code, message}}`` envelope the GUI banners on.
+``uvicorn varagity.api.main:create_app --factory``. The lifespan warms the
+registries, runs the idempotent migration runner (so an existing ``pgdata``
+volume gains the v2 tables without ``down -v``), and replays persisted
+runtime setting overrides (spec_v2 §4.7); every error response carries the
+``{error: {code, message}}`` envelope the GUI banners on.
 
 Importing this module imports :mod:`varagity.pipeline` (via the chat
 route), which exports ``PREFECT_API_URL`` before ``prefect`` loads — the
@@ -12,7 +13,7 @@ same ordering invariant the CLI honors.
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from importlib import metadata
 from typing import Any
@@ -27,28 +28,50 @@ from fastapi.responses import JSONResponse
 from pydantic.json_schema import models_json_schema
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from varagity.api.routes import chat, conversations, metrics, system
+from varagity.api import runtime_settings
+from varagity.api.routes import (
+    chat,
+    conversations,
+    documents,
+    ingest,
+    metrics,
+    system,
+)
+from varagity.api.routes import settings as settings_routes
 from varagity.api.schemas import (
     DeltaEvent,
     DoneEvent,
     ErrorBody,
     ErrorEvent,
     ErrorResponse,
+    IngestLogEvent,
+    IngestProgressEvent,
+    IngestStatusEvent,
     RetrievalEvent,
 )
 from varagity.config import get_settings
 from varagity.logging_setup import setup_logging
+from varagity.stores.app_settings_store import AppSettingsStore
 from varagity.stores.migrate import run_migrations
 from varagity.stores.vector_store import default_conninfo
 
 logger = logging.getLogger(__name__)
 
-# The SSE chat protocol's event payloads (spec_v2 §4.3). No route returns
-# them directly (they ride inside the event stream), so FastAPI would omit
-# them from the OpenAPI schema — and the web app's generated TypeScript
-# types are the *whole* wire contract, SSE payloads included (schemas.py).
-# create_app() merges their JSON schemas into components/schemas.
-_SSE_EVENT_MODELS = (RetrievalEvent, DeltaEvent, DoneEvent, ErrorEvent)
+# The SSE protocols' event payloads (spec_v2 §4.3 chat + §4.2 ingest
+# status). No route returns them directly (they ride inside the event
+# streams), so FastAPI would omit them from the OpenAPI schema — and the
+# web app's generated TypeScript types are the *whole* wire contract, SSE
+# payloads included (schemas.py). create_app() merges their JSON schemas
+# into components/schemas.
+_SSE_EVENT_MODELS = (
+    RetrievalEvent,
+    DeltaEvent,
+    DoneEvent,
+    ErrorEvent,
+    IngestStatusEvent,
+    IngestProgressEvent,
+    IngestLogEvent,
+)
 
 # Stable codes for statuses raised with a plain-string detail; handlers fall
 # back to http_<status> beyond these.
@@ -86,6 +109,25 @@ def _run_startup_migrations() -> None:
         logger.info("applied %d migration(s): %s", len(applied), ", ".join(applied))
 
 
+def _load_runtime_overrides() -> None:
+    """Replay persisted setting overrides, tolerating an unreachable database.
+
+    Mirrors :func:`_run_startup_migrations`' posture: unreachability means a
+    host-mode run without the stack — the API serves on env defaults and
+    the settings routes 503 until postgres returns. Invalid persisted rows
+    are dropped-with-a-log inside the loader (the API must boot).
+    """
+    try:
+        with AppSettingsStore() as store:
+            overrides = store.load_overrides()
+    except psycopg.OperationalError as error:
+        logger.error(
+            "skipping persisted setting overrides — postgres unreachable at startup (%s)", error
+        )
+        return
+    runtime_settings.load_persisted_overrides(lambda: overrides)
+
+
 def _warm_registries() -> None:
     """Import the registry packages so their implementations self-register.
 
@@ -110,6 +152,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     _warm_registries()
     await run_in_threadpool(_run_startup_migrations)
+    # After migrations (the app_settings table must exist) and before the
+    # first request: overrides survive an api restart (spec_v2 §4.7).
+    await run_in_threadpool(_load_runtime_overrides)
     yield
 
 
@@ -168,6 +213,66 @@ async def _handle_validation_error(request: Request, exc: Exception) -> JSONResp
     )
 
 
+class StructuredServerErrors:
+    """Render unhandled route exceptions as the structured 500 envelope.
+
+    Starlette's stack is ``ServerErrorMiddleware → user middleware (CORS)
+    → ExceptionMiddleware → routes``: an exception no handler catches
+    propagates *past* the CORS middleware and becomes a bare text 500
+    **without** ``Access-Control-Allow-Origin`` — which a browser can only
+    report as ``TypeError: Failed to fetch``, hiding the real error (the
+    exact failure mode of the first unwritable-``./docs`` upload). This
+    pure-ASGI middleware is registered *inside* CORS, so its enveloped 500
+    flows through the CORS send path and stays readable cross-origin —
+    "errors are structured" (spec_v2 §4.1) holds for every failure.
+
+    A response whose headers already flushed (an SSE stream mid-flight)
+    can't change status; those re-raise, and the stream protocols carry
+    their own in-band ``error`` events instead.
+    """
+
+    def __init__(self, app: Callable[..., Any]) -> None:
+        """Wrap the downstream ASGI app.
+
+        Args:
+            app: The next ASGI callable in the stack.
+        """
+        self.app = app
+
+    async def __call__(
+        self, scope: dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]
+    ) -> None:
+        """Serve one connection, enveloping any unhandled exception.
+
+        Args:
+            scope: The ASGI connection scope.
+            receive: The ASGI receive callable.
+            send: The ASGI send callable.
+        """
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        response_started = False
+
+        async def tracking_send(message: dict[str, Any]) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception as error:
+            if response_started:
+                raise
+            logger.exception("unhandled error serving %s", scope.get("path", "?"))
+            response = JSONResponse(
+                status_code=500,
+                content=_error_payload("internal_error", f"{type(error).__name__}: {error}"),
+            )
+            await response(scope, receive, send)  # type: ignore[arg-type]
+
+
 def _install_sse_event_schemas(app: FastAPI) -> None:
     """Publish the SSE event payload models in the app's OpenAPI schema.
 
@@ -223,6 +328,10 @@ def create_app() -> FastAPI:
         version=version,
         lifespan=lifespan,
     )
+    # Order matters: add_middleware prepends (last added = outermost), so
+    # registering the error enveloper *before* CORS seats it inside — its
+    # 500s pass through the CORS send path and stay browser-readable.
+    app.add_middleware(StructuredServerErrors)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
@@ -235,6 +344,9 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(conversations.router)
     app.include_router(chat.router)
+    app.include_router(settings_routes.router)
+    app.include_router(documents.router)
+    app.include_router(ingest.router)
     if settings.METRICS_ENABLED:
         app.include_router(metrics.router)
     _install_sse_event_schemas(app)

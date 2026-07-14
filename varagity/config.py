@@ -86,6 +86,13 @@ class Settings(BaseSettings):
             unauthenticated in v1, but the OpenAI client requires a value).
         MAX_TOKENS: Generation cap per LLM response.
         LLM_TEMPERATURE: Sampling temperature for LLM responses.
+        CHAT_MODEL_TYPE: Model-registry type the chat surfaces (API + GUI)
+            resolve their LLM with (``default`` | ``reasoning`` | ``tool``
+            — the LLM aliases of :func:`varagity.models.registry.get_model`;
+            spec_v2 §4.7's Generation "model type" knob). All three resolve
+            to the single llama.cpp server in v2; the knob exists so the
+            composer quick-toggle survives the aliases becoming separate
+            servers post-v2.
         POSTGRES_HOST: PostgreSQL host (service name in-container).
         POSTGRES_PORT: PostgreSQL port.
         POSTGRES_DB: PostgreSQL database name.
@@ -176,6 +183,7 @@ class Settings(BaseSettings):
     BASE_MODEL_API_KEY: str = "none"
     MAX_TOKENS: int = 8192
     LLM_TEMPERATURE: float = 0.6
+    CHAT_MODEL_TYPE: str = "default"
 
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
@@ -457,6 +465,31 @@ class Settings(BaseSettings):
                 f"must sum to 1.0; got {total}"
             )
         return self
+
+    @field_validator("CHAT_MODEL_TYPE")
+    @classmethod
+    def _validate_chat_model_type(cls, value: str) -> str:
+        """Reject chat model types outside the LLM aliases.
+
+        The vocabulary is hard-coded (mirroring ``RETRIEVAL_METHOD``) because
+        importing the model registry here would be circular — the registry's
+        clients read this module. ``varagity.models.registry.LLM_MODEL_TYPES``
+        is the same tuple, regression-tested to match.
+
+        Args:
+            value: The configured ``CHAT_MODEL_TYPE`` value.
+
+        Returns:
+            The validated value, unchanged.
+
+        Raises:
+            ValueError: If ``value`` is not ``default``, ``reasoning``, or
+                ``tool`` (``embedding``/``rerank`` are not chat models).
+        """
+        allowed = ("default", "reasoning", "tool")
+        if value not in allowed:
+            raise ValueError(f"CHAT_MODEL_TYPE must be one of {allowed}; got {value!r}")
+        return value
 
     @field_validator("LLM_TEMPERATURE")
     @classmethod

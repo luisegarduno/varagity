@@ -57,26 +57,29 @@ class TestMigrationRunner:
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             conn.execute(
                 "DROP TABLE IF EXISTS message_sources, messages, conversations, "
-                "schema_migrations CASCADE"
+                "app_settings, schema_migrations CASCADE"
             )
             first = run_migrations(conn)
-            assert first == ["001_conversations.sql"]
-            assert set(CONVERSATION_TABLES) <= _table_names(conn)
+            assert first == ["001_conversations.sql", "002_app_settings.sql"]
+            assert set(CONVERSATION_TABLES) | {"app_settings"} <= _table_names(conn)
             # Idempotent: a second run applies nothing and changes nothing.
             assert run_migrations(conn) == []
-            applied = conn.execute("SELECT name FROM schema_migrations").fetchall()
-            assert [row[0] for row in applied] == ["001_conversations.sql"]
+            applied = conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall()
+            assert [row[0] for row in applied] == [
+                "001_conversations.sql",
+                "002_app_settings.sql",
+            ]
 
     def test_existing_v1_volume_converges(self, pg_conninfo: str) -> None:
         """A volume with only schema.sql state (v1) gains the v2 tables."""
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             conn.execute(
                 "DROP TABLE IF EXISTS message_sources, messages, conversations, "
-                "schema_migrations CASCADE"
+                "app_settings, schema_migrations CASCADE"
             )
             assert {"documents", "chunks"} <= _table_names(conn)  # v1 state intact
             run_migrations(conn)
-            assert set(CONVERSATION_TABLES) <= _table_names(conn)
+            assert set(CONVERSATION_TABLES) | {"app_settings"} <= _table_names(conn)
             assert {"documents", "chunks"} <= _table_names(conn)  # untouched
 
 

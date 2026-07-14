@@ -10,9 +10,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
  && rm -rf /var/lib/apt/lists/*
 
-# Setup a non-root user
-RUN groupadd --system --gid 999 user \
- && useradd --system --gid 999 --uid 999 --create-home user
+# Setup a non-root user. uid/gid default to 1000 to match the host user —
+# this image shares the model_cache volume (and the ./docs mount) with the
+# api image, so both must agree on ownership (see Dockerfile.api for the
+# rationale and the build-arg override).
+ARG APP_UID=1000
+ARG APP_GID=1000
+RUN groupadd --gid ${APP_GID} user \
+ && useradd --gid ${APP_GID} --uid ${APP_UID} --create-home user
 
 # Pre-create the model cache mount point owned by the app user, so the named
 # volume (compose: model_cache:/home/user/.cache) inherits writable ownership.

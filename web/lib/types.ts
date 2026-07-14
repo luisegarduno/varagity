@@ -42,9 +42,14 @@ export interface paths {
          * Config
          * @description Expose the registered capabilities and valid ranges.
          *
+         *     Mostly static registry contents; the two upload constraints
+         *     (``upload_max_mb``, ``allowed_extensions``) are read from the effective
+         *     settings per request so the dropzone always validates against what the
+         *     server enforces (``ALLOWED_EXTENSIONS`` is runtime-overridable).
+         *
          *     Returns:
-         *         Registry contents (retrievers, chunkers, OCR engines, model types)
-         *         plus the numeric knobs' valid ranges.
+         *         Registry contents (retrievers, chunkers, OCR engines, model types),
+         *         the numeric knobs' valid ranges, and the upload constraints.
          */
         get: operations["config_api_config_get"];
         put?: never;
@@ -169,6 +174,212 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Settings
+         * @description Report the effective settings and the corpus-stale flag.
+         *
+         *     Args:
+         *         store: The per-request app-settings store.
+         *
+         *     Returns:
+         *         The overridable catalog with effective (env + override) values.
+         */
+        get: operations["read_settings_api_settings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Patch Settings
+         * @description Apply, validate, and persist runtime setting overrides.
+         *
+         *     A ``None`` value clears that override (reverting to the env value).
+         *     Validation runs on the *merged whole* through every config validator,
+         *     so linked constraints (the fusion weight pair, the rerank bounds) hold
+         *     exactly as they do for ``.env`` — an invalid patch changes nothing.
+         *
+         *     Args:
+         *         payload: The overrides to set or clear.
+         *         store: The per-request app-settings store (persistence + flag).
+         *         vector_store: The vector store (the corpus-emptiness check).
+         *
+         *     Returns:
+         *         The full post-patch catalog; ``corpus_stale`` reports whether a
+         *         reingest is now needed.
+         *
+         *     Raises:
+         *         HTTPException: ``422 unknown_setting`` for a name outside the
+         *             catalog; ``422 invalid_settings`` when the merged settings fail
+         *             validation; ``503 postgres_unreachable`` if persistence fails
+         *             (the overrides are rolled back — the process never diverges
+         *             from the table).
+         */
+        patch: operations["patch_settings_api_settings_patch"];
+        trace?: never;
+    };
+    "/api/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Documents
+         * @description List every ingested document (the corpus-management table).
+         *
+         *     Files uploaded but not yet ingested don't appear here — the ``documents``
+         *     table records ingests; the GUI pairs this list with the upload outcomes
+         *     it already holds.
+         *
+         *     Args:
+         *         store: The per-request vector store.
+         *
+         *     Returns:
+         *         One entry per document, newest ingest first.
+         */
+        get: operations["list_documents_api_documents_get"];
+        put?: never;
+        /**
+         * Upload Documents
+         * @description Upload file(s) into ``DOCS_PATH`` (no auto-ingest).
+         *
+         *     Each file is validated and stored independently; rejected files are
+         *     reported per-file so a mixed batch partially succeeds. A same-named
+         *     existing file is replaced (the re-upload flow) — its changed content
+         *     hash makes the next ingest re-process it.
+         *
+         *     Args:
+         *         files: The multipart file parts.
+         *
+         *     Returns:
+         *         Per-file outcomes, in upload order.
+         *
+         *     Raises:
+         *         HTTPException: ``422 no_file_stored`` when every file was rejected.
+         */
+        post: operations["upload_documents_api_documents_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{doc_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Document
+         * @description Remove a document's chunks from both stores (GUI-driven GC).
+         *
+         *     Elasticsearch first, pgvector last: the pgvector ``documents`` row is
+         *     the marker — if the ES delete fails, the document still lists and the
+         *     delete can be retried; a marker deleted first would strand ES chunks
+         *     invisibly (the exact v1 gap this route closes).
+         *
+         *     Args:
+         *         doc_id: The document to remove.
+         *         store: The per-request vector store.
+         *         bm25: The per-request BM25 store.
+         *         remove_file: Also unlink the source file — honored only when it
+         *             resolves inside ``DOCS_PATH`` (otherwise the next ingest would
+         *             simply re-add the document).
+         *
+         *     Returns:
+         *         The deletion counts and whether the file was removed.
+         *
+         *     Raises:
+         *         HTTPException: ``404 document_not_found`` for an unknown id;
+         *             ``503 es_unreachable`` when Elasticsearch is down (nothing
+         *             deleted — retry when it returns).
+         */
+        delete: operations["delete_document_api_documents__doc_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ingest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Ingest
+         * @description Trigger a background ingest run and return its handle.
+         *
+         *     Args:
+         *         payload: ``reingest=true`` re-processes unchanged files (the
+         *             stale-corpus action; setting changes don't change content
+         *             hashes).
+         *         runner: The process-wide ingest runner.
+         *         preflight: The awaitable reachability check (structured 503).
+         *
+         *     Returns:
+         *         The new run's snapshot (state ``running``).
+         *
+         *     Raises:
+         *         HTTPException: ``409 ingest_already_running`` while a run is in
+         *             flight; ``503 <service>_unreachable`` when a required backing
+         *             service is down.
+         */
+        post: operations["start_ingest_api_ingest_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ingest/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ingest Status
+         * @description Stream the current (or last) ingest run's progress as SSE.
+         *
+         *     Frames: ``status`` (snapshot; also terminal, with the summary),
+         *     ``progress`` (per stage/file/chunk), ``log`` (relayed pipeline lines).
+         *     With no run in this API process the stream is a single idle ``status``
+         *     frame; after a terminal run it replays that run and closes.
+         *
+         *     Args:
+         *         runner: The process-wide ingest runner.
+         *
+         *     Yields:
+         *         The framed events, oldest first, then live until terminal.
+         */
+        get: operations["ingest_status_api_ingest_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/metrics": {
         parameters: {
             query?: never;
@@ -197,6 +408,11 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** Body_upload_documents_api_documents_post */
+        Body_upload_documents_api_documents_post: {
+            /** Files */
+            files: string[];
+        };
         /**
          * ChatOverrides
          * @description Per-request overrides of query-time settings (spec_v2 §4.2).
@@ -247,8 +463,14 @@ export interface components {
          *         chunkers: Registered chunking strategy names.
          *         ocr_engines: Available OCR engine names.
          *         model_types: Valid ``get_model`` types.
+         *         llm_model_types: The chat-capable subset of ``model_types`` — the
+         *             ``CHAT_MODEL_TYPE`` vocabulary the composer quick-toggle offers.
          *         ranges: Valid ranges for the numeric query-time knobs, keyed by
          *             setting name (lowercase).
+         *         upload_max_mb: Effective per-file upload cap (``UPLOAD_MAX_MB``) —
+         *             the dropzone validates against it client-side.
+         *         allowed_extensions: Effective ingestable extensions
+         *             (``ALLOWED_EXTENSIONS``, normalized with leading dots), sorted.
          */
         ConfigResponse: {
             /** Retrievers */
@@ -259,10 +481,16 @@ export interface components {
             ocr_engines: string[];
             /** Model Types */
             model_types: string[];
+            /** Llm Model Types */
+            llm_model_types: string[];
             /** Ranges */
             ranges: {
                 [key: string]: components["schemas"]["NumericRange"];
             };
+            /** Upload Max Mb */
+            upload_max_mb: number;
+            /** Allowed Extensions */
+            allowed_extensions: string[];
         };
         /**
          * ConversationCreateRequest
@@ -335,6 +563,62 @@ export interface components {
             message_count: number;
         };
         /**
+         * DocumentDeleteResponse
+         * @description Response of ``DELETE /api/documents/{doc_id}`` (spec_v2 §4.2).
+         *
+         *     Attributes:
+         *         doc_id: The deleted document.
+         *         chunks_deleted: Chunks removed (the pgvector count; the
+         *             Elasticsearch ``delete_by_query`` removes the same identity-
+         *             addressed set).
+         *         file_removed: Whether the source file was also deleted from
+         *             ``DOCS_PATH`` (requested via ``?remove_file=true`` and only
+         *             honored inside the corpus directory).
+         */
+        DocumentDeleteResponse: {
+            /** Doc Id */
+            doc_id: string;
+            /** Chunks Deleted */
+            chunks_deleted: number;
+            /** File Removed */
+            file_removed: boolean;
+        };
+        /**
+         * DocumentOut
+         * @description One corpus document in the ``GET /api/documents`` list (spec_v2 §4.2).
+         *
+         *     Attributes:
+         *         doc_id: The document's stable id.
+         *         file_name: Base name of the source file.
+         *         source: Absolute file path recorded at ingest time.
+         *         file_type: File extension without the dot (``pdf``, ``docx``, …).
+         *         n_chunks: Chunks ingested (``0`` = no extractable text).
+         *         ingested_at: When the document (last) landed in the stores.
+         *         extraction_mix: Chunk count per extraction method (``text`` /
+         *             ``ocr_fallback``).
+         */
+        DocumentOut: {
+            /** Doc Id */
+            doc_id: string;
+            /** File Name */
+            file_name: string;
+            /** Source */
+            source: string;
+            /** File Type */
+            file_type: string;
+            /** N Chunks */
+            n_chunks: number;
+            /**
+             * Ingested At
+             * Format: date-time
+             */
+            ingested_at: string;
+            /** Extraction Mix */
+            extraction_mix: {
+                [key: string]: number;
+            };
+        };
+        /**
          * ErrorBody
          * @description The machine-readable error inside the envelope (spec_v2 §4.1).
          *
@@ -384,6 +668,86 @@ export interface components {
             services: {
                 [key: string]: components["schemas"]["ServiceHealth"];
             };
+        };
+        /**
+         * IngestRunOut
+         * @description One ingest run's state (``POST /api/ingest`` + the status stream).
+         *
+         *     Attributes:
+         *         run_id: The run handle.
+         *         state: ``running`` | ``completed`` | ``failed``.
+         *         reingest: Whether the run re-processes unchanged files.
+         *         started_at: When the run started.
+         *         finished_at: When it reached a terminal state (``None`` while
+         *             running).
+         *         summary: The final counters (terminal states only; ``failed`` runs
+         *             may carry ``None`` when the flow died before summarizing).
+         *         error: The flow-level failure (``failed`` only; per-file failures
+         *             ride in ``summary.failed`` and the ``log`` events instead).
+         */
+        IngestRunOut: {
+            /** Run Id */
+            run_id: string;
+            /** State */
+            state: string;
+            /** Reingest */
+            reingest: boolean;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Finished At */
+            finished_at?: string | null;
+            summary?: components["schemas"]["IngestSummaryOut"] | null;
+            /** Error */
+            error?: string | null;
+        };
+        /**
+         * IngestStartRequest
+         * @description Body of ``POST /api/ingest``.
+         *
+         *     Attributes:
+         *         reingest: Delete each discovered document's previous ingest and
+         *             re-process it (required after reingest-affecting setting
+         *             changes — content hashes don't change, so unchanged files are
+         *             otherwise skipped).
+         */
+        IngestStartRequest: {
+            /**
+             * Reingest
+             * @default false
+             */
+            reingest: boolean;
+        };
+        /**
+         * IngestSummaryOut
+         * @description The ingest run counters (mirrors the loader's ``IngestSummary``).
+         *
+         *     Attributes:
+         *         discovered: Files found in the corpus buckets.
+         *         ingested: Files parsed, chunked, embedded, and stored this run.
+         *         skipped: Unchanged files skipped via the idempotency check.
+         *         no_text: Files with no extractable text.
+         *         unsupported: Files whose bucket has no registered parser.
+         *         failed: Files that raised during ingestion (run continued).
+         *         chunks: Total chunks stored this run.
+         */
+        IngestSummaryOut: {
+            /** Discovered */
+            discovered: number;
+            /** Ingested */
+            ingested: number;
+            /** Skipped */
+            skipped: number;
+            /** No Text */
+            no_text: number;
+            /** Unsupported */
+            unsupported: number;
+            /** Failed */
+            failed: number;
+            /** Chunks */
+            chunks: number;
         };
         /**
          * MessageOut
@@ -473,6 +837,107 @@ export interface components {
             /** Detail */
             detail?: string | null;
         };
+        /**
+         * SettingOut
+         * @description One effective setting in the ``GET /api/settings`` catalog (spec_v2 §4.7).
+         *
+         *     Attributes:
+         *         name: The ``Settings`` field name (e.g. ``"RETRIEVAL_METHOD"``).
+         *         value: The effective value (env defaults merged with any override).
+         *         group: Drawer group — ``retrieval`` | ``generation`` | ``ingestion``.
+         *         overridden: Whether a persisted runtime override is in effect (the
+         *             drawer shows a reset affordance).
+         *         reingest_affecting: Whether changing it marks the corpus stale (it
+         *             doesn't change content hashes — the surfaced v1 footgun).
+         *         choices: Valid values for enum-like settings (registry-derived, so a
+         *             new implementation appears automatically); ``None`` for numeric
+         *             and free-form settings (ranges live in ``GET /api/config``).
+         */
+        SettingOut: {
+            /** Name */
+            name: string;
+            /** Value */
+            value: boolean | number | string;
+            /** Group */
+            group: string;
+            /** Overridden */
+            overridden: boolean;
+            /** Reingest Affecting */
+            reingest_affecting: boolean;
+            /** Choices */
+            choices?: string[] | null;
+        };
+        /**
+         * SettingsPatchRequest
+         * @description Body of ``PATCH /api/settings``.
+         *
+         *     Attributes:
+         *         overrides: Setting name → new value, or ``None`` to clear that
+         *             override (reverting to the env value). Linked settings (the
+         *             fusion weight pair) must be patched together — validation runs
+         *             on the merged whole.
+         */
+        SettingsPatchRequest: {
+            /** Overrides */
+            overrides: {
+                [key: string]: boolean | number | string | null;
+            };
+        };
+        /**
+         * SettingsResponse
+         * @description Response of ``GET /api/settings`` and ``PATCH /api/settings``.
+         *
+         *     Attributes:
+         *         settings: The full overridable catalog with effective values.
+         *         corpus_stale: Whether a reingest-affecting setting changed since the
+         *             corpus was last (re)ingested — the "Re-ingest to apply" banner.
+         */
+        SettingsResponse: {
+            /** Settings */
+            settings: components["schemas"]["SettingOut"][];
+            /** Corpus Stale */
+            corpus_stale: boolean;
+        };
+        /**
+         * UploadResponse
+         * @description Response of ``POST /api/documents``.
+         *
+         *     Attributes:
+         *         files: Per-file outcomes, in upload order.
+         */
+        UploadResponse: {
+            /** Files */
+            files: components["schemas"]["UploadedFileOut"][];
+        };
+        /**
+         * UploadedFileOut
+         * @description Outcome for one file of a ``POST /api/documents`` upload.
+         *
+         *     Attributes:
+         *         file_name: The stored (sanitized) file name.
+         *         size_bytes: Bytes written (``0`` when rejected).
+         *         stored: Whether the file landed in ``DOCS_PATH``.
+         *         replaced: Whether an existing same-named file was overwritten (a
+         *             re-upload; the next ingest re-processes it under a new hash).
+         *         reason: Rejection reason when ``stored`` is false
+         *             (``extension_not_allowed`` | ``file_too_large`` |
+         *             ``invalid_filename``).
+         */
+        UploadedFileOut: {
+            /** File Name */
+            file_name: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Stored */
+            stored: boolean;
+            /**
+             * Replaced
+             * @default false
+             */
+            replaced: boolean;
+            /** Reason */
+            reason?: string | null;
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -534,6 +999,95 @@ export interface components {
             code: string;
             /** Message */
             message: string;
+        };
+        /**
+         * IngestLogEvent
+         * @description Payload of the ingest-status SSE ``log`` event.
+         *
+         *     Relayed ``varagity.ingest`` log records (the per-file outcome lines the
+         *     terminal shows: skipped-unchanged, no-text, failure tracebacks' heads),
+         *     so the browser progress view mirrors the CLI run.
+         *
+         *     Attributes:
+         *         level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).
+         *         message: The formatted log message.
+         */
+        IngestLogEvent: {
+            /** Level */
+            level: string;
+            /** Message */
+            message: string;
+        };
+        /**
+         * IngestProgressEvent
+         * @description Payload of the ingest-status SSE ``progress`` event.
+         *
+         *     One frame per pipeline stage transition, mirroring the CLI's ``rich``
+         *     display: ``discover`` (with ``total`` files), then per file ``parse`` →
+         *     ``chunk`` → ``contextualize`` (with per-chunk ``current``/``total``
+         *     ticks) → ``embed`` → ``store``, and a ``file_done`` frame carrying the
+         *     file's outcome plus the run-level progress counters.
+         *
+         *     Attributes:
+         *         stage: ``discover`` | ``parse`` | ``chunk`` | ``contextualize`` |
+         *             ``embed`` | ``store`` | ``file_done``.
+         *         file: The file being processed (``None`` for ``discover``).
+         *         outcome: ``file_done`` only — ``ingested`` | ``skipped`` |
+         *             ``no_text`` | ``failed``.
+         *         current: Intra-stage progress (contextualized chunks so far).
+         *         total: Stage denominator (files for ``discover``, chunks for
+         *             ``chunk``/``contextualize``, texts for ``embed``).
+         *         files_done: Files finished so far (``file_done`` only).
+         *         files_total: Files discovered (``file_done`` only).
+         */
+        IngestProgressEvent: {
+            /** Stage */
+            stage: string;
+            /**
+             * File
+             * @default null
+             */
+            file: string | null;
+            /**
+             * Outcome
+             * @default null
+             */
+            outcome: string | null;
+            /**
+             * Current
+             * @default null
+             */
+            current: number | null;
+            /**
+             * Total
+             * @default null
+             */
+            total: number | null;
+            /**
+             * Files Done
+             * @default null
+             */
+            files_done: number | null;
+            /**
+             * Files Total
+             * @default null
+             */
+            files_total: number | null;
+        };
+        /**
+         * IngestStatusEvent
+         * @description Payload of the ingest-status SSE ``status`` event.
+         *
+         *     The stream's first frame (a snapshot on connect) and its last (the
+         *     terminal state). ``run=None`` means no ingest has run in this API
+         *     process — the stream closes immediately after.
+         *
+         *     Attributes:
+         *         run: The current (or last) run, if any.
+         */
+        IngestStatusEvent: {
+            /** @default null */
+            run: components["schemas"]["IngestRunOut"] | null;
         };
         /**
          * RetrievalEvent
@@ -903,6 +1457,216 @@ export interface operations {
                 };
                 content: {
                     "text/event-stream": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    read_settings_api_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsResponse"];
+                };
+            };
+        };
+    };
+    patch_settings_api_settings_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SettingsPatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_documents_api_documents_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentOut"][];
+                };
+            };
+        };
+    };
+    upload_documents_api_documents_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_documents_api_documents_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UploadResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_document_api_documents__doc_id__delete: {
+        parameters: {
+            query?: {
+                remove_file?: boolean;
+            };
+            header?: never;
+            path: {
+                doc_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentDeleteResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_ingest_api_ingest_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IngestStartRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestRunOut"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    ingest_status_api_ingest_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": unknown;
                 };
             };
         };

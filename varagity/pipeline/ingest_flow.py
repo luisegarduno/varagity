@@ -27,6 +27,7 @@ counters at the moment a document actually lands in both stores.
 """
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -218,7 +219,9 @@ def store_chunks_task(
 
 
 # The task-wrapped seam threaded through the loader's single run loop.
-_TASK_STAGES = IngestStages(
+# Public so the API's ingest runner can wrap these very tasks with its
+# progress emitters (tracking + streaming compose; spec_v2 §4.2).
+TASK_STAGES = IngestStages(
     discover=discover_documents_task,
     parse=parse_document_task,
     chunk=chunk_document_task,
@@ -238,6 +241,8 @@ def ingest_flow(
     llm: LLMClient | None = None,
     reingest: bool = False,
     verbose: int | None = None,
+    stages: IngestStages | None = None,
+    on_file: Callable[[Path, str, int], None] | None = None,
 ) -> IngestSummary:
     """Ingest the corpus with every stage tracked as a Prefect task run.
 
@@ -264,6 +269,11 @@ def ingest_flow(
             both stores) and re-process it.
         verbose: Console verbosity (0–2); defaults to
             ``settings.DEFAULT_VERBOSE``.
+        stages: Per-stage call seam; this flow's Prefect ``@task``-wrapped
+            stages when omitted. The API's ingest runner passes
+            event-emitting wrappers *around* those tasks (spec_v2 §4.2
+            live progress), so tracking and streaming compose.
+        on_file: Per-file outcome observer, passed through to the loader.
 
     Returns:
         The run's counters.
@@ -276,5 +286,6 @@ def ingest_flow(
         llm=llm,
         reingest=reingest,
         verbose=verbose,
-        stages=_TASK_STAGES,
+        stages=stages if stages is not None else TASK_STAGES,
+        on_file=on_file,
     )

@@ -3,13 +3,16 @@
 import { SendIcon, SquareIcon } from "lucide-react";
 import { useState } from "react";
 
+import { QuickToggles } from "@/components/settings/QuickToggles";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
 /**
  * The question input: Enter sends (Shift+Enter for a newline), the send
  * button flips to Stop while a stream is open (aborting the fetch, which
- * cancels generation server-side between tokens).
+ * cancels generation server-side between tokens). The quick-toggles
+ * underneath write the persisted override layer (spec_v2 §4.7), so they
+ * apply to the next question.
  */
 export function Composer({
   onSend,
@@ -30,9 +33,10 @@ export function Composer({
   }
 
   return (
-    <div className="border-t border-border bg-background p-4">
+    <div className="border-t border-border bg-background p-4 pt-2">
+      <QuickToggles />
       <form
-        className="mx-auto flex w-full max-w-3xl items-end gap-2"
+        className="mx-auto mt-1.5 flex w-full max-w-3xl items-end gap-2"
         onSubmit={(event) => {
           event.preventDefault();
           submit();

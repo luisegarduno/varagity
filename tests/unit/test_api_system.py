@@ -43,6 +43,18 @@ class TestConfig:
         assert ranges["top_k"]["min"] == 1
         assert ranges["llm_temperature"] == {"min": 0.0, "max": 2.0}
         assert ranges["verbose"] == {"min": 0, "max": 2}
+        assert ranges["semantic_weight"] == {"min": 0.0, "max": 1.0}
+        assert ranges["bm25_weight"] == {"min": 0.0, "max": 1.0}
+
+    async def test_llm_model_types_and_upload_constraints(
+        self, app: FastAPI, settings_env: Any
+    ) -> None:
+        """The composer's model-type vocabulary + the dropzone's limits (Phase 8)."""
+        settings_env(UPLOAD_MAX_MB=7, ALLOWED_EXTENSIONS=".md,txt")
+        data = (await get(app, "/api/config")).json()
+        assert data["llm_model_types"] == ["default", "reasoning", "tool"]
+        assert data["upload_max_mb"] == 7
+        assert data["allowed_extensions"] == [".md", ".txt"]  # normalized + sorted
 
 
 class TestHealth:
@@ -124,6 +136,29 @@ class TestErrorEnvelope:
         response = await get(app, "/api/nope")
         assert response.status_code == 404
         assert response.json() == {"error": {"code": "not_found", "message": "Not Found"}}
+
+    async def test_unhandled_exception_is_enveloped_and_cors_readable(self, app: FastAPI) -> None:
+        """Unhandled exceptions must stay browser-readable cross-origin.
+
+        Without CORS headers on the 500, a cross-origin fetch can only
+        report "TypeError: Failed to fetch" and the real error is
+        invisible (the Phase 8 upload-permission bug's shape).
+        """
+
+        @app.get("/api/boom")
+        def boom() -> None:
+            raise RuntimeError("the disk fell off")
+
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://api") as client:
+            response = await client.get("/api/boom", headers={"origin": "http://localhost:3000"})
+        assert response.status_code == 500
+        error = response.json()["error"]
+        assert error["code"] == "internal_error"
+        assert "the disk fell off" in error["message"]
+        # The part the browser needs: the 500 passed through the CORS
+        # middleware's send path, so it is readable cross-origin.
+        assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
     async def test_validation_failure_is_enveloped(self, app: FastAPI) -> None:
         transport = httpx.ASGITransport(app=app)

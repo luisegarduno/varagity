@@ -19,8 +19,12 @@ from varagity.models.rerank import RerankClient
 
 MODEL_TYPES: tuple[str, ...] = ("default", "embedding", "rerank", "reasoning", "tool")
 
-# LLM types that resolve to the single llama.cpp server in v1.
-_LLM_TYPES: frozenset[str] = frozenset({"default", "reasoning", "tool"})
+# LLM aliases that resolve to the single llama.cpp server in v1/v2 — the
+# valid CHAT_MODEL_TYPE vocabulary (spec_v2 §4.7), exposed by GET /api/config
+# so the GUI's model-type controls offer exactly these.
+LLM_MODEL_TYPES: tuple[str, ...] = ("default", "reasoning", "tool")
+
+_LLM_TYPES: frozenset[str] = frozenset(LLM_MODEL_TYPES)
 
 
 @overload

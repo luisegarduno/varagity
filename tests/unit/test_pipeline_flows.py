@@ -151,10 +151,10 @@ class TestIngestFlow:
                 return super().index_chunks(records)  # …retries then succeed
 
         fast_stages = dataclasses.replace(
-            ingest_flow_module._TASK_STAGES,
+            ingest_flow_module.TASK_STAGES,
             store=store_chunks_task.with_options(retry_delay_seconds=0),
         )
-        monkeypatch.setattr(ingest_flow_module, "_TASK_STAGES", fast_stages)
+        monkeypatch.setattr(ingest_flow_module, "TASK_STAGES", fast_stages)
 
         store, bm25 = FakeStore(), FlakyBM25()
         summary = ingest_flow(
@@ -177,10 +177,10 @@ class TestIngestFlow:
                 raise RuntimeError("elasticsearch is gone")
 
         fast_stages = dataclasses.replace(
-            ingest_flow_module._TASK_STAGES,
+            ingest_flow_module.TASK_STAGES,
             store=store_chunks_task.with_options(retry_delay_seconds=0),
         )
-        monkeypatch.setattr(ingest_flow_module, "_TASK_STAGES", fast_stages)
+        monkeypatch.setattr(ingest_flow_module, "TASK_STAGES", fast_stages)
 
         store = FakeStore()
         summary = ingest_flow(

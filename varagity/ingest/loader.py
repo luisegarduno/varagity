@@ -270,6 +270,7 @@ def ingest_corpus(
     reingest: bool = False,
     verbose: int | None = None,
     stages: IngestStages | None = None,
+    on_file: Callable[[Path, str, int], None] | None = None,
 ) -> IngestSummary:
     """Ingest every supported document under ``docs_path`` into both stores.
 
@@ -294,6 +295,12 @@ def ingest_corpus(
         stages: Per-stage call seam; the plain stage functions when omitted.
             ``varagity.pipeline.ingest_flow`` passes task-wrapped stages so
             each stage is a tracked Prefect task run.
+        on_file: Observer called after each file with ``(path, outcome,
+            chunks_stored)``, where outcome is ``"ingested"`` /
+            ``"skipped"`` / ``"no_text"`` / ``"failed"`` — the seam the
+            API's live ingest-progress stream rides (spec_v2 §4.2). A
+            raising observer is logged and ignored: progress reporting
+            must never fail a run.
 
     Returns:
         The run's counters (one file failing is counted and logged, not
@@ -368,6 +375,7 @@ def ingest_corpus(
                 except Exception:
                     logger.exception("failed to ingest %s — continuing with the next file", path)
                     summary.failed += 1
+                    _notify_file(on_file, path, "failed", 0)
                 else:
                     if outcome == "ingested":
                         summary.ingested += 1
@@ -377,6 +385,7 @@ def ingest_corpus(
                         summary.no_text += 1
                     summary.chunks += n_chunks
                     next_index += n_chunks
+                    _notify_file(on_file, path, outcome, n_chunks)
                 progress.advance(task)
     finally:
         if owns_store:
@@ -384,6 +393,25 @@ def ingest_corpus(
         if owns_bm25:
             active_bm25.close()
     return summary
+
+
+def _notify_file(
+    on_file: Callable[[Path, str, int], None] | None, path: Path, outcome: str, n_chunks: int
+) -> None:
+    """Invoke the per-file observer, containing its failures.
+
+    Args:
+        on_file: The observer, or ``None`` (no-op).
+        path: The file just finished.
+        outcome: Its summary outcome.
+        n_chunks: Chunks stored for it this run.
+    """
+    if on_file is None:
+        return
+    try:
+        on_file(path, outcome, n_chunks)
+    except Exception:  # a progress observer must never fail the run
+        logger.warning("on_file observer raised for %s", path, exc_info=True)
 
 
 def _ingest_file(

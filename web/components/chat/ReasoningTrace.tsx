@@ -1,15 +1,20 @@
 "use client";
 
 import { BrainIcon, ChevronDownIcon, ChevronRightIcon } from "lucide-react";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  reasoningDefaultOpen,
+  reasoningDefaultOpenServer,
+  subscribeDisplayPrefs,
+} from "@/lib/display-prefs";
 
 /**
  * The model's `<think>` stream, collapsible (spec_v2 §4.6): auto-open
  * while the reasoning is streaming in, collapsed once the turn finishes
- * — unless the user toggled it, which then wins. (A default-open setting
- * arrives with the Phase 8 settings drawer.)
+ * — unless the user toggled it (which wins) or the Phase 8 display
+ * setting keeps finished traces expanded by default.
  */
 export function ReasoningTrace({
   reasoning,
@@ -19,8 +24,13 @@ export function ReasoningTrace({
   streaming: boolean;
 }) {
   const [userChoice, setUserChoice] = useState<boolean | null>(null);
+  const defaultOpen = useSyncExternalStore(
+    subscribeDisplayPrefs,
+    reasoningDefaultOpen,
+    reasoningDefaultOpenServer,
+  );
   if (!reasoning) return null;
-  const open = userChoice ?? streaming;
+  const open = userChoice ?? (streaming || defaultOpen);
 
   return (
     <div className="mb-2">

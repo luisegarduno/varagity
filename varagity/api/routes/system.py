@@ -11,8 +11,9 @@ from fastapi import APIRouter
 from varagity.api.deps import check_services
 from varagity.api.schemas import ConfigResponse, HealthResponse, NumericRange
 from varagity.chunking import CHUNKER_REGISTRY
+from varagity.config import get_settings
 from varagity.ingest.parsers.pdf import OCR_ENGINE_FACTORIES
-from varagity.models.registry import MODEL_TYPES
+from varagity.models.registry import LLM_MODEL_TYPES, MODEL_TYPES
 from varagity.retrieval.base import RETRIEVER_REGISTRY
 
 router = APIRouter(tags=["system"])
@@ -25,6 +26,8 @@ _RANGES: dict[str, NumericRange] = {
     "top_k": NumericRange(min=1),
     "rerank_top_n": NumericRange(min=1),
     "rerank_candidates": NumericRange(min=1),
+    "semantic_weight": NumericRange(min=0.0, max=1.0),
+    "bm25_weight": NumericRange(min=0.0, max=1.0),
     "llm_temperature": NumericRange(min=0.0, max=2.0),
     "max_tokens": NumericRange(min=1),
     "chunk_size": NumericRange(min=1),
@@ -52,14 +55,23 @@ async def health() -> HealthResponse:
 def config() -> ConfigResponse:
     """Expose the registered capabilities and valid ranges.
 
+    Mostly static registry contents; the two upload constraints
+    (``upload_max_mb``, ``allowed_extensions``) are read from the effective
+    settings per request so the dropzone always validates against what the
+    server enforces (``ALLOWED_EXTENSIONS`` is runtime-overridable).
+
     Returns:
-        Registry contents (retrievers, chunkers, OCR engines, model types)
-        plus the numeric knobs' valid ranges.
+        Registry contents (retrievers, chunkers, OCR engines, model types),
+        the numeric knobs' valid ranges, and the upload constraints.
     """
+    settings = get_settings()
     return ConfigResponse(
         retrievers=sorted(RETRIEVER_REGISTRY),
         chunkers=sorted(CHUNKER_REGISTRY),
         ocr_engines=sorted(OCR_ENGINE_FACTORIES),
         model_types=list(MODEL_TYPES),
+        llm_model_types=list(LLM_MODEL_TYPES),
         ranges=_RANGES,
+        upload_max_mb=settings.UPLOAD_MAX_MB,
+        allowed_extensions=sorted(settings.allowed_extension_set),
     )

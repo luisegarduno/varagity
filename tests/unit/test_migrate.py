@@ -98,6 +98,6 @@ def test_default_directory_is_the_package_migrations() -> None:
     from varagity.stores.migrate import MIGRATIONS_PATH
 
     names = sorted(p.name for p in MIGRATIONS_PATH.glob("*.sql"))
-    assert names == ["001_conversations.sql"]
-    conn = FakeConnection(applied=["001_conversations.sql"])
+    assert names == ["001_conversations.sql", "002_app_settings.sql"]
+    conn = FakeConnection(applied=names)
     assert run_migrations(conn) == []  # type: ignore[arg-type]

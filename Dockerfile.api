@@ -4,9 +4,21 @@
 # Use a Python image with uv pre-installed (same base as the app image)
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-# Setup a non-root user
-RUN groupadd --system --gid 999 user \
- && useradd --system --gid 999 --uid 999 --create-home user
+# Setup a non-root user. Its uid/gid default to 1000 — the first (and on a
+# single-user box, the only) host account — because the ./docs bind mount is
+# owned by the host user and the API must WRITE it (uploads + delete, v2
+# Phase 8); a mismatched uid turns every upload into EACCES. Override at
+# build time if your host uid differs: docker compose build
+# --build-arg APP_UID=$(id -u) --build-arg APP_GID=$(id -g) api
+ARG APP_UID=1000
+ARG APP_GID=1000
+RUN groupadd --gid ${APP_GID} user \
+ && useradd --gid ${APP_GID} --uid ${APP_UID} --create-home user
+
+# Pre-create the model cache mount point owned by the app user (the API runs
+# the ingest parsers since v2 Phase 8, so it shares the model_cache volume
+# with the app image — Docling/EasyOCR/tiktoken downloads survive rebuilds).
+RUN mkdir -p /home/user/.cache && chown -R user:user /home/user/.cache
 
 # Copy the project into the image
 ADD . /app

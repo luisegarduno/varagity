@@ -23,4 +23,12 @@ schema served at `/openapi.json`; these are the Python internals.
 
 ::: varagity.api.routes.metrics
 
+::: varagity.api.routes.settings
+
+::: varagity.api.routes.documents
+
+::: varagity.api.routes.ingest
+
 ::: varagity.api.runtime_settings
+
+::: varagity.api.ingest_runner

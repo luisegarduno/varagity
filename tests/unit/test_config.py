@@ -26,6 +26,7 @@ SETTINGS_ENV_VARS = (
     "BASE_MODEL_API_KEY",
     "MAX_TOKENS",
     "LLM_TEMPERATURE",
+    "CHAT_MODEL_TYPE",
     "POSTGRES_HOST",
     "POSTGRES_PORT",
     "POSTGRES_DB",
@@ -135,6 +136,27 @@ class TestRetrievalMethodValidation:
     def test_unknown_method_fails_fast(self, bad: str) -> None:
         with pytest.raises(ValidationError, match="RETRIEVAL_METHOD"):
             Settings(_env_file=None, RETRIEVAL_METHOD=bad)
+
+
+class TestChatModelTypeValidation:
+    @pytest.mark.parametrize("alias", ["default", "reasoning", "tool"])
+    def test_llm_aliases_accepted(self, alias: str) -> None:
+        settings = Settings(_env_file=None, CHAT_MODEL_TYPE=alias)
+        assert alias == settings.CHAT_MODEL_TYPE
+
+    @pytest.mark.parametrize("bad", ["embedding", "rerank", "DEFAULT", "", "chat"])
+    def test_non_chat_types_fail_fast(self, bad: str) -> None:
+        """embedding/rerank are model types but not chat models."""
+        with pytest.raises(ValidationError, match="CHAT_MODEL_TYPE"):
+            Settings(_env_file=None, CHAT_MODEL_TYPE=bad)
+
+    def test_vocabulary_matches_the_registry_aliases(self) -> None:
+        """config.py hard-codes the tuple (circular import); keep them equal."""
+        from varagity.models.registry import LLM_MODEL_TYPES
+
+        for alias in LLM_MODEL_TYPES:
+            assert alias == Settings(_env_file=None, CHAT_MODEL_TYPE=alias).CHAT_MODEL_TYPE
+        assert len(LLM_MODEL_TYPES) == 3
 
 
 class TestRerankValidation:

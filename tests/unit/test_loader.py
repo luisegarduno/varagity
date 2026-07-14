@@ -389,6 +389,61 @@ def test_invalid_verbose_raises(pinned_settings: None, corpus: Path) -> None:
         ingest_corpus(str(corpus), store=FakeStore(), embeddings=FakeEmbeddings(), verbose=3)
 
 
+class TestOnFileObserver:
+    """The per-file outcome seam the API's progress stream rides (v2 Phase 8)."""
+
+    def test_observer_sees_every_outcome(self, pinned_settings: None, corpus: Path) -> None:
+        (corpus / "broken.txt").write_bytes(b"\xff\xfe\x00 not utf-8 at all \xff" * 20)
+        (corpus / "empty.txt").write_text("   ")
+        seen: list[tuple[str, str, int]] = []
+
+        summary = ingest_corpus(
+            str(corpus),
+            store=FakeStore(),
+            embeddings=FakeEmbeddings(),
+            verbose=0,
+            on_file=lambda path, outcome, n: seen.append((path.name, outcome, n)),
+        )
+
+        outcomes = {name: (outcome, n) for name, outcome, n in seen}
+        assert len(seen) == summary.discovered == 4
+        assert outcomes["broken.txt"] == ("failed", 0)
+        assert outcomes["empty.txt"] == ("no_text", 0)
+        assert outcomes["aurora.md"][0] == "ingested"
+        assert outcomes["aurora.md"][1] > 0
+
+    def test_skipped_files_are_reported(self, pinned_settings: None, corpus: Path) -> None:
+        store = FakeStore()
+        ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
+        seen: list[str] = []
+        ingest_corpus(
+            str(corpus),
+            store=store,
+            embeddings=FakeEmbeddings(),
+            verbose=0,
+            on_file=lambda path, outcome, n: seen.append(outcome),
+        )
+        assert seen == ["skipped", "skipped"]
+
+    def test_raising_observer_never_fails_the_run(
+        self, pinned_settings: None, corpus: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def explode(path: Path, outcome: str, n: int) -> None:
+            raise RuntimeError("observer bug")
+
+        with caplog.at_level(logging.WARNING):
+            summary = ingest_corpus(
+                str(corpus),
+                store=FakeStore(),
+                embeddings=FakeEmbeddings(),
+                verbose=0,
+                on_file=explode,
+            )
+        assert summary.ingested == 2
+        assert summary.failed == 0
+        assert any("observer raised" in r.message for r in caplog.records)
+
+
 class TestContextualization:
     """The Phase-5 contextual path (spec §9.4; plan decision #2)."""
 

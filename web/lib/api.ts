@@ -26,6 +26,21 @@ export type DoneEvent = Schemas["DoneEvent"];
 export type ChatErrorEvent = Schemas["ErrorEvent"];
 export type ErrorResponse = Schemas["ErrorResponse"];
 export type HealthResponse = Schemas["HealthResponse"];
+export type ConfigResponse = Schemas["ConfigResponse"];
+export type SettingOut = Schemas["SettingOut"];
+export type SettingsResponse = Schemas["SettingsResponse"];
+export type DocumentOut = Schemas["DocumentOut"];
+export type UploadResponse = Schemas["UploadResponse"];
+export type UploadedFile = Schemas["UploadedFileOut"];
+export type DocumentDeleteResponse = Schemas["DocumentDeleteResponse"];
+export type IngestRun = Schemas["IngestRunOut"];
+export type IngestSummary = Schemas["IngestSummaryOut"];
+export type IngestStatusEvent = Schemas["IngestStatusEvent"];
+export type IngestProgressEvent = Schemas["IngestProgressEvent"];
+export type IngestLogEvent = Schemas["IngestLogEvent"];
+
+/** A JSON scalar a setting value can take on the wire (spec_v2 §4.7). */
+export type SettingValue = boolean | number | string;
 
 /**
  * Browser-reachable API origin. Inlined at build time (`NEXT_PUBLIC_*`),
@@ -100,6 +115,69 @@ export function deleteConversation(id: string): Promise<void> {
   });
 }
 
+/** Fetch the static capabilities + upload constraints (spec_v2 §4.2). */
+export function getConfig(): Promise<ConfigResponse> {
+  return request("/api/config");
+}
+
+/** Fetch the effective settings catalog + the corpus-stale flag (§4.7). */
+export function getSettings(): Promise<SettingsResponse> {
+  return request("/api/settings");
+}
+
+/**
+ * Apply runtime setting overrides (`null` clears one). Query-time knobs
+ * take effect on the next question; a reingest-affecting change flips
+ * `corpus_stale` in the response.
+ */
+export function patchSettings(
+  overrides: Record<string, SettingValue | null>,
+): Promise<SettingsResponse> {
+  return request("/api/settings", {
+    method: "PATCH",
+    body: JSON.stringify({ overrides }),
+  });
+}
+
+/** List the ingested documents (the corpus-management table). */
+export function listDocuments(): Promise<DocumentOut[]> {
+  return request("/api/documents");
+}
+
+/**
+ * Upload files into the corpus directory (no auto-ingest). The browser
+ * sets the multipart boundary itself, so no content-type header here.
+ */
+export async function uploadDocuments(files: File[]): Promise<UploadResponse> {
+  const form = new FormData();
+  for (const file of files) form.append("files", file, file.name);
+  const response = await fetch(`${API_URL}/api/documents`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) throw await toApiError(response);
+  return (await response.json()) as UploadResponse;
+}
+
+/** Remove a document's chunks from both stores (optionally the file too). */
+export function deleteDocument(
+  docId: string,
+  options?: { removeFile?: boolean },
+): Promise<DocumentDeleteResponse> {
+  const query = options?.removeFile ? "?remove_file=true" : "";
+  return request(`/api/documents/${encodeURIComponent(docId)}${query}`, {
+    method: "DELETE",
+  });
+}
+
+/** Trigger a background ingest run; 409s while one is in flight. */
+export function startIngest(reingest: boolean): Promise<IngestRun> {
+  return request("/api/ingest", {
+    method: "POST",
+    body: JSON.stringify({ reingest }),
+  });
+}
+
 /**
  * One parsed frame of the chat SSE protocol, discriminated on the event
  * name (spec_v2 §4.3): `retrieval` → `reasoning`/`token` deltas → `done`,
@@ -121,16 +199,29 @@ const CHAT_EVENT_NAMES = new Set([
 ]);
 
 /**
- * Parse a raw SSE byte stream into typed {@link ChatEvent}s.
+ * One parsed frame of the ingest-status SSE protocol (spec_v2 §4.2):
+ * a `status` snapshot first, `progress`/`log` frames while running, and a
+ * terminal `status` carrying the summary.
+ */
+export type IngestEvent =
+  | { type: "status"; data: IngestStatusEvent }
+  | { type: "progress"; data: IngestProgressEvent }
+  | { type: "log"; data: IngestLogEvent };
+
+const INGEST_EVENT_NAMES = new Set(["status", "progress", "log"]);
+
+/**
+ * Parse a raw SSE byte stream into `{type, data}` events.
  *
  * `eventsource-parser` owns the framing (partial lines buffered across
  * chunks, multi-line `data:`, comments ignored); this layer keeps only the
- * protocol's named events and JSON-decodes their payloads. Unknown event
- * names are skipped so the protocol can grow without breaking old clients.
+ * named events in `names` and JSON-decodes their payloads. Unknown event
+ * names are skipped so the protocols can grow without breaking old clients.
  */
-export async function* parseSSE(
+async function* parseNamedSSE(
   body: ReadableStream<Uint8Array>,
-): AsyncGenerator<ChatEvent, void, undefined> {
+  names: ReadonlySet<string>,
+): AsyncGenerator<{ type: string; data: unknown }, void, undefined> {
   // TextDecoderStream's writable side is typed WritableStream<BufferSource>;
   // TS's invariant stream generics reject the (safe) Uint8Array pipe.
   const decoder = new TextDecoderStream() as unknown as ReadableWritablePair<
@@ -145,15 +236,46 @@ export async function* parseSSE(
     for (;;) {
       const { done, value } = await reader.read();
       if (done) return;
-      if (!value.event || !CHAT_EVENT_NAMES.has(value.event)) continue;
-      yield {
-        type: value.event,
-        data: JSON.parse(value.data),
-      } as ChatEvent;
+      if (!value.event || !names.has(value.event)) continue;
+      yield { type: value.event, data: JSON.parse(value.data) };
     }
   } finally {
     reader.releaseLock();
   }
+}
+
+/** Parse a raw SSE byte stream into typed chat {@link ChatEvent}s. */
+export async function* parseSSE(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<ChatEvent, void, undefined> {
+  yield* parseNamedSSE(body, CHAT_EVENT_NAMES) as AsyncGenerator<
+    ChatEvent,
+    void,
+    undefined
+  >;
+}
+
+/**
+ * Follow the current (or last) ingest run over `GET /api/ingest/status`.
+ *
+ * The stream replays the run's events from the start, then follows live
+ * until the terminal `status` frame — connecting mid-run or after
+ * completion renders the same picture. With no run it is a single idle
+ * `status` frame.
+ */
+export async function* streamIngestStatus(
+  signal?: AbortSignal,
+): AsyncGenerator<IngestEvent, void, undefined> {
+  const response = await fetch(`${API_URL}/api/ingest/status`, { signal });
+  if (!response.ok) throw await toApiError(response);
+  if (!response.body) {
+    throw new ApiError(response.status, "empty_body", "The status response carried no stream.");
+  }
+  yield* parseNamedSSE(response.body, INGEST_EVENT_NAMES) as AsyncGenerator<
+    IngestEvent,
+    void,
+    undefined
+  >;
 }
 
 /**

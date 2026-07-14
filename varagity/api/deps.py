@@ -23,8 +23,10 @@ from varagity.models.registry import get_model
 from varagity.observability import metrics
 from varagity.retrieval import get_retriever
 from varagity.retrieval.base import Retriever
+from varagity.stores.app_settings_store import AppSettingsStore
+from varagity.stores.bm25_store import ElasticsearchBM25
 from varagity.stores.conversation_store import ConversationStore
-from varagity.stores.vector_store import default_conninfo
+from varagity.stores.vector_store import ContextualVectorDB, default_conninfo
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +44,13 @@ def get_llm() -> LLMClient:
     """Provide the chat LLM client (override seam for tests).
 
     Returns:
-        The registry's default chat client.
+        The registry client for ``settings.CHAT_MODEL_TYPE`` (an LLM alias —
+        the config validator guarantees it's never ``embedding``/``rerank``,
+        so this is always an :class:`LLMClient`).
     """
-    return get_model("default")
+    client = get_model(get_settings().CHAT_MODEL_TYPE)
+    assert isinstance(client, LLMClient)  # CHAT_MODEL_TYPE is validated to the LLM aliases
+    return client
 
 
 def get_retriever_resolver() -> Callable[[str], Retriever]:
@@ -70,6 +76,65 @@ def get_conversation_store() -> Iterator[ConversationStore]:
         store = ConversationStore()
     except psycopg.OperationalError as error:
         raise _unreachable("postgres", str(error)) from error
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+def get_app_settings_store() -> Iterator[AppSettingsStore]:
+    """Provide a per-request app-settings store, closed after the response.
+
+    Yields:
+        A connected store.
+
+    Raises:
+        HTTPException: ``503 postgres_unreachable`` when the database is
+            down.
+    """
+    try:
+        store = AppSettingsStore()
+    except psycopg.OperationalError as error:
+        raise _unreachable("postgres", str(error)) from error
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+def get_vector_store() -> Iterator[ContextualVectorDB]:
+    """Provide a per-request vector store, closed after the response.
+
+    Backs the corpus routes (document list/count/delete — spec_v2 §4.2).
+
+    Yields:
+        A connected store.
+
+    Raises:
+        HTTPException: ``503 postgres_unreachable`` when the database is
+            down.
+    """
+    try:
+        store = ContextualVectorDB()
+    except psycopg.OperationalError as error:
+        raise _unreachable("postgres", str(error)) from error
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+def get_bm25_store() -> Iterator[ElasticsearchBM25]:
+    """Provide a per-request BM25 store, closed after the response.
+
+    The Elasticsearch client performs no I/O at construction, so
+    unreachability surfaces on the operation itself — routes map those
+    failures to the structured ``503 es_unreachable``.
+
+    Yields:
+        A configured store.
+    """
+    store = ElasticsearchBM25()
     try:
         yield store
     finally:
@@ -214,3 +279,33 @@ def get_services_preflight() -> Callable[[], Awaitable[None]]:
         :func:`require_chat_services`.
     """
     return require_chat_services
+
+
+async def require_ingest_services() -> None:
+    """Ingest preflight: 503 with a machine-readable code if a dependency is down.
+
+    Ingestion needs both stores and the embedder; the chat LLM joins only
+    when ``CONTEXTUALIZE`` is on (the identity path never calls it). Runs
+    before ``POST /api/ingest`` spawns the background run, so an outage is
+    a clean structured error instead of an instantly failed run.
+
+    Raises:
+        HTTPException: ``503`` naming the first unreachable service.
+    """
+    required: tuple[str, ...] = ("postgres", "elasticsearch", "infinity")
+    if get_settings().CONTEXTUALIZE:
+        required += ("llamacpp",)
+    statuses = await check_services(required)
+    for name in required:
+        status = statuses[name]
+        if not status.ok:
+            raise _unreachable(name, status.detail or "no detail")
+
+
+def get_ingest_preflight() -> Callable[[], Awaitable[None]]:
+    """Provide the ingest reachability preflight (override seam for tests).
+
+    Returns:
+        :func:`require_ingest_services`.
+    """
+    return require_ingest_services

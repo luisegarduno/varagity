@@ -8,4 +8,6 @@
 
 ::: varagity.stores.conversation_store
 
+::: varagity.stores.app_settings_store
+
 ::: varagity.stores.migrate
