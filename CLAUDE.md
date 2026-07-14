@@ -5,73 +5,109 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 Varagity is a full-stack RAG application implementing Anthropic-style **Contextual Retrieval**
-(contextual embeddings + contextual BM25 + hybrid rank fusion), self-hosted on local GPUs.
-The v1 system is complete: terminal Q&A over a `docs/` corpus (PDF/txt/md with automatic
-OCR fallback), grounded and cited answers, every pipeline stage a tracked Prefect task.
+(contextual embeddings + contextual BM25 + hybrid rank fusion + cross-encoder reranking),
+self-hosted on local GPUs. v1 (complete) is the terminal system: Q&A over a `docs/` corpus,
+grounded and cited answers, every pipeline stage a tracked Prefect task. v2 phases 1–6
+(shipped) add: reranking wired into the query path with a per-chunk `RetrievalTrace` (the
+≈67% tier), a FastAPI SSE backend with conversation persistence, a Next.js chat GUI whose
+evidence panel shows "how this answer was built" with inline citations, office/web document
+modalities, and four new chunking strategies with a benchmark sweep. Remaining v2 work
+(plan phases 7–10): Prometheus/Grafana observability, corpus management + live settings UI,
+the design-polish pass, hardening/ADRs.
 
 Where things live:
-- `spec.md` — the forward-looking v1 design (§ references in docstrings point here).
+- `spec.md` — the v1 design; `spec_v2.md` — the v2 design (§ references in docstrings point at both).
 - `golden-docs/` — **as-built** documentation, rendered by MkDocs (`uv run mkdocs serve`):
   architecture, data model, pipelines, runbook, ADRs, API reference.
-- `thoughts/shared/plans/` — the vertically-sliced implementation plan with per-phase notes.
+- `thoughts/shared/plans/` — the vertically-sliced implementation plans with per-phase notes.
+- `web/` — the Next.js frontend (own toolchain: pnpm, Vitest; heed `web/AGENTS.md` — the
+  Next.js version post-dates training data, read `node_modules/next/dist/docs/` first).
 - `docs/` — ⚠️ the **gitignored ingest corpus** (RAG input), *not* documentation.
 
 ## Architecture
 
-Six compose services on `varagity-net`; the Python app is a client of all of them:
+Eight compose services on `varagity-net`; the Python package is a client of all the backing
+services, with two peer front-ends (CLI and API) over the same Prefect flows:
 
 1. **llamacpp** (`:8080/v1`, GPU 0) — chat LLM for answers + contextualization blurbs;
    model `.gguf` bind-mounted from `${models_volume}`.
 2. **infinity-embeddings** (`:8081/v1`, GPU 1) — `multilingual-e5-large-instruct`
-   (1024-dim) **and** `bge-reranker-v2-m3` at `/v1/rerank` (served but not wired into
-   the v1 query path; `RERANK_ENABLED=false` is staged config). Host port binding is
-   interface-specific (`192.168.86.21:8081`).
-3. **postgres** (`:5432`) — pgvector; the canonical chunk metadata + dense vectors.
-   `varagity/stores/schema.sql` runs on first boot only (`docker compose down -v` resets).
+   (1024-dim) **and** `bge-reranker-v2-m3` at `/v1/rerank`, wired into the query path
+   (`RETRIEVAL_METHOD=reranked`). Host port binding is interface-specific
+   (`192.168.86.21:8081`).
+3. **postgres** (`:5432`) — pgvector; canonical chunk metadata + dense vectors, plus
+   conversation persistence (`conversations`/`messages`/`message_sources`).
+   `varagity/stores/schema.sql` runs on first boot only (`docker compose down -v` resets);
+   `varagity/stores/migrations/*.sql` reconcile existing volumes (idempotent runner on API
+   startup).
 4. **elasticsearch** (`:9200`) — contextual BM25 index. Single-node ⇒ cluster health
    `yellow` is healthy.
 5. **prefect** (`:4200`) — flow/task tracking UI; SQLite backing store.
-6. **app** — the CLI (`main.py`), built from the local Dockerfile with `uv`.
+6. **api** (`:8000`) — FastAPI (`varagity/api/`, built from `Dockerfile.api`): SSE chat
+   streaming, conversation CRUD, health/config; invokes the flows in-process.
+7. **web** (`:3000`) — the Next.js GUI (`web/`); the only browser-facing surface, talks
+   only to `api`.
+8. **app** — the CLI (`main.py`), built from the local Dockerfile with `uv`.
 
-Key invariant: chunks live in **both** stores, joined by `(doc_id, original_index)`;
+Key invariants: chunks live in **both** stores, joined by `(doc_id, original_index)`;
 `doc_id` hashes the path **relative to `DOCS_PATH`** + the file's byte hash. Hybrid
-retrieval fuses ranked lists from both stores and hydrates full rows from pgvector.
+retrieval fuses ranked lists from both stores and hydrates full rows from pgvector;
+`reranked` **composes** a base retriever (over-fetch `RERANK_CANDIDATES`, cross-encode,
+keep `RERANK_TOP_N`) rather than forking fusion. Each `RetrievedChunk` carries an optional
+`RetrievalTrace` (per-arm ranks, fused score, rerank delta); the CLI matches table, the web
+evidence panel, and the `message_sources.trace` snapshots all render that same data.
 
 ## Commands
 
 ```bash
-docker compose up -d --wait        # all six services, healthcheck-gated
+docker compose up -d --wait        # all eight services, healthcheck-gated
 bash scripts/smoke.sh              # sequenced infra checks
 
 uv run main.py ingest              # ingest DOCS_PATH into both stores
 uv run main.py ingest --reingest   # re-process (config changes don't change content hashes)
 uv run main.py chat                # ingest, then terminal Q&A (default command; :quit exits)
-uv run --group eval main.py eval       # 5-config retrieval matrix (needs Docker + live GPU services)
+uv run uvicorn varagity.api.main:create_app --factory --port 8000   # API on the host
+uv run --group eval main.py eval       # 5-config retrieval matrix + chunker sweep (needs Docker + live GPU services)
 uv run --group eval main.py eval ocr   # OCR engine benchmark
 
-uv run pytest                      # unit suite (default; coverage floor 80%)
+uv run pytest                      # unit suite incl. async API tests (coverage floor 80%)
 uv run pytest -m integration       # real Postgres/ES via testcontainers (needs Docker)
 uv run pytest -m e2e               # full pipeline over tests/fixtures/corpus (needs Docker)
 uv run ruff check . && uv run ruff format --check .
 uv run mypy varagity
 uv run pre-commit run --all-files
 uv run mkdocs build --strict       # docs must build clean (CI-gated)
+
+# web/ (frontend — pnpm, not uv)
+pnpm dev                           # dev server against NEXT_PUBLIC_API_URL
+pnpm test                          # Vitest unit tests (SSE parser, citations, trace badges)
+pnpm lint && pnpm build
+pnpm gen:types                     # regenerate lib/types.ts from the API's OpenAPI schema
 ```
 
 Host-mode runs against the compose services need localhost env overrides
 (`BASE_MODEL_API_URL`, `POSTGRES_HOST`, `ELASTICSEARCH_URL`, `PREFECT_API_URL`, and
-`EMBEDDING_API_URL` via `docker compose port infinity-embeddings 8081`) — the checked-in
-`.env` holds the in-container values. See `golden-docs/runbook.md`.
+`EMBEDDING_API_URL`/`RERANK_API_URL` via `docker compose port infinity-embeddings 8081`) —
+the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md`.
 
 ## Conventions (enforced, not aspirational)
 
-- **Registries for pluggable families** (spec §5.1): parsers, chunking strategies, and
-  retrievers self-register via `@register("name")` in their package; adding an
-  implementation = one new file + its import line in the package `__init__`, zero caller
-  edits. OCR engines use the same shape as a factory in `parsers/pdf.py`.
+- **Registries for pluggable families** (spec §5.1): parsers (`pdf`, `text`, `office`,
+  `web`), chunking strategies (`recursive_character`, `token_based`, `markdown_aware`,
+  `semantic`, `docling_hybrid`), and retrievers (`semantic`, `bm25`, `hybrid`, `reranked`)
+  self-register via `@register("name")` in their package; adding an implementation = one
+  new file + its import line in the package `__init__`, zero caller edits. OCR engines use
+  the same shape as a factory in `parsers/pdf.py`.
 - **Configuration**: modules read the `Settings` object from `varagity/config.py`
   (`get_settings()`, cached) — never `os.getenv`. `.env` is consumed by both compose
   (lowercase interpolation vars) and pydantic-settings.
+- **API layer** (spec_v2 §4): async at the edge, sync flows underneath — FastAPI runs the
+  flows in a threadpool; don't rewrite pipeline code to async. `api/schemas.py` is the wire
+  contract; the SSE protocol is `retrieval → reasoning → token → done` (or `error`),
+  evidence before prose. Frontend types are generated (`pnpm gen:types`), never hand-edited.
+- **Migrations**: ordered, idempotent SQL in `varagity/stores/migrations/NNN_*.sql`,
+  tracked in `schema_migrations`, applied by the API on startup. `schema.sql` stays the
+  fresh-install fast path — keep both in sync.
 - **Three output channels** (spec §14): `verbose: int` (0/1/2, validated via
   `check_verbose`, rendering only in `varagity/debug/show.py` as `v_<name>` helpers);
   stdlib `logging` (configured only in `logging_setup.py`); Prefect run logs.
@@ -81,19 +117,37 @@ Host-mode runs against the compose services need localhost env overrides
 - **e5 formatting is asymmetric** and silently degrades recall if wrong: passages get NO
   prefix, queries get `Instruct: {task}\nQuery: {q}`. Both modes live only in
   `varagity/models/embeddings.py`.
-- **Retries**: `tenacity` inside model/store clients (transient HTTP); ingest model/store
-  Prefect tasks additionally carry `retries=2`; query-path tasks deliberately carry none.
-- **Prefect**: flows run in-process from the CLI (no workers/deployments);
+- **Retries**: `tenacity` inside model/store clients (transient HTTP; the rerank client
+  included); ingest model/store Prefect tasks additionally carry `retries=2`; query-path
+  tasks deliberately carry none.
+- **Prefect**: flows run in-process from the CLI and the API (no workers/deployments);
   `PREFECT_API_URL` must be exported **before** `prefect` is imported
   (`varagity/pipeline/__init__.py` handles this); every task sets `cache_policy=NO_CACHE`.
-- **Testing layers**: unit (default, mocked HTTP via `respx`), `-m integration`
-  (testcontainers), `-m e2e` (fake embeddings/LLM + real containerized stores). Shared
-  container setup lives in `varagity/eval/containers.py`.
+- **Testing layers**: unit (default, mocked HTTP via `respx`; API routes via
+  `httpx.AsyncClient` + pytest-asyncio, SSE helpers in `tests/sse.py`), `-m integration`
+  (testcontainers), `-m e2e` (fake embeddings/LLM + real containerized stores); web unit
+  tests via Vitest (`pnpm test`, local — not yet in CI). Shared container setup lives in
+  `varagity/eval/containers.py`.
 
 ## Gotchas worth knowing
 
 - `pgdata` keeps the **first-boot** postgres password; editing `.env` later breaks host
   TCP auth while `compose exec psql` still works (`ALTER USER` or `down -v` to fix).
+- `NEXT_PUBLIC_API_URL` is a **build-time** constant (compose build arg): changing it
+  requires `docker compose build web`. Browsers on other machines need the host's LAN
+  address there *and* in `API_CORS_ORIGINS`.
+- `CHUNK_SIZE`'s unit is **per-strategy**: characters for `recursive_character` /
+  `markdown_aware`, tokens for `token_based` / `docling_hybrid` (`semantic` splits on
+  embedding-similarity boundaries instead).
+- `RERANK_ENABLED=false` is a kill switch, not a method: `RETRIEVAL_METHOD=reranked` then
+  degrades to its base method (and logs it). Method selection and the toggle are
+  deliberately orthogonal.
+- Line-initial `[SOURCE]: …` is a CommonMark link-reference *definition* and silently
+  vanishes when rendered — the web app rewrites citations to chips **before** markdown
+  parsing (`web/lib/citations.ts`). Mind this when touching answer rendering.
+- `message_sources.trace` **snapshots** evidence (content/context/source + trace) so
+  historical conversations still explain themselves after a reingest changes `chunk_id`s —
+  the chunk reference is deliberately soft (no FK).
 - Host disk >90% full trips Elasticsearch's percentage disk watermarks → cluster `red`,
   writes hang. Testcontainers disable the check; the compose service keeps defaults.
 - infinity's `optimum` engine ignores `INFINITY_DEVICE_ID` — GPU pinning happens via
@@ -103,11 +157,12 @@ Host-mode runs against the compose services need localhost env overrides
   Slow prompt-eval relative to decode is the MoE `-ot` CPU-offload signature, not a bug.
 - Docling/EasyOCR/tiktoken download models on first use (cached in the `model_cache`
   volume in-container).
-- Toggling `CONTEXTUALIZE`/chunk params does **not** change content hashes — unchanged
-  files are skipped until `ingest --reingest`.
+- Toggling `CONTEXTUALIZE`/`CHUNKING_STRATEGY`/chunk params does **not** change content
+  hashes — unchanged files are skipped until `ingest --reingest`.
 
 ## Package Management
 
-`uv` for everything: `uv sync` (dependency groups: `dev`, `eval`), `uv run <cmd>`.
-Add dependencies in `pyproject.toml`, then `uv sync`. Torch is pinned to CPU wheels
-via `[tool.uv.sources]` (v1 OCR is CPU-only by design; saves ~3 GB).
+Python: `uv` for everything — `uv sync` (dependency groups: `dev`, `eval`),
+`uv run <cmd>`; add dependencies in `pyproject.toml`, then `uv sync`. Torch is pinned to
+CPU wheels via `[tool.uv.sources]` (OCR is CPU-only by design; saves ~3 GB).
+Frontend (`web/`): `pnpm` for everything — never `npm`/`yarn`.
