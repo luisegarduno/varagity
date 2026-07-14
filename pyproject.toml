@@ -18,6 +18,8 @@ dependencies = [
     "openai>=2.45.0",
     "pgvector>=0.5.0",
     "prefect>=3,<4",
+    # In-app pipeline metrics exposed at GET /metrics (spec_v2 §6, v2 Phase 7).
+    "prometheus-client>=0.21",
     "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.14.2",
     # Multipart form parsing for the Phase 8 upload route (FastAPI requires it

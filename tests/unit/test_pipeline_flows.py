@@ -18,6 +18,7 @@ import pytest
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import FlowRunFilter
 from prefect.testing.utilities import prefect_test_harness
+from prometheus_client import REGISTRY
 
 from tests.unit.test_loader import FakeBM25, FakeEmbeddings, FakeStore
 from varagity.pipeline import ingest_flow, query_flow
@@ -312,6 +313,101 @@ class TestQueryFlow:
     def test_invalid_verbose_raises(self, pinned_settings: None) -> None:
         with pytest.raises(ValueError, match="verbose"):
             query_flow("q?", retriever=FakeRetriever([], None), llm=ScriptedLLM("A."), verbose=9)
+
+
+def _sample(name: str, labels: dict[str, str] | None = None) -> float:
+    """Read one sample from the process-wide registry, defaulting to 0."""
+    value = REGISTRY.get_sample_value(name, labels or {})
+    return 0.0 if value is None else value
+
+
+class TestFlowMetrics:
+    """The flows are Prometheus probe points (spec_v2 §6.2, v2 Phase 7).
+
+    Injected fakes aren't registry members, so the method label is
+    ``custom`` — the low-cardinality fallback — which conveniently keeps
+    these deltas isolated from any registry-method observations.
+    """
+
+    def test_stubbed_query_increments_the_catalog(self, pinned_settings: None) -> None:
+        retriever = FakeRetriever([_chunk("Lantern produces 4.2 megawatts.")], vector=[0.5])
+
+        def stage(s: str) -> dict[str, str]:
+            return {"stage": s, "method": "custom"}
+
+        ok = {"method": "custom", "outcome": "ok"}
+        rank1 = {"method": "custom", "rank": "1"}
+        before_stages = {
+            s: _sample("varagity_query_latency_seconds_count", stage(s))
+            for s in ("embed", "retrieve", "generate")
+        }
+        before_ok = _sample("varagity_query_total", ok)
+        before_score = _sample("varagity_retrieval_score_count", rank1)
+
+        query_flow("What powers Aurora?", retriever=retriever, llm=ScriptedLLM("A."), verbose=0)
+
+        for s, before in before_stages.items():
+            assert _sample("varagity_query_latency_seconds_count", stage(s)) == before + 1, (
+                f"stage {s} not observed"
+            )
+        assert _sample("varagity_query_total", ok) == before_ok + 1
+        assert _sample("varagity_retrieval_score_count", rank1) == before_score + 1
+
+    def test_failing_query_counts_an_error_outcome(self, pinned_settings: None) -> None:
+        class ExplodingRetriever(FakeRetriever):
+            def retrieve(self, *args: object, **kwargs: object) -> list[RetrievedChunk]:
+                raise RuntimeError("stores are gone")
+
+        labels = {"method": "custom", "outcome": "error"}
+        before = _sample("varagity_query_total", labels)
+
+        with pytest.raises(RuntimeError, match="stores are gone"):
+            query_flow(
+                "q?",
+                retriever=ExplodingRetriever([], vector=None),
+                llm=ScriptedLLM("A."),
+                verbose=0,
+            )
+
+        assert _sample("varagity_query_total", labels) == before + 1
+
+    def test_stubbed_ingest_increments_the_catalog(
+        self, pinned_settings: None, corpus: Path, settings_env: Callable[..., None]
+    ) -> None:
+        """Contextualized ingest: doc/chunk counters + the blurb histogram."""
+        settings_env(CONTEXTUALIZE="true")
+        md = {"file_type": "md", "extraction": "text"}
+        txt = {"file_type": "txt", "extraction": "text"}
+        strategy = {"chunking_strategy": "recursive_character"}
+        before_md = _sample("varagity_ingest_docs_total", md)
+        before_txt = _sample("varagity_ingest_docs_total", txt)
+        before_chunks = _sample("varagity_ingest_chunks_total", strategy)
+        before_ctx = _sample("varagity_contextualize_latency_seconds_count")
+
+        summary = ingest_flow(
+            str(corpus),
+            store=FakeStore(),
+            bm25=FakeBM25(),
+            embeddings=FakeEmbeddings(),
+            llm=ScriptedLLM("situating blurb"),
+            verbose=0,
+        )
+
+        assert summary.ingested == 2
+        assert _sample("varagity_ingest_docs_total", md) == before_md + 1
+        assert _sample("varagity_ingest_docs_total", txt) == before_txt + 1
+        assert _sample("varagity_ingest_chunks_total", strategy) == before_chunks + summary.chunks
+        # One blurb-latency observation per contextualized document.
+        assert _sample("varagity_contextualize_latency_seconds_count") == before_ctx + 2
+
+    def test_identity_path_ingest_skips_the_contextualize_histogram(
+        self, pinned_settings: None, corpus: Path
+    ) -> None:
+        before_ctx = _sample("varagity_contextualize_latency_seconds_count")
+        ingest_flow(
+            str(corpus), store=FakeStore(), bm25=FakeBM25(), embeddings=FakeEmbeddings(), verbose=0
+        )
+        assert _sample("varagity_contextualize_latency_seconds_count") == before_ctx
 
 
 class TestEvalFlows:

@@ -20,6 +20,7 @@ from varagity.api.schemas import ServiceHealth
 from varagity.config import get_settings
 from varagity.models.llm import LLMClient
 from varagity.models.registry import get_model
+from varagity.observability import metrics
 from varagity.retrieval import get_retriever
 from varagity.retrieval.base import Retriever
 from varagity.stores.conversation_store import ConversationStore
@@ -160,7 +161,13 @@ async def check_services(names: tuple[str, ...]) -> dict[str, ServiceHealth]:
 
     async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
         results = await asyncio.gather(*(run_one(name, client) for name in names))
-    return dict(zip(names, results, strict=True))
+    statuses = dict(zip(names, results, strict=True))
+    # Every probe refreshes the reachability gauge (spec_v2 §6.2); in
+    # compose the api container's own healthcheck calls /api/health every
+    # 15 s, so the gauge stays current without a dedicated poller.
+    for name, health in statuses.items():
+        metrics.set_dependency_up(name, health.ok)
+    return statuses
 
 
 def _unreachable(service: str, detail: str) -> HTTPException:

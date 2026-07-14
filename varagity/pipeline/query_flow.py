@@ -20,8 +20,14 @@ retries on top would multiply the wait before a hard failure surfaces at
 the prompt. Result caching is disabled (``NO_CACHE``) for the same reasons
 as the ingestion tasks: live-service calls with unhashable client/retriever
 inputs.
+
+Both flows are Prometheus probe points (spec_v2 §6.2, v2 Phase 7): they
+time each stage around its task call, record the retrieved chunks' scores
+(+ rerank movement), and count the flow's outcome — the streaming flow
+additionally counts the server-reported token usage it already returns.
 """
 
+import time
 from collections.abc import Callable
 
 from prefect import flow, task
@@ -39,9 +45,28 @@ from varagity.generation.answer import (
 )
 from varagity.models.llm import LLMClient
 from varagity.models.stream import Kind
+from varagity.observability import metrics
 from varagity.retrieval import get_retriever
-from varagity.retrieval.base import Retriever
+from varagity.retrieval.base import RETRIEVER_REGISTRY, Retriever
 from varagity.stores.records import RetrievedChunk
+
+
+def _method_label(retriever: Retriever) -> str:
+    """Resolve a retriever's registry name for metric labels.
+
+    Args:
+        retriever: The active retrieval method.
+
+    Returns:
+        The registry name (``semantic``/``bm25``/``hybrid``/``reranked``),
+        or ``"custom"`` for an implementation the registry doesn't know
+        (injected test/eval doubles) — metric labels must stay
+        low-cardinality, so arbitrary class names never become labels.
+    """
+    for name, registered in RETRIEVER_REGISTRY.items():
+        if type(retriever) is type(registered):
+            return name
+    return "custom"
 
 
 @task(name="embed_query", cache_policy=NO_CACHE)
@@ -246,22 +271,37 @@ def query_stream_flow(
     )
     top_k = settings.TOP_K if k is None else k
 
-    query_vector = embed_query_task(active_retriever, query, verbose=verbose)
-    chunks = retrieve_task(
-        active_retriever, query, k=top_k, query_vector=query_vector, verbose=verbose
-    )
-    if on_retrieved is not None:
-        on_retrieved(chunks)
-    formatted_context = format_context(chunks)
-    result = generate_answer_stream_task(
-        query,
-        chunks,
-        llm=llm,
-        formatted_context=formatted_context,
-        on_delta=on_delta,
-        should_abort=should_abort,
-        verbose=verbose,
-    )
+    method = _method_label(active_retriever)
+    try:
+        stage_started = time.perf_counter()
+        query_vector = embed_query_task(active_retriever, query, verbose=verbose)
+        metrics.observe_query_stage("embed", method, time.perf_counter() - stage_started)
+        stage_started = time.perf_counter()
+        chunks = retrieve_task(
+            active_retriever, query, k=top_k, query_vector=query_vector, verbose=verbose
+        )
+        metrics.observe_query_stage("retrieve", method, time.perf_counter() - stage_started)
+        metrics.observe_retrieval(method, chunks)
+        if on_retrieved is not None:
+            on_retrieved(chunks)
+        formatted_context = format_context(chunks)
+        stage_started = time.perf_counter()
+        result = generate_answer_stream_task(
+            query,
+            chunks,
+            llm=llm,
+            formatted_context=formatted_context,
+            on_delta=on_delta,
+            should_abort=should_abort,
+            verbose=verbose,
+        )
+        metrics.observe_query_stage("generate", method, time.perf_counter() - stage_started)
+    except Exception:
+        metrics.count_query(method, "error")
+        raise
+    metrics.count_query(method, "aborted" if result["aborted"] else "ok")
+    usage = result["usage"] or {}
+    metrics.count_llm_tokens(usage.get("prompt_tokens"), usage.get("completion_tokens"))
     return StreamedQueryState(
         query=query,
         query_vector=query_vector,
@@ -318,16 +358,29 @@ def query_flow(
     )
     top_k = settings.TOP_K if k is None else k
 
-    query_vector = embed_query_task(active_retriever, query, verbose=verbose)
-    chunks = retrieve_task(
-        active_retriever, query, k=top_k, query_vector=query_vector, verbose=verbose
-    )
-    if on_retrieved is not None:
-        on_retrieved(chunks)
-    formatted_context = format_context(chunks)
-    answer = generate_answer_task(
-        query, chunks, llm=llm, formatted_context=formatted_context, verbose=verbose
-    )
+    method = _method_label(active_retriever)
+    try:
+        stage_started = time.perf_counter()
+        query_vector = embed_query_task(active_retriever, query, verbose=verbose)
+        metrics.observe_query_stage("embed", method, time.perf_counter() - stage_started)
+        stage_started = time.perf_counter()
+        chunks = retrieve_task(
+            active_retriever, query, k=top_k, query_vector=query_vector, verbose=verbose
+        )
+        metrics.observe_query_stage("retrieve", method, time.perf_counter() - stage_started)
+        metrics.observe_retrieval(method, chunks)
+        if on_retrieved is not None:
+            on_retrieved(chunks)
+        formatted_context = format_context(chunks)
+        stage_started = time.perf_counter()
+        answer = generate_answer_task(
+            query, chunks, llm=llm, formatted_context=formatted_context, verbose=verbose
+        )
+        metrics.observe_query_stage("generate", method, time.perf_counter() - stage_started)
+    except Exception:
+        metrics.count_query(method, "error")
+        raise
+    metrics.count_query(method, "ok")
     return QueryState(
         query=query,
         query_vector=query_vector,

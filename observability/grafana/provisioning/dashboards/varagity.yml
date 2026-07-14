@@ -1,0 +1,14 @@
+# File-provider dashboards (spec_v2 §6.3): every JSON in the mounted
+# dashboards directory appears in the "Varagity" folder on boot.
+apiVersion: 1
+
+providers:
+  - name: varagity
+    folder: Varagity
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false # the checked-in JSON is the source of truth
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

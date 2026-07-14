@@ -20,8 +20,13 @@ side-effecting calls against live services, and their inputs include
 unhashable handles (store/client objects, the ``rich`` progress display)
 that make Prefect's default input-hash cache policy log an error per run —
 a cache hit could never be correct here anyway.
+
+The contextualize and store tasks are Prometheus probe points (spec_v2
+§6.2, v2 Phase 7): blurb latency per document, plus document/chunk
+counters at the moment a document actually lands in both stores.
 """
 
+import time
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -36,6 +41,7 @@ from varagity.ingest.discovery import Buckets
 from varagity.ingest.loader import IngestStages, IngestSummary, ingest_corpus
 from varagity.ingest.parsers import Parser, RawDocument
 from varagity.models import EmbeddingsClient, LLMClient
+from varagity.observability import metrics
 from varagity.stores import ChunkRecord, ContextualVectorDB, ElasticsearchBM25
 
 
@@ -131,6 +137,7 @@ def contextualize_chunks_task(
     Returns:
         One context blurb per chunk (all ``None`` when ``llm`` is ``None``).
     """
+    started = time.perf_counter()
     contexts = loader.contextualize_chunks(
         document_text=document_text,
         chunk_texts=chunk_texts,
@@ -143,6 +150,9 @@ def contextualize_chunks_task(
     if llm is None:
         logger.info("CONTEXTUALIZE off — identity path for %s", file_name)
     else:
+        # The identity path is not contextualization — only real blurb
+        # generation feeds the spec §9.4 throughput-cost histogram.
+        metrics.observe_contextualize(time.perf_counter() - started)
         logger.info("contextualized %d chunk(s) of %s", len(contexts), file_name)
     return contexts
 
@@ -197,6 +207,11 @@ def store_chunks_task(
         bm25: The BM25 store.
     """
     loader.store_chunks(records, vectors, store=store, bm25=bm25)
+    # Counted here — after both writes — so the corpus-growth counters
+    # reflect documents that actually landed, not attempts.
+    head = records[0]
+    metrics.count_ingested_document(head.file_type, head.extraction)
+    metrics.count_ingested_chunks(head.chunking_strategy, len(records))
     get_run_logger().info(
         "stored %d chunk(s) of %s in both stores", len(records), records[0].file_name
     )

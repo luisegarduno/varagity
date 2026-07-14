@@ -135,6 +135,13 @@ class Settings(BaseSettings):
             the API (the web app's origin; dev-only posture — spec_v2 §14).
         UPLOAD_MAX_MB: Per-file size cap for corpus uploads
             (``POST /api/documents``, spec_v2 §4.2).
+        METRICS_ENABLED: Whether the API serves ``GET /metrics`` (spec_v2
+            §6). Gates the endpoint only — the in-app collectors always
+            record (cheap in-memory counters).
+        PROMETHEUS_PORT: Host port the compose ``prometheus`` service
+            binds (compose interpolation; the app never dials it).
+        GRAFANA_PORT: Host port the compose ``grafana`` service binds
+            (compose interpolation; the container serves 3000 internally).
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -199,6 +206,10 @@ class Settings(BaseSettings):
     API_CORS_ORIGINS: str = "http://localhost:3000"
     UPLOAD_MAX_MB: int = 50
 
+    METRICS_ENABLED: bool = True
+    PROMETHEUS_PORT: int = 9090
+    GRAFANA_PORT: int = 3001
+
     @property
     def allowed_extension_set(self) -> frozenset[str]:
         """Parsed ``ALLOWED_EXTENSIONS`` as a normalized set.
@@ -253,17 +264,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_api(self) -> "Settings":
-        """Reject HTTP API parameters outside their domains (spec_v2 §10).
+        """Reject HTTP API/observability parameters outside their domains (spec_v2 §10).
 
         Returns:
             The validated settings instance.
 
         Raises:
-            ValueError: If ``API_PORT`` is not a valid TCP port or
+            ValueError: If ``API_PORT``, ``PROMETHEUS_PORT``, or
+                ``GRAFANA_PORT`` is not a valid TCP port, or
                 ``UPLOAD_MAX_MB`` is not positive.
         """
-        if not 0 < self.API_PORT < 65536:
-            raise ValueError(f"API_PORT must be a valid TCP port (1–65535); got {self.API_PORT}")
+        for name in ("API_PORT", "PROMETHEUS_PORT", "GRAFANA_PORT"):
+            port = getattr(self, name)
+            if not 0 < port < 65536:
+                raise ValueError(f"{name} must be a valid TCP port (1–65535); got {port}")
         if self.UPLOAD_MAX_MB <= 0:
             raise ValueError(f"UPLOAD_MAX_MB must be positive; got {self.UPLOAD_MAX_MB}")
         return self

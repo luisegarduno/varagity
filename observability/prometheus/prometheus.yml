@@ -1,0 +1,34 @@
+# Prometheus scrape configuration (spec_v2 §6.3).
+#
+# Targets are addressed by compose service name on varagity-net. The
+# prefect-exporter / dcgm-exporter jobs point at OPTIONAL services (compose
+# profiles, off by default): while a profile is disabled its DNS name never
+# resolves and Prometheus just marks that target down (up == 0) — enabling
+# the profile requires no edit here.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # The primary source (spec_v2 §6.1): in-app pipeline metrics from the API.
+  - job_name: varagity-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+
+  # Optional — `docker compose --profile prefect-exporter up -d`.
+  # Flow/task-run metrics polled from the Prefect API; the exporter's docs
+  # recommend a gentler interval (each scrape fans out paginated API calls).
+  - job_name: prefect-exporter
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["prefect-exporter:8000"]
+
+  # Optional — `docker compose --profile gpu-metrics up -d`.
+  # GPU VRAM/utilization via NVIDIA DCGM (consumer-card caveat: many fields
+  # are empty on GeForce parts — see the runbook).
+  - job_name: dcgm-exporter
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["dcgm-exporter:9400"]

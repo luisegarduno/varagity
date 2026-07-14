@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 from pydantic.json_schema import models_json_schema
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from varagity.api.routes import chat, conversations, system
+from varagity.api.routes import chat, conversations, metrics, system
 from varagity.api.schemas import (
     DeltaEvent,
     DoneEvent,
@@ -235,5 +235,7 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(conversations.router)
     app.include_router(chat.router)
+    if settings.METRICS_ENABLED:
+        app.include_router(metrics.router)
     _install_sse_event_schemas(app)
     return app

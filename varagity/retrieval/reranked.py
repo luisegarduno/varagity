@@ -13,11 +13,13 @@ a GUI toggle and the eval baseline both work without renaming the method.
 """
 
 import logging
+import time
 
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose, v_retrieve
 from varagity.models.registry import get_model
 from varagity.models.rerank import RerankClient, RerankResult
+from varagity.observability import metrics
 from varagity.retrieval.base import Retriever, get_retriever, register
 from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
@@ -182,7 +184,12 @@ class RerankedRetriever:
             chunks = candidates[:top_n]
         else:
             client = self._rerank if self._rerank is not None else get_model("rerank")
+            rerank_started = time.perf_counter()
             scored = client.rerank(query, [chunk.content for chunk in candidates], verbose=0)
             chunks = apply_rerank(candidates, scored)[:top_n]
+            # The rerank sub-stage's share of retrieval (spec_v2 §6.2 —
+            # "is it earning its latency?"); the flow's `retrieve`
+            # observation includes it.
+            metrics.observe_query_stage("rerank", "reranked", time.perf_counter() - rerank_started)
         v_retrieve(chunks, verbose)
         return chunks

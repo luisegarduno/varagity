@@ -218,6 +218,93 @@ services:
       - varagity-net
     restart: unless-stopped
 
+  prometheus:
+    container_name: prometheus
+    image: prom/prometheus:v3.13.1
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      # The image is busybox-based (no curl) — probe with busybox wget.
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    networks:
+      - varagity-net
+    restart: unless-stopped
+
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:12.3.8
+    volumes:
+      # Provisioned datasource + dashboards (spec_v2 §6.3): `docker compose
+      # up` yields working dashboards with no click-ops.
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      # Dev posture (see runbook): default admin/admin stays for edits;
+      # anonymous read-only viewing so the provisioned dashboards render
+      # without a login step.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      # Alpine-based image — busybox wget, same posture as prometheus.
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    networks:
+      - varagity-net
+    restart: unless-stopped
+
+  # Optional (plan decision #10): orchestration-level flow/task-run metrics
+  # polled from the Prefect API. Off by default; enable with
+  # `docker compose --profile prefect-exporter up -d`. Scraped in-network
+  # (port 8000) — no host port (the api service owns host 8000).
+  prefect-exporter:
+    container_name: prefect-exporter
+    image: prefecthq/prometheus-prefect-exporter:3.6.1
+    profiles: ["prefect-exporter"]
+    environment:
+      PREFECT_API_URL: ${PREFECT_API_URL}
+    depends_on:
+      prefect:
+        condition: service_healthy
+    networks:
+      - varagity-net
+    restart: unless-stopped
+
+  # Optional: GPU VRAM/utilization via NVIDIA DCGM. Off by default; enable
+  # with `docker compose --profile gpu-metrics up -d`. Needs the NVIDIA
+  # container toolkit (already required by llamacpp/infinity); consumer-card
+  # caveat — several DCGM fields are empty on GeForce parts (see runbook).
+  dcgm-exporter:
+    container_name: dcgm-exporter
+    image: nvidia/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04
+    profiles: ["gpu-metrics"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    cap_add:
+      - SYS_ADMIN # DCGM's documented run posture (profiling fields need it)
+    networks:
+      - varagity-net
+    restart: unless-stopped
+
   app:
     container_name: varagity
     build: ./
@@ -252,3 +339,5 @@ volumes:
   esdata:
   model_cache:
   prefect:
+  prometheus_data:
+  grafana_data:

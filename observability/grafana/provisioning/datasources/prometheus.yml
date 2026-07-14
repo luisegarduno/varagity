@@ -1,0 +1,15 @@
+# Provisioned Prometheus datasource (spec_v2 §6.3 — dashboards-as-code,
+# zero click-ops). The uid is load-bearing: every checked-in dashboard
+# references `prometheus` by uid.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s # matches the scrape interval
