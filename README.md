@@ -15,7 +15,7 @@ Every pipeline stage is a tracked Prefect task.
 
 > 📄 **Design**: [`spec.md`](spec.md) (v1) · `spec_v2.md` (v2) · **As-built docs**:
 > [`golden-docs/`](golden-docs/index.md) (`uv run mkdocs serve`) — architecture,
-> data model, pipelines, runbook, ADRs, API reference.
+> data model, pipelines, runbook, ADRs, the HTTP API contract, Python API reference.
 
 
 ## Status
@@ -24,7 +24,7 @@ Every pipeline stage is a tracked Prefect task.
 fallback, contextual embeddings + contextual BM25, hybrid rank fusion,
 recall@k/pass@k eval matrix + OCR benchmark, Prefect tracking, golden-docs.
 
-**v2 — in progress** (6 of 10 phases shipped):
+**v2 — complete** (all ten phases shipped):
 
 - [x] **Re-ranking** wired into the query path (`RETRIEVAL_METHOD=reranked`,
   `bge-reranker-v2-m3`) + a per-chunk `RetrievalTrace` (semantic/BM25/fusion
@@ -41,11 +41,17 @@ recall@k/pass@k eval matrix + OCR benchmark, Prefect tracking, golden-docs.
 - [x] **More chunking strategies**: `token_based`, `markdown_aware`,
   `semantic`, `docling_hybrid` — benchmark sweep in the eval harness
   (default stays `recursive_character`)
-- [ ] Observability: Prometheus + Grafana + Prefect exporter
-- [ ] Corpus management + live settings UI (upload, ingest progress,
-  runtime overrides with stale-corpus flagging)
-- [ ] Design-system polish pass
-- [ ] Hardening: ADR-005…009, web CI + coverage floors, docs refresh
+- [x] **Observability**: Prometheus + provisioned Grafana dashboards
+  (Query / Ingestion / Infra) at :3001, no login needed; optional
+  Prefect-exporter and DCGM GPU-metrics compose profiles
+- [x] **Corpus management + live settings UI**: drag-and-drop upload with
+  live ingest progress, per-document listing/delete, runtime setting
+  overrides with stale-corpus flagging
+- [x] **Design-system polish**: design tokens (accent/density), responsive
+  and mobile layouts, a11y pass, ⌘K command palette, opt-in Playwright e2e
+- [x] **Hardening**: ADR-005…009, a top-level HTTP API docs page
+  (drift-guarded OpenAPI snapshot), a web CI job + coverage floors,
+  as-built docs refresh
 
 
 -----------------------------
@@ -101,11 +107,11 @@ recall@k/pass@k eval matrix + OCR benchmark, Prefect tracking, golden-docs.
     ```
 
 2. Put documents (`.pdf`, `.txt`, `.md`, `.docx`, `.pptx`, `.xlsx`, `.html`)
-   into `./docs/`, then bring up the stack — eight services with healthchecks;
+   into `./docs/`, then bring up the stack — ten services with healthchecks;
    `--wait` returns once all are green:
     ```bash
     docker compose up -d --wait
-    bash scripts/smoke.sh        # optional: sequenced infra checks
+    bash scripts/smoke.sh        # optional: sequenced checks across all ten services
     ```
 
 3. Open **[http://localhost:3000](http://localhost:3000)** and ask a question.
@@ -115,7 +121,13 @@ recall@k/pass@k eval matrix + OCR benchmark, Prefect tracking, golden-docs.
    full text; inline `[SOURCE]` chips scroll to the matching card.
    Conversations persist across restarts.
 
-4. Prefer the terminal? The `app` container ingests on start; for an
+4. Watch it work: Grafana at **[http://localhost:3001](http://localhost:3001)**
+   renders the provisioned Query / Ingestion / Infra dashboards, no login
+   needed (Prometheus itself: [http://localhost:9090](http://localhost:9090)).
+   Metrics populate from API/GUI activity — CLI runs record into their own
+   process, which is never scraped.
+
+5. Prefer the terminal? The `app` container ingests on start; for an
    interactive session:
     ```bash
     docker compose run --rm app uv run main.py chat
@@ -152,7 +164,15 @@ evidence before prose: `retrieval` (the provenance payload) → `reasoning`
 reachability and `GET /api/config` lists the registered chunkers/retrievers/
 OCR engines the UI builds its controls from.
 
+The full as-built contract — corpus/settings routes included, plus both SSE
+protocols and the error envelope — lives in
+[`golden-docs/api.md`](golden-docs/api.md), rendered from an OpenAPI snapshot
+(`golden-docs/openapi.json`) that a unit test guards against drift; regenerate
+it with `uv run python scripts/export_openapi.py`.
+
 Prefect UI (flow/task runs, logs, timings): [http://localhost:4200](http://localhost:4200).
+Grafana (provisioned dashboards, anonymous viewing): [http://localhost:3001](http://localhost:3001);
+Prometheus: [http://localhost:9090](http://localhost:9090).
 Embeddings API docs (infinity): `http://<bound-interface>:8081/v1/docs` — the
 binding is interface-specific; resolve it with
 `docker compose port infinity-embeddings 8081`.
@@ -177,7 +197,8 @@ Frontend (`web/`, uses [`pnpm`](https://pnpm.io)):
 
 ```bash
 pnpm dev                           # dev server on :3000 (against NEXT_PUBLIC_API_URL)
-pnpm test                          # Vitest unit tests (SSE parsing, citations, trace badges)
+pnpm test                          # Vitest unit tests (coverage-gated in CI)
+pnpm e2e                           # opt-in Playwright e2e — bring the stack up first
 pnpm lint && pnpm build
 pnpm gen:types                     # regenerate lib/types.ts from the API's OpenAPI schema
 ```
@@ -185,6 +206,8 @@ pnpm gen:types                     # regenerate lib/types.ts from the API's Open
 `NEXT_PUBLIC_API_URL` is baked in at **build** time — after changing it, rerun
 `docker compose build web` (or restart `pnpm dev`).
 
-CI (GitHub Actions) runs lint, format check, types, the unit suite, and a
-strict docs build on every push; integration/e2e stay local (they need
-Docker), and the web build/Vitest join CI in the v2 hardening phase.
+CI (GitHub Actions) runs two jobs on every push — **Python**: lint + format
+check, mypy, the unit suite under the 80% coverage floor (API included), and
+a strict docs build; **web**: pnpm lint, the Vitest suite under a coverage
+floor, and a production build. The integration/e2e suites and the Playwright
+browser tests stay local — they need Docker and the live stack.

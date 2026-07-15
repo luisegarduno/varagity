@@ -7,18 +7,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Varagity is a full-stack RAG application implementing Anthropic-style **Contextual Retrieval**
 (contextual embeddings + contextual BM25 + hybrid rank fusion + cross-encoder reranking),
 self-hosted on local GPUs. v1 (complete) is the terminal system: Q&A over a `docs/` corpus,
-grounded and cited answers, every pipeline stage a tracked Prefect task. v2 phases 1–6
-(shipped) add: reranking wired into the query path with a per-chunk `RetrievalTrace` (the
-≈67% tier), a FastAPI SSE backend with conversation persistence, a Next.js chat GUI whose
-evidence panel shows "how this answer was built" with inline citations, office/web document
-modalities, and four new chunking strategies with a benchmark sweep. Remaining v2 work
-(plan phases 7–10): Prometheus/Grafana observability, corpus management + live settings UI,
-the design-polish pass, hardening/ADRs.
+grounded and cited answers, every pipeline stage a tracked Prefect task. v2 (complete —
+all ten phases shipped) adds: reranking wired into the query path with a per-chunk
+`RetrievalTrace` (the ≈67% tier), a FastAPI SSE backend with conversation persistence +
+migrations, a Next.js chat GUI whose evidence panel shows "how this answer was built" with
+inline citations, office/web document modalities, four new chunking strategies (five total)
+with a benchmark sweep, Prometheus/Grafana observability, corpus management + a live
+settings UI, the design system (a11y, ⌘K palette, opt-in Playwright e2e), and hardening
+(ADR-005…009, two-job CI with coverage floors, as-built docs refresh).
 
 Where things live:
 - `spec.md` — the v1 design; `spec_v2.md` — the v2 design (§ references in docstrings point at both).
 - `golden-docs/` — **as-built** documentation, rendered by MkDocs (`uv run mkdocs serve`):
-  architecture, data model, pipelines, runbook, ADRs, API reference.
+  architecture, data model, pipelines, runbook, ADRs 001–009, Python API reference;
+  `golden-docs/api.md` is the HTTP contract + SSE protocols, rendered from the
+  `golden-docs/openapi.json` snapshot (regenerate via `scripts/export_openapi.py` —
+  a unit test fails on drift).
 - `thoughts/shared/plans/` — the vertically-sliced implementation plans with per-phase notes.
 - `web/` — the Next.js frontend (own toolchain: pnpm, Vitest; heed `web/AGENTS.md` — the
   Next.js version post-dates training data, read `node_modules/next/dist/docs/` first).
@@ -26,8 +30,9 @@ Where things live:
 
 ## Architecture
 
-Eight compose services on `varagity-net`; the Python package is a client of all the backing
-services, with two peer front-ends (CLI and API) over the same Prefect flows:
+Ten compose services on `varagity-net` (+ two optional exporter profiles); the Python
+package is a client of all the backing services, with two peer front-ends (CLI and API)
+over the same Prefect flows:
 
 1. **llamacpp** (`:8080/v1`, GPU 0) — chat LLM for answers + contextualization blurbs;
    model `.gguf` bind-mounted from `${models_volume}`.
@@ -44,10 +49,15 @@ services, with two peer front-ends (CLI and API) over the same Prefect flows:
    `yellow` is healthy.
 5. **prefect** (`:4200`) — flow/task tracking UI; SQLite backing store.
 6. **api** (`:8000`) — FastAPI (`varagity/api/`, built from `Dockerfile.api`): SSE chat
-   streaming, conversation CRUD, health/config; invokes the flows in-process.
+   streaming, conversation CRUD, corpus upload/ingest + runtime settings routes,
+   health/config, `/metrics`; invokes the flows in-process.
 7. **web** (`:3000`) — the Next.js GUI (`web/`); the only browser-facing surface, talks
    only to `api`.
-8. **app** — the CLI (`main.py`), built from the local Dockerfile with `uv`.
+8. **prometheus** (`:9090`) — scrapes `api:8000/metrics` every 15 s; optional extra
+   targets via `--profile prefect-exporter` and `--profile gpu-metrics` (dcgm-exporter).
+9. **grafana** (`:3001`) — provisioned Prometheus datasource + Query/Ingestion/Infra
+   dashboards; anonymous viewer, default `admin/admin` for edits.
+10. **app** — the CLI (`main.py`), built from the local Dockerfile with `uv`.
 
 Key invariants: chunks live in **both** stores, joined by `(doc_id, original_index)`;
 `doc_id` hashes the path **relative to `DOCS_PATH`** + the file's byte hash. Hybrid
@@ -60,8 +70,8 @@ evidence panel, and the `message_sources.trace` snapshots all render that same d
 ## Commands
 
 ```bash
-docker compose up -d --wait        # all eight services, healthcheck-gated
-bash scripts/smoke.sh              # sequenced infra checks
+docker compose up -d --wait        # all ten default services, healthcheck-gated
+bash scripts/smoke.sh              # sequenced infra checks (all ten default services)
 
 uv run main.py ingest              # ingest DOCS_PATH into both stores
 uv run main.py ingest --reingest   # re-process (config changes don't change content hashes)
@@ -77,10 +87,12 @@ uv run ruff check . && uv run ruff format --check .
 uv run mypy varagity
 uv run pre-commit run --all-files
 uv run mkdocs build --strict       # docs must build clean (CI-gated)
+uv run python scripts/export_openapi.py   # refresh golden-docs/openapi.json after API surface changes
 
 # web/ (frontend — pnpm, not uv)
 pnpm dev                           # dev server against NEXT_PUBLIC_API_URL
-pnpm test                          # Vitest unit tests (SSE parser, citations, trace badges)
+pnpm test                          # Vitest unit tests — the suite that CI coverage-gates
+pnpm e2e                           # opt-in Playwright — needs the live stack on :3000/:8000
 pnpm lint && pnpm build
 pnpm gen:types                     # regenerate lib/types.ts from the API's OpenAPI schema
 ```
@@ -104,7 +116,9 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
 - **API layer** (spec_v2 §4): async at the edge, sync flows underneath — FastAPI runs the
   flows in a threadpool; don't rewrite pipeline code to async. `api/schemas.py` is the wire
   contract; the SSE protocol is `retrieval → reasoning → token → done` (or `error`),
-  evidence before prose. Frontend types are generated (`pnpm gen:types`), never hand-edited.
+  evidence before prose. Frontend types are generated (`pnpm gen:types`), never hand-edited;
+  the `golden-docs/openapi.json` snapshot is drift-guarded — rerun
+  `scripts/export_openapi.py` after surface changes (a unit test fails otherwise).
 - **Migrations**: ordered, idempotent SQL in `varagity/stores/migrations/NNN_*.sql`,
   tracked in `schema_migrations`, applied by the API on startup. `schema.sql` stays the
   fresh-install fast path — keep both in sync.
@@ -126,8 +140,11 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
 - **Testing layers**: unit (default, mocked HTTP via `respx`; API routes via
   `httpx.AsyncClient` + pytest-asyncio, SSE helpers in `tests/sse.py`), `-m integration`
   (testcontainers), `-m e2e` (fake embeddings/LLM + real containerized stores); web unit
-  tests via Vitest (`pnpm test`, local — not yet in CI). Shared container setup lives in
-  `varagity/eval/containers.py`.
+  tests via Vitest (`pnpm test`, runs in CI under a coverage floor); Playwright e2e is
+  opt-in (`pnpm --dir web e2e`, needs the live stack). CI = two jobs per push: Python
+  (ruff, mypy, unit suite at the 80% floor, `mkdocs build --strict`) + web (lint,
+  coverage-gated Vitest, build); integration/e2e/Playwright stay local. Shared container
+  setup lives in `varagity/eval/containers.py`.
 
 ## Gotchas worth knowing
 
@@ -159,6 +176,13 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
   volume in-container).
 - Toggling `CONTEXTUALIZE`/`CHUNKING_STRATEGY`/chunk params does **not** change content
   hashes — unchanged files are skipped until `ingest --reingest`.
+- Metrics are **per-process**: CLI ingests record into the CLI's own (never-scraped)
+  registry and never reach Grafana — run ingests through the API/GUI to populate the
+  Ingestion dashboard.
+- The stale-corpus flag is cleared only by a **completed API-driven** `reingest=true` run —
+  not by CLI `ingest --reingest`, not by patching the setting back.
+- `golden-docs/openapi.json` must be regenerated (`uv run python scripts/export_openapi.py`)
+  whenever the API surface changes — a unit test fails otherwise.
 
 ## Package Management
 
