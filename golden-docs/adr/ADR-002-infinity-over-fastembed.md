@@ -44,6 +44,8 @@ dedicated GPU. FastEmbed is dropped.
   container now also serves `bge-reranker-v2-m3` at `/v1/rerank` for the
   post-v1 rerank step (staged config, `RERANK_ENABLED=false`) — see the
   [runbook](../runbook.md#the-reranker-rides-the-embedding-container) for
-  the `sm_120`/optimum/batch-cap operational notes.
+  the `sm_120`/optimum/batch-cap operational notes. *(v2 update: no longer
+  staged — reranking is wired into the query path; see
+  [ADR-006](ADR-006-reranking-wired.md).)*
 - Upstream does not CI-build the `latest-trt-onnx` tag, so the compose pins
   an exact version (`0.0.76-trt-onnx`) instead of a moving `latest`.

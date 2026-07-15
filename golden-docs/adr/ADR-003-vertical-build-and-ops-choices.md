@@ -84,7 +84,9 @@ pipeline, so the fallback changes *how* text is recovered, never its
 downstream shape; only textless documents pay the OCR cost; chunks carry
 `extraction` provenance. `PDF_OCR_FORCE_FULL_PAGE` exists because a
 *corrupt* text layer passes content triggers by definition. GPU/VLM OCR
-serving remains the post-v1 escalation if scanned volume grows.
+serving remains the post-v1 escalation if scanned volume grows. *(v2
+update: still deferred — v2 expanded modalities to office/web digital text
+instead; see [ADR-009](ADR-009-modality-expansion.md).)*
 
 ## 6. Smaller calls recorded with their rationale
 
