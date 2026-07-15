@@ -254,6 +254,89 @@ class TestDocumentChunks:
         assert store.document_chunks("doc0000000000nil") == []
 
 
+class TestCorpusCounts:
+    """The store-derived corpus gauges' queries (spec_v3 §6.1a).
+
+    These back the Ingestion dashboard's size panels, so they are asserted
+    against real SQL — the ``chunking_strategy`` grouping in particular
+    reads a JSONB key rather than a column.
+    """
+
+    def _seed_typed(
+        self,
+        store: ContextualVectorDB,
+        doc_id: str,
+        *,
+        file_type: str,
+        chunking_strategy: str,
+        n_chunks: int,
+    ) -> None:
+        records = [
+            ChunkRecord.create(
+                doc_id=doc_id,
+                original_index=i,
+                chunk_index=i,
+                source=f"/abs/corpus/{doc_id}.{file_type}",
+                file_name=f"{doc_id}.{file_type}",
+                file_type=file_type,
+                page=None,
+                content=f"{doc_id} chunk {i}",
+                context=None,
+                chunk_size=400,
+                chunk_overlap=50,
+                chunking_strategy=chunking_strategy,
+                embedding_model="test-model",
+                content_hash="hash-" + doc_id,
+            )
+            for i in range(n_chunks)
+        ]
+        store.store_document(
+            doc_id=doc_id,
+            source=f"/abs/corpus/{doc_id}.{file_type}",
+            file_type=file_type,
+            content_hash="hash-" + doc_id,
+            records=records,
+            embeddings=[_unit_vector(i) for i in range(n_chunks)],
+        )
+
+    def test_empty_corpus_counts_zero(self, store: ContextualVectorDB) -> None:
+        assert store.chunk_count() == 0
+        assert store.document_count_by_type() == {}
+        assert store.chunk_count_by_strategy() == {}
+
+    def test_counts_group_by_type_and_strategy(self, store: ContextualVectorDB) -> None:
+        self._seed_typed(
+            store,
+            "docmd0000000001a",
+            file_type="md",
+            chunking_strategy="markdown_aware",
+            n_chunks=3,
+        )
+        self._seed_typed(
+            store, "docmd0000000002b", file_type="md", chunking_strategy="semantic", n_chunks=2
+        )
+        self._seed_typed(
+            store, "docpdf000000003c", file_type="pdf", chunking_strategy="semantic", n_chunks=4
+        )
+
+        assert store.document_count() == 3
+        assert store.chunk_count() == 9
+        assert store.document_count_by_type() == {"md": 2, "pdf": 1}
+        assert store.chunk_count_by_strategy() == {"markdown_aware": 3, "semantic": 6}
+
+    def test_chunks_without_a_strategy_group_as_unknown(
+        self, store: ContextualVectorDB, pg_conninfo: str
+    ) -> None:
+        """A chunk predating the metadata field must not vanish into a null label."""
+        self._seed_typed(
+            store, "docold000000004d", file_type="md", chunking_strategy="semantic", n_chunks=2
+        )
+        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+            conn.execute("UPDATE chunks SET metadata = metadata - 'chunking_strategy'")
+
+        assert store.chunk_count_by_strategy() == {"unknown": 2}
+
+
 class TestAtomicity:
     def test_store_document_rolls_back_on_mismatch(self, store: ContextualVectorDB) -> None:
         """A failed chunk write rolls back the documents row too.

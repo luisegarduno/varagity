@@ -49,6 +49,7 @@ from varagity.api.schemas import (
 from varagity.ingest.loader import IngestStages, IngestSummary
 from varagity.ingest.parsers import Parser, RawDocument
 from varagity.models import EmbeddingsClient, LLMClient
+from varagity.observability import metrics
 from varagity.pipeline.ingest_flow import TASK_STAGES, ingest_flow
 from varagity.stores import ChunkRecord, ContextualVectorDB, ElasticsearchBM25
 from varagity.stores.app_settings_store import AppSettingsStore
@@ -407,8 +408,25 @@ class IngestRunner:
             ingest_logger.setLevel(previous_level)
             self._emit(EVENT_STATUS, IngestStatusEvent(run=run.to_out()))
             self._close_feed()
-            if run.state == "completed" and run.reingest:
-                self._on_reingest_complete()
+            if run.state == "completed":
+                self._record_run_metrics(run)
+                if run.reingest:
+                    self._on_reingest_complete()
+
+    @staticmethod
+    def _record_run_metrics(run: _RunState) -> None:
+        """Publish the completed run's headline facts as gauges.
+
+        Args:
+            run: The completed run (its ``finished_at``/``summary`` are set
+                by :meth:`_execute` before this is called).
+        """
+        assert run.finished_at is not None and run.summary is not None  # completed run
+        metrics.set_last_ingest_run(
+            finished_at=run.finished_at.timestamp(),
+            duration_seconds=(run.finished_at - run.started_at).total_seconds(),
+            documents=run.summary.ingested,
+        )
 
     def _make_on_file(self, run: _RunState) -> Callable[[Path, str, int], None]:
         """Build the loader's per-file observer for this run.

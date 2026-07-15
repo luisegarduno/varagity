@@ -98,6 +98,24 @@ GROUP BY d.doc_id, d.source, d.file_type, d.n_chunks, d.ingested_at
 ORDER BY d.ingested_at DESC, d.source
 """
 
+# The corpus gauges (spec_v3 §6.1a): store state, not process history, so
+# the Ingestion dashboard survives an api restart and sees CLI ingests too.
+_DOCUMENTS_BY_TYPE_SQL = """
+SELECT file_type, count(*)
+FROM documents
+GROUP BY file_type
+"""
+
+# chunking_strategy is a ChunkRecord field inside the metadata JSONB, not a
+# chunks column (spec_v3 §6.1 says "column"; it is not). COALESCE mirrors
+# _LIST_DOCUMENTS_SQL's extraction handling: rows written before the field
+# existed group under 'unknown' rather than vanishing into a null label.
+_CHUNKS_BY_STRATEGY_SQL = """
+SELECT COALESCE(metadata->>'chunking_strategy', 'unknown'), count(*)
+FROM chunks
+GROUP BY 1
+"""
+
 
 def default_conninfo() -> str:
     """Build the connection string from settings.
@@ -214,6 +232,46 @@ class ContextualVectorDB:
         """
         row = self._conn.execute("SELECT count(*) FROM documents").fetchone()
         return 0 if row is None else int(row[0])
+
+    def chunk_count(self) -> int:
+        """Count the stored chunks.
+
+        Backs the ``varagity_corpus_chunks`` gauge (spec_v3 §6.1a): the
+        store is the truthful source for "how big is my corpus", unlike the
+        per-process ingest counters that reset with the API.
+
+        Returns:
+            Number of ``chunks`` rows.
+        """
+        row = self._conn.execute("SELECT count(*) FROM chunks").fetchone()
+        return 0 if row is None else int(row[0])
+
+    def document_count_by_type(self) -> dict[str, int]:
+        """Count the ingested documents per file type.
+
+        Backs the ``varagity_corpus_documents_by_type`` gauge (spec_v3
+        §6.1a) — the store-derived replacement for the Ingestion
+        dashboard's ``increase()``-over-a-flat-counter panel.
+
+        Returns:
+            ``file_type`` → document count; empty on an empty corpus.
+        """
+        rows = self._conn.execute(_DOCUMENTS_BY_TYPE_SQL).fetchall()
+        return {str(file_type): int(count) for file_type, count in rows}
+
+    def chunk_count_by_strategy(self) -> dict[str, int]:
+        """Count the stored chunks per chunking strategy.
+
+        Backs the ``varagity_corpus_chunks_by_strategy`` gauge (spec_v3
+        §6.1a). The strategy is read from each chunk's ``metadata`` JSONB
+        (it is not a column); chunks lacking the field count as
+        ``unknown``.
+
+        Returns:
+            ``chunking_strategy`` → chunk count; empty on an empty corpus.
+        """
+        rows = self._conn.execute(_CHUNKS_BY_STRATEGY_SQL).fetchall()
+        return {str(strategy): int(count) for strategy, count in rows}
 
     def list_documents(self) -> list[DocumentInfo]:
         """List every ingested document with its extraction mix.

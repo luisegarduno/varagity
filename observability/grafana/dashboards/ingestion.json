@@ -6,7 +6,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "10s",
@@ -38,10 +38,25 @@
   },
   "panels": [
     {
+      "id": 25,
+      "type": "text",
+      "title": "Reading this dashboard",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Corpus panels** (documents/chunks in corpus) are read from pgvector at scrape time: they survive an API restart and **include CLI ingests**.\n\n**Rate, ratio and latency panels** come from in-process counters: they cover only ingests run through **this API process since it started** (`docker compose restart api` zeroes them), and **CLI ingests are invisible to them** (ADR-007) \u2014 run ingests through the API/GUI to populate those."
+      }
+    },
+    {
       "id": 9,
       "type": "stat",
-      "title": "Documents ingested (range)",
-      "description": "Documents stored into both stores over the dashboard time range.",
+      "title": "Documents in corpus",
+      "description": "Documents currently in pgvector. Store-derived: survives an API restart and counts CLI ingests too.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -50,7 +65,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 0
+        "y": 4
       },
       "fieldConfig": {
         "defaults": {
@@ -94,7 +109,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(varagity_ingest_docs_total[$__range]))",
+          "expr": "sum(varagity_corpus_documents)",
           "legendFormat": "",
           "instant": true,
           "range": false
@@ -104,8 +119,8 @@
     {
       "id": 10,
       "type": "stat",
-      "title": "Chunks stored (range)",
-      "description": "Chunks written to pgvector + Elasticsearch over the dashboard time range.",
+      "title": "Chunks in corpus",
+      "description": "Chunks currently in pgvector. Store-derived: survives an API restart and counts CLI ingests too.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -114,7 +129,7 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 0
+        "y": 4
       },
       "fieldConfig": {
         "defaults": {
@@ -158,7 +173,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(varagity_ingest_chunks_total[$__range]))",
+          "expr": "sum(varagity_corpus_chunks)",
           "legendFormat": "",
           "instant": true,
           "range": false
@@ -168,8 +183,8 @@
     {
       "id": 11,
       "type": "stat",
-      "title": "OCR-fallback rate (range)",
-      "description": "Share of ingested documents whose text came from the two-pass OCR fallback ('\u2014' until a document is ingested in range).",
+      "title": "OCR-fallback rate (this API process)",
+      "description": "Share of documents whose text came from OCR rather than a digital text layer. Counter-derived, so this covers only ingests run through THIS API process since it started \u2014 not the corpus at large.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -178,7 +193,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 0
+        "y": 4
       },
       "fieldConfig": {
         "defaults": {
@@ -229,7 +244,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(varagity_ingest_docs_total{extraction=\"ocr_fallback\"}[$__range])) / sum(increase(varagity_ingest_docs_total[$__range]))",
+          "expr": "sum(varagity_ingest_docs_total{extraction=\"ocr_fallback\"}) / sum(varagity_ingest_docs_total)",
           "legendFormat": "",
           "instant": true,
           "range": false
@@ -239,8 +254,8 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Documents by file type",
-      "description": "Corpus growth by format (pdf/txt/md + the v2 office/web modalities).",
+      "title": "Documents in corpus by file type",
+      "description": "Corpus composition by format (pdf/txt/md + the v2 office/web modalities).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -249,7 +264,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 10
       },
       "fieldConfig": {
         "defaults": {
@@ -258,16 +273,17 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "drawStyle": "bars",
+            "drawStyle": "line",
             "lineWidth": 2,
-            "fillOpacity": 60,
+            "fillOpacity": 20,
             "pointSize": 5,
             "showPoints": "never",
             "spanNulls": true,
             "stacking": {
               "mode": "normal",
               "group": "A"
-            }
+            },
+            "lineInterpolation": "stepAfter"
           }
         },
         "overrides": []
@@ -290,7 +306,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (file_type) (increase(varagity_ingest_docs_total[$__rate_interval]))",
+          "expr": "sum by (file_type) (varagity_corpus_documents_by_type)",
           "legendFormat": "{{file_type}}"
         }
       ]
@@ -298,8 +314,8 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Chunks by strategy",
-      "description": "Chunk volume per chunking strategy (mixed corpora stay analyzable \u2014 strategy is recorded per chunk).",
+      "title": "Chunks in corpus by strategy",
+      "description": "Corpus composition by the chunker that produced each chunk. Mixed strategies mean the corpus predates a CHUNKING_STRATEGY change without a --reingest.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -308,7 +324,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 10
       },
       "fieldConfig": {
         "defaults": {
@@ -317,16 +333,17 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "drawStyle": "bars",
+            "drawStyle": "line",
             "lineWidth": 2,
-            "fillOpacity": 60,
+            "fillOpacity": 20,
             "pointSize": 5,
             "showPoints": "never",
             "spanNulls": true,
             "stacking": {
               "mode": "normal",
               "group": "A"
-            }
+            },
+            "lineInterpolation": "stepAfter"
           }
         },
         "overrides": []
@@ -349,7 +366,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (chunking_strategy) (increase(varagity_ingest_chunks_total[$__rate_interval]))",
+          "expr": "sum by (chunking_strategy) (varagity_corpus_chunks_by_strategy)",
           "legendFormat": "{{chunking_strategy}}"
         }
       ]
@@ -358,7 +375,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "Contextualization latency per document",
-      "description": "Situating-blurb generation per document \u2014 the known Contextual-Retrieval throughput cost (spec \u00a79.4). Identity-path (CONTEXTUALIZE=false) runs record nothing here.",
+      "description": "Per-document blurb generation latency (API-process ingests only). Uses the full dashboard range: ingestion is bursty, and a ~1m rate window rarely straddles a run.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -367,7 +384,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 18
       },
       "fieldConfig": {
         "defaults": {
@@ -408,7 +425,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(varagity_contextualize_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(varagity_contextualize_latency_seconds_bucket[$__range])))",
           "legendFormat": "p95"
         },
         {
@@ -417,7 +434,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(varagity_contextualize_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(varagity_contextualize_latency_seconds_bucket[$__range])))",
           "legendFormat": "median"
         }
       ]
@@ -425,8 +442,8 @@
     {
       "id": 15,
       "type": "timeseries",
-      "title": "Contextualization seconds per chunk",
-      "description": "Blurb cost normalized by stored chunks (\u224812 s/chunk on the reference 2080 Ti). Slightly underestimates during CONTEXTUALIZE=false runs, which store chunks without blurbs.",
+      "title": "Contextualization seconds per chunk (cumulative)",
+      "description": "Mean blurb-generation cost per chunk since this API process started (API-process ingests only). Deliberately increase()-free: the chunk counter is born at its full value after a restart, so increase() over it is 0 and the ratio would read +Inf.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -435,7 +452,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 18
       },
       "fieldConfig": {
         "defaults": {
@@ -476,8 +493,182 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(varagity_contextualize_latency_seconds_sum[$__rate_interval])) / sum(increase(varagity_ingest_chunks_total[$__rate_interval]))",
+          "expr": "sum(varagity_contextualize_latency_seconds_sum) / sum(varagity_ingest_chunks_total)",
           "legendFormat": "s/chunk"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Last ingest run \u00b7 finished",
+      "description": "When the last API-driven ingest run completed. Reads 'never' until one completes in this API process.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "noValue": "never since API start",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "never since API start",
+                  "index": 0
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "varagity_ingest_last_run_timestamp_seconds * 1000",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Last ingest run \u00b7 duration",
+      "description": "Wall-clock duration of the last completed API-driven ingest run.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "noValue": "\u2014",
+          "mappings": [],
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "varagity_ingest_last_run_duration_seconds",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Last ingest run \u00b7 documents",
+      "description": "Documents processed by the last completed API-driven ingest run (0 is legitimate \u2014 an all-skipped run ingests nothing new).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "noValue": "\u2014",
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "varagity_ingest_last_run_documents",
+          "instant": true,
+          "range": false
         }
       ]
     }

@@ -111,6 +111,43 @@ DEPENDENCY_UP = Gauge(
     labelnames=("service",),
 )
 
+# "Did anything actually run?" — the question the owner was really asking
+# when the dashboard read 0 (spec_v3 §6.1a). Gauges, not counters: the
+# answer is a single latest fact, and it must not need increase().
+INGEST_LAST_RUN_TIMESTAMP_SECONDS = Gauge(
+    "varagity_ingest_last_run_timestamp_seconds",
+    "Unix timestamp when the last API-driven ingest run finished.",
+)
+
+INGEST_LAST_RUN_DURATION_SECONDS = Gauge(
+    "varagity_ingest_last_run_duration_seconds",
+    "Wall-clock duration of the last completed API-driven ingest run.",
+)
+
+INGEST_LAST_RUN_DOCUMENTS = Gauge(
+    "varagity_ingest_last_run_documents",
+    "Documents processed by the last completed API-driven ingest run.",
+)
+
+
+# Every module-level metric, for catalog(). Kept adjacent to the
+# definitions above so a new metric that misses this tuple is visible in
+# review rather than only as a dashboard that can never be guarded.
+_CATALOG = (
+    QUERY_LATENCY_SECONDS,
+    RETRIEVAL_SCORE,
+    RERANK_DELTA,
+    QUERY_TOTAL,
+    INGEST_DOCS_TOTAL,
+    INGEST_CHUNKS_TOTAL,
+    CONTEXTUALIZE_LATENCY_SECONDS,
+    LLM_TOKENS_TOTAL,
+    DEPENDENCY_UP,
+    INGEST_LAST_RUN_TIMESTAMP_SECONDS,
+    INGEST_LAST_RUN_DURATION_SECONDS,
+    INGEST_LAST_RUN_DOCUMENTS,
+)
+
 
 def observe_query_stage(stage: str, method: str, seconds: float) -> None:
     """Record one query stage's wall-clock latency.
@@ -212,3 +249,51 @@ def set_dependency_up(service: str, up: bool) -> None:
         up: Whether the probe succeeded.
     """
     DEPENDENCY_UP.labels(service=service).set(1.0 if up else 0.0)
+
+
+def set_last_ingest_run(finished_at: float, duration_seconds: float, documents: int) -> None:
+    """Record the last completed ingest run's headline facts.
+
+    Set by the API's ingest runner on completion (spec_v3 §6.1a). CLI
+    ingests can't feed these — they record into their own never-scraped
+    registry (ADR-007) — which is why the corpus gauges, not these, are
+    what the dashboard's size panels read.
+
+    Args:
+        finished_at: Unix timestamp of the run's completion.
+        duration_seconds: The run's wall-clock duration.
+        documents: How many documents the run processed.
+    """
+    INGEST_LAST_RUN_TIMESTAMP_SECONDS.set(finished_at)
+    INGEST_LAST_RUN_DURATION_SECONDS.set(duration_seconds)
+    INGEST_LAST_RUN_DOCUMENTS.set(documents)
+
+
+def catalog() -> dict[str, tuple[str, ...]]:
+    """Map every metric this app exposes to its label names.
+
+    The dashboard guard test (spec_v3 §6.4) checks each panel expression
+    against this, so a renamed metric or an undeclared ``sum by (…)`` label
+    fails the unit suite instead of silently emptying a panel.
+
+    Names are ``prometheus_client``'s *internal* base names, which are not
+    always what a dashboard queries: the client strips ``_total`` from a
+    Counter (``varagity_ingest_docs_total`` is catalogued as
+    ``varagity_ingest_docs``) and appends ``_bucket``/``_sum``/``_count``
+    to a Histogram at exposition time. Reconciling those suffixes is the
+    caller's job.
+
+    Returns:
+        Metric name → declared label names, covering the module-level
+        catalog and the store-derived corpus gauges
+        (:mod:`varagity.observability.corpus`).
+    """
+    from varagity.observability.corpus import CORPUS_GAUGES
+
+    declared: dict[str, tuple[str, ...]] = {}
+    for metric in _CATALOG:
+        # prometheus_client exposes neither publicly; the alternative is
+        # restating every name and label here, which is exactly the drift
+        # this function exists to catch.
+        declared[metric._name] = tuple(metric._labelnames)
+    return declared | CORPUS_GAUGES
