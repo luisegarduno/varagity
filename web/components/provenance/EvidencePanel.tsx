@@ -1,9 +1,18 @@
 "use client";
 
-import { useEffect } from "react";
+import { PanelRightCloseIcon } from "lucide-react";
+import { useEffect, useRef } from "react";
 
-import { ChunkCard, chunkCardId } from "@/components/provenance/ChunkCard";
-import type { Evidence } from "@/lib/evidence";
+import { ChunkCard } from "@/components/provenance/ChunkCard";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Drawer,
+  DrawerContent,
+  DrawerHeader,
+  DrawerTitle,
+} from "@/components/ui/drawer";
+import { LIVE_EVIDENCE_KEY, type Evidence } from "@/lib/evidence";
 import { cn } from "@/lib/utils";
 
 /** A citation chip's scroll request: bump `nonce` to re-trigger. */
@@ -15,8 +24,9 @@ export interface EvidenceScrollTarget {
 // Preferred stage order; anything else the API adds renders after.
 const STAGE_ORDER = ["retrieval", "generation", "total"];
 
-function formatMs(ms: number): string {
-  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+// One unit for the whole footer: seconds, two decimals.
+function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(2)} s`;
 }
 
 function latencyLine(latencyMs: Record<string, number>): string {
@@ -25,32 +35,43 @@ function latencyLine(latencyMs: Record<string, number>): string {
     ...Object.keys(latencyMs).filter((stage) => !STAGE_ORDER.includes(stage)),
   ];
   return stages
-    .map((stage) => `${stage} ${formatMs(latencyMs[stage])}`)
+    .map((stage) => `${stage} ${formatSeconds(latencyMs[stage])}`)
     .join(" · ");
 }
 
-function retrievalLine(evidence: Evidence): string {
-  const parts: string[] = [];
-  if (evidence.method) parts.push(evidence.method);
+/** The answer-level meta line: method badge, top_k → reranked-to, count. */
+function EvidenceMeta({ evidence }: { evidence: Evidence }) {
+  const counts: string[] = [];
   if (evidence.topK !== null) {
-    parts.push(
+    counts.push(
       evidence.rerankedTo !== null
-        ? `top_k ${evidence.topK} → reranked to ${evidence.rerankedTo}`
+        ? `top_k ${evidence.topK} → ${evidence.rerankedTo}`
         : `top_k ${evidence.topK}`,
     );
   }
-  parts.push(`${evidence.chunks.length} chunk${evidence.chunks.length === 1 ? "" : "s"}`);
-  return parts.join(" · ");
+  counts.push(
+    `${evidence.chunks.length} chunk${evidence.chunks.length === 1 ? "" : "s"}`,
+  );
+  return (
+    <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      {evidence.method && (
+        <Badge variant="accent" className="font-mono">
+          {evidence.method}
+        </Badge>
+      )}
+      <span className="font-mono tabular-nums">{counts.join(" · ")}</span>
+    </p>
+  );
 }
 
 /**
- * ★ "How this answer was built" (spec_v2 §4.6): the answer's evidence
- * rows — rank, score, trace badges, provenance, blurb, expandable text —
- * with the answer-level meta (method, top_k → reranked-to, per-stage
- * latency) around them. A plain right rail for now; the responsive
- * collapsible treatment is Phase 9.
+ * The evidence rows themselves, shared by the desktop rail and the mobile
+ * sheet. Owns the citation-click scroll+pulse (scoped to this list, so the
+ * two hosts never fight over card ids) and the arrival stagger: fresh
+ * evidence rises in card by card; pinned or reloaded answers render at
+ * rest (the animation is keyed to the live evidence key, not the render).
  */
-export function EvidencePanel({
+function EvidenceCardList({
   evidence,
   scrollTarget,
   className,
@@ -59,11 +80,15 @@ export function EvidencePanel({
   scrollTarget: EvidenceScrollTarget | null;
   className?: string;
 }) {
-  // Citation-chip clicks land here after the panel re-rendered with the
-  // right message's evidence: scroll the card into view and pulse it.
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  // Citation-chip clicks land here after the host re-rendered with the
+  // right answer's evidence: scroll the card into view and pulse it.
   useEffect(() => {
     if (!scrollTarget) return;
-    const card = document.getElementById(chunkCardId(scrollTarget.chunkKey));
+    const card = listRef.current?.querySelector<HTMLElement>(
+      `[data-chunk-key="${CSS.escape(scrollTarget.chunkKey)}"]`,
+    );
     if (!card) return;
     card.scrollIntoView({ behavior: "smooth", block: "center" });
     card.classList.add("evidence-pulse");
@@ -75,44 +100,137 @@ export function EvidencePanel({
     };
   }, [scrollTarget]);
 
+  const live = evidence?.key === LIVE_EVIDENCE_KEY;
+
+  return (
+    <div ref={listRef} className={cn("space-y-2", className)}>
+      {evidence === null ? (
+        <p className="p-4 text-center text-sm text-muted-foreground">
+          Evidence appears here as answers are built.
+        </p>
+      ) : evidence.chunks.length === 0 ? (
+        <p className="p-4 text-center text-sm text-muted-foreground">
+          No chunks were retrieved for this answer.
+        </p>
+      ) : (
+        evidence.chunks.map((chunk, index) => (
+          <ChunkCard
+            key={chunk.key}
+            chunk={chunk}
+            query={evidence.query}
+            className={
+              live
+                ? "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 motion-safe:fill-mode-backwards motion-safe:duration-300"
+                : undefined
+            }
+            // Stagger caps at eight cards so a deep list doesn't dawdle.
+            style={
+              live
+                ? { animationDelay: `${Math.min(index, 8) * 40}ms` }
+                : undefined
+            }
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+/**
+ * ★ "How this answer was built" (spec_v2 §4.6): the answer's evidence
+ * rows — rank, score, trace badges, provenance, blurb, expandable text —
+ * with the answer-level meta (method, top_k → reranked-to, per-stage
+ * latency) around them. This is the desktop rail host; the same content
+ * renders in the mobile bottom sheet via {@link EvidenceSheet}.
+ */
+export function EvidencePanel({
+  evidence,
+  scrollTarget,
+  className,
+  onClose,
+}: {
+  evidence: Evidence | null;
+  scrollTarget: EvidenceScrollTarget | null;
+  className?: string;
+  /** Renders a close affordance in the header (the collapsible rail). */
+  onClose?: () => void;
+}) {
   return (
     <aside
       aria-label="How this answer was built"
       className={cn("flex-col bg-background", className)}
     >
-      <header className="border-b border-border p-4">
-        <h2 className="text-sm font-semibold">How this answer was built</h2>
-        {evidence && (
-          <p className="mt-1 font-mono text-xs text-muted-foreground">
-            {retrievalLine(evidence)}
-          </p>
+      <header className="flex items-start justify-between gap-2 border-b border-border p-4">
+        <div className="min-w-0 space-y-1.5">
+          <h2 className="font-heading text-base leading-snug font-normal italic">
+            How this answer was built
+          </h2>
+          {evidence && <EvidenceMeta evidence={evidence} />}
+        </div>
+        {onClose && (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Hide evidence panel"
+            title="Hide evidence panel"
+            className="-mt-1 -mr-1.5 text-muted-foreground"
+            onClick={onClose}
+          >
+            <PanelRightCloseIcon />
+          </Button>
         )}
       </header>
 
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {evidence === null ? (
-          <p className="p-4 text-center text-sm text-muted-foreground">
-            Ask a question and the retrieved evidence — with each chunk&apos;s
-            ranks, scores, and context — appears here.
-          </p>
-        ) : evidence.chunks.length === 0 ? (
-          <p className="p-4 text-center text-sm text-muted-foreground">
-            No chunks were retrieved for this answer.
-          </p>
-        ) : (
-          evidence.chunks.map((chunk) => (
-            <ChunkCard key={chunk.key} chunk={chunk} query={evidence.query} />
-          ))
-        )}
-      </div>
+      <EvidenceCardList
+        evidence={evidence}
+        scrollTarget={scrollTarget}
+        className="min-h-0 flex-1 overflow-y-auto p-3 scroll-fade-y"
+      />
 
       {evidence?.latencyMs && (
-        <footer className="border-t border-border p-3">
-          <p className="font-mono text-xs text-muted-foreground">
+        <footer className="border-t border-border px-4 py-2.5">
+          <p className="font-mono text-xs text-muted-foreground tabular-nums">
             {latencyLine(evidence.latencyMs)}
           </p>
         </footer>
       )}
     </aside>
+  );
+}
+
+/**
+ * The narrow-screen host: the same evidence content inside the bottom
+ * sheet (spec_v2 §4.8). Controlled by the conversation — citation chips
+ * and the per-answer sources affordance open it below `lg`. The sheet
+ * itself scrolls; swipe down (or Esc) dismisses.
+ */
+export function EvidenceSheet({
+  evidence,
+  scrollTarget,
+  open,
+  onOpenChange,
+}: {
+  evidence: Evidence | null;
+  scrollTarget: EvidenceScrollTarget | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Drawer side="bottom" open={open} onOpenChange={onOpenChange}>
+      <DrawerContent>
+        <DrawerHeader>
+          <DrawerTitle className="italic">
+            How this answer was built
+          </DrawerTitle>
+          {evidence && <EvidenceMeta evidence={evidence} />}
+        </DrawerHeader>
+        <EvidenceCardList evidence={evidence} scrollTarget={scrollTarget} />
+        {evidence?.latencyMs && (
+          <p className="border-t border-border pt-3 font-mono text-xs text-muted-foreground tabular-nums">
+            {latencyLine(evidence.latencyMs)}
+          </p>
+        )}
+      </DrawerContent>
+    </Drawer>
   );
 }

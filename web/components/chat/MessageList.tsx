@@ -1,13 +1,23 @@
 "use client";
 
-import { LayersIcon } from "lucide-react";
-import { useMemo } from "react";
+import {
+  CheckIcon,
+  DatabaseZapIcon,
+  FileUpIcon,
+  LayersIcon,
+  MessageCircleQuestionIcon,
+  RotateCcwIcon,
+  SearchXIcon,
+  TriangleAlertIcon,
+} from "lucide-react";
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
 
 import { citationComponents } from "@/components/chat/Citations";
 import { Markdown, useDebouncedValue } from "@/components/chat/Markdown";
 import { ReasoningTrace } from "@/components/chat/ReasoningTrace";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Message, MessageContent } from "@/components/ui/message";
 import {
   MessageScroller,
@@ -17,17 +27,26 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
-import type { ChatMessage } from "@/lib/api";
+import { listDocuments, type ChatErrorEvent, type ChatMessage } from "@/lib/api";
 import type { StreamingTurn } from "@/lib/chat-reducer";
 import { annotateCitations } from "@/lib/citations";
+import { describeChatError } from "@/lib/errors";
 import type { Evidence } from "@/lib/evidence";
+import { currentStage, deriveStages } from "@/lib/stage";
+import { cn } from "@/lib/utils";
+
+// New (streaming) items rise in; transcript loads render at rest.
+const ENTER_ANIMATION =
+  "motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-1 motion-safe:duration-300";
 
 function UserBubble({ text }: { text: string }) {
   return (
     <Message align="end">
       <MessageContent>
         <Bubble align="end" variant="secondary">
-          <BubbleContent className="whitespace-pre-wrap">{text}</BubbleContent>
+          <BubbleContent className="whitespace-pre-wrap border-border/60">
+            {text}
+          </BubbleContent>
         </Bubble>
       </MessageContent>
     </Message>
@@ -43,6 +62,195 @@ function AssistantBubble({ children }: { children: React.ReactNode }) {
         </Bubble>
       </MessageContent>
     </Message>
+  );
+}
+
+/**
+ * The inline "retrieving → reranking → generating" pipeline mirror
+ * (spec_v2 §4.8): done stages get a check, the active one shimmers,
+ * pending ones sit dimmed, a failure marks where the pipeline died. The
+ * visible row is decorative to screen readers — a polite live region
+ * announces the current stage instead.
+ */
+function StageIndicator({
+  turn,
+  rerankActive,
+}: {
+  turn: StreamingTurn;
+  rerankActive: boolean;
+}) {
+  const stages = deriveStages(turn, { rerankActive });
+  const current = currentStage(stages);
+  return (
+    <div className="text-xs text-muted-foreground">
+      <span
+        aria-hidden="true"
+        className="flex flex-wrap items-center gap-x-2 gap-y-1"
+      >
+        {stages.map((stage, index) => (
+          <span key={stage.key} className="inline-flex items-center gap-x-2">
+            {index > 0 && <span className="text-muted-foreground/40">·</span>}
+            <span
+              className={cn(
+                "inline-flex items-center gap-1",
+                stage.status === "pending" && "opacity-45",
+                stage.status === "active" && "shimmer",
+                stage.status === "failed" && "text-destructive",
+              )}
+            >
+              {stage.status === "done" && <CheckIcon className="size-3" />}
+              {stage.status === "failed" && (
+                <TriangleAlertIcon className="size-3" />
+              )}
+              {stage.label}
+              {stage.detail && (
+                <span className="font-mono text-[11px] tabular-nums">
+                  {stage.detail}
+                </span>
+              )}
+            </span>
+          </span>
+        ))}
+      </span>
+      <span aria-live="polite" className="sr-only">
+        {current &&
+          (current.status === "failed"
+            ? `${current.label} failed`
+            : `${current.label}…`)}
+      </span>
+    </div>
+  );
+}
+
+/** The actionable failure banner (spec_v2 §4.8): calm, with a way out. */
+function ErrorBanner({
+  error,
+  onRetry,
+}: {
+  error: ChatErrorEvent;
+  onRetry: () => void;
+}) {
+  const descriptor = describeChatError(error);
+  return (
+    <div
+      role="alert"
+      className="mt-3 w-fit max-w-full space-y-1.5 rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-xs"
+    >
+      <p className="text-sm font-medium text-destructive">{descriptor.title}</p>
+      {descriptor.hint && (
+        <p className="text-muted-foreground">{descriptor.hint}</p>
+      )}
+      {descriptor.command && (
+        <code className="block w-fit rounded-md border border-border/60 bg-muted px-1.5 py-0.5 font-mono">
+          {descriptor.command}
+        </code>
+      )}
+      {descriptor.raw && (
+        <p className="font-mono break-words text-muted-foreground">
+          {error.code}: {error.message}
+        </p>
+      )}
+      <div className="flex items-center gap-3 pt-1">
+        {descriptor.action === "retry" && (
+          <Button size="xs" variant="outline" onClick={onRetry}>
+            <RotateCcwIcon aria-hidden />
+            Try again
+          </Button>
+        )}
+        {descriptor.action === "corpus" && (
+          <Link
+            href="/corpus"
+            className="text-muted-foreground underline underline-offset-2 hover:text-foreground"
+          >
+            Open the corpus
+          </Link>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Retrieval came back empty: nudge toward the corpus, quietly. */
+function NoMatchesNotice() {
+  return (
+    <div className="mb-2 flex w-fit items-start gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+      <SearchXIcon className="mt-px size-3.5 shrink-0" aria-hidden />
+      <p>
+        Nothing matched — is the{" "}
+        <Link
+          href="/corpus"
+          className="underline underline-offset-2 hover:text-foreground"
+        >
+          corpus
+        </Link>{" "}
+        ingested?
+      </p>
+    </div>
+  );
+}
+
+/**
+ * The pre-first-question hero. Probes the corpus once: when it turns out
+ * empty, the hero becomes the guided upload → ingest → ask card
+ * (spec_v2 §4.8); when the probe fails (API down), the plain hero stays —
+ * the send path owns error reporting.
+ */
+function EmptyConversation() {
+  // null = unknown (probe pending or failed) → the plain hero.
+  const [corpusEmpty, setCorpusEmpty] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listDocuments().then(
+      (documents) => {
+        if (!cancelled) setCorpusEmpty(documents.length === 0);
+      },
+      () => {
+        // Unreachable — keep the plain hero.
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (corpusEmpty) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-5 p-8 text-center motion-safe:animate-in motion-safe:fade-in motion-safe:duration-300">
+        <h1 className="font-heading text-3xl font-normal">
+          Your corpus is empty
+        </h1>
+        <ol className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+          <li className="inline-flex items-center gap-1.5">
+            <FileUpIcon className="size-3.5" aria-hidden />
+            Upload documents
+          </li>
+          <li className="inline-flex items-center gap-1.5">
+            <span aria-hidden>→</span>
+            <DatabaseZapIcon className="size-3.5" aria-hidden />
+            Ingest them
+          </li>
+          <li className="inline-flex items-center gap-1.5">
+            <span aria-hidden>→</span>
+            <MessageCircleQuestionIcon className="size-3.5" aria-hidden />
+            Ask questions
+          </li>
+        </ol>
+        <Link href="/corpus" className={cn(buttonVariants({ size: "sm" }))}>
+          Open the corpus
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center motion-safe:animate-in motion-safe:fade-in motion-safe:duration-300">
+      <h1 className="font-heading text-3xl font-normal">Ask your corpus</h1>
+      <p className="max-w-sm text-sm text-balance text-muted-foreground">
+        Ask a question about your corpus — answers come back grounded in
+        retrieved evidence, with inline citations you can inspect.
+      </p>
+    </div>
   );
 }
 
@@ -88,18 +296,23 @@ function AssistantAnswer({
     <>
       <Markdown text={annotated.markdown} components={components} />
       {evidence && evidence.chunks.length > 0 && (
-        <div className="mt-2">
-          <Button
-            variant={active ? "secondary" : "ghost"}
-            size="xs"
-            className="text-muted-foreground"
+        <div className="mt-2.5">
+          <button
+            type="button"
             title="Show how this answer was built"
             onClick={() => onShowEvidence(evidence)}
+            className={cn(
+              "inline-flex h-6 items-center gap-1.5 rounded-md border px-2 font-mono text-[11px] tabular-nums transition-colors",
+              "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
+              active
+                ? "border-primary/15 bg-primary/10 text-primary dark:border-primary/25 dark:bg-primary/15 dark:text-[oklch(0.78_calc(var(--accent-chroma)*0.7)_var(--accent-hue))]"
+                : "border-border/60 bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground",
+            )}
           >
-            <LayersIcon aria-hidden />
+            <LayersIcon className="size-3" aria-hidden />
             {evidence.chunks.length} source
             {evidence.chunks.length === 1 ? "" : "s"}
-          </Button>
+          </button>
         </div>
       )}
     </>
@@ -124,62 +337,57 @@ export interface EvidenceHandlers {
 function StreamingMessages({
   turn,
   handlers,
+  rerankActive,
+  onRetry,
 }: {
   turn: StreamingTurn;
   handlers: EvidenceHandlers;
+  rerankActive: boolean;
+  onRetry: () => void;
 }) {
   // Re-parsing partial markdown per token flashes half-styled blocks; a
   // short debounce keeps the stream feeling live without the churn.
   const debouncedAnswer = useDebouncedValue(turn.answer, 80);
   const settled = Boolean(turn.done || turn.error || turn.stopped);
-  const waiting = !turn.reasoning && !turn.answer && !settled;
   // The reasoning phase is "streaming" (auto-open) until answer tokens
   // take over or the turn settles.
   const reasoningLive = !turn.answer && !settled;
+  const zeroMatches = turn.retrieval !== null && turn.retrieval.chunks.length === 0;
 
   return (
     <>
-      <MessageScrollerItem>
+      <MessageScrollerItem className={ENTER_ANIMATION}>
         <UserBubble text={turn.query} />
       </MessageScrollerItem>
-      <MessageScrollerItem scrollAnchor>
+      <MessageScrollerItem scrollAnchor className={ENTER_ANIMATION}>
         <AssistantBubble>
-          {waiting ? (
-            <p className="animate-pulse text-sm text-muted-foreground">
-              Retrieving…
-            </p>
-          ) : (
-            <>
-              {turn.reasoning && (
-                <ReasoningTrace
-                  reasoning={turn.reasoning}
-                  streaming={reasoningLive}
-                />
-              )}
-              {debouncedAnswer && (
-                <AssistantAnswer
-                  text={debouncedAnswer}
-                  evidence={handlers.liveEvidence}
-                  active={
-                    handlers.liveEvidence?.key === handlers.activeEvidenceKey
-                  }
-                  streaming={!settled}
-                  onCite={handlers.onCite}
-                  onShowEvidence={handlers.onShowEvidence}
-                />
-              )}
-              {turn.stopped && (
-                <p className="mt-2 text-xs text-muted-foreground italic">
-                  Stopped — this partial answer isn&apos;t saved.
-                </p>
-              )}
-              {turn.error && (
-                <p className="mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">
-                  {turn.error.code}: {turn.error.message}
-                </p>
-              )}
-            </>
+          {/* On done/stop the indicator yields to the evidence panel's
+              numbers; on error it stays, marking where the pipeline died. */}
+          {!turn.done && !turn.stopped && (
+            <div className={turn.reasoning || turn.answer ? "mb-2" : undefined}>
+              <StageIndicator turn={turn} rerankActive={rerankActive} />
+            </div>
           )}
+          {turn.reasoning && (
+            <ReasoningTrace reasoning={turn.reasoning} streaming={reasoningLive} />
+          )}
+          {zeroMatches && <NoMatchesNotice />}
+          {debouncedAnswer && (
+            <AssistantAnswer
+              text={debouncedAnswer}
+              evidence={handlers.liveEvidence}
+              active={handlers.liveEvidence?.key === handlers.activeEvidenceKey}
+              streaming={!settled}
+              onCite={handlers.onCite}
+              onShowEvidence={handlers.onShowEvidence}
+            />
+          )}
+          {turn.stopped && (
+            <p className="mt-2 text-xs text-muted-foreground italic">
+              Stopped — this partial answer isn&apos;t saved.
+            </p>
+          )}
+          {turn.error && <ErrorBanner error={turn.error} onRetry={onRetry} />}
         </AssistantBubble>
       </MessageScrollerItem>
     </>
@@ -196,10 +404,16 @@ export function MessageList({
   messages,
   turn,
   handlers,
+  rerankActive,
+  onRetry,
 }: {
   messages: ChatMessage[];
   turn: StreamingTurn | null;
   handlers: EvidenceHandlers;
+  /** Whether current settings put reranking on the path (stage indicator). */
+  rerankActive: boolean;
+  /** Re-send the failed turn's question (the error banner's way out). */
+  onRetry: () => void;
 }) {
   const empty = messages.length === 0 && !turn;
 
@@ -209,13 +423,12 @@ export function MessageList({
         <MessageScrollerViewport>
           <MessageScrollerContent className="mx-auto w-full max-w-3xl px-4 py-6">
             {empty ? (
-              <div className="flex flex-1 items-center justify-center">
-                <p className="text-sm text-muted-foreground">
-                  Ask a question about your corpus.
-                </p>
-              </div>
+              <EmptyConversation />
             ) : (
               <>
+                {/* The hero's h1 leaves with it — keep exactly one h1 per
+                    chat page for the document outline. */}
+                <h1 className="sr-only">Conversation</h1>
                 {messages.map((message) => (
                   <MessageScrollerItem key={message.message_id}>
                     {message.role === "user" ? (
@@ -244,7 +457,14 @@ export function MessageList({
                     )}
                   </MessageScrollerItem>
                 ))}
-                {turn && <StreamingMessages turn={turn} handlers={handlers} />}
+                {turn && (
+                  <StreamingMessages
+                    turn={turn}
+                    handlers={handlers}
+                    rerankActive={rerankActive}
+                    onRetry={onRetry}
+                  />
+                )}
               </>
             )}
           </MessageScrollerContent>

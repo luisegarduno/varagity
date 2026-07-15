@@ -1,10 +1,16 @@
 "use client";
 
-import { ChevronDownIcon, ChevronRightIcon, ScanTextIcon } from "lucide-react";
+import { ChevronRightIcon, ScanTextIcon } from "lucide-react";
 import { useState } from "react";
 
 import { RankBadges } from "@/components/provenance/RankBadges";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsiblePanel,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import type { EvidenceChunk } from "@/lib/evidence";
 import { highlightTerms } from "@/lib/highlight";
 import { formatScore } from "@/lib/trace";
@@ -26,12 +32,8 @@ function HighlightedText({
     <>
       {highlightTerms(text, query).map((segment, index) =>
         segment.highlighted ? (
-          <mark
-            key={index}
-            className="rounded-sm bg-amber-200/70 px-0.5 text-inherit dark:bg-amber-500/30"
-          >
-            {segment.text}
-          </mark>
+          // Unstyled on purpose: the base layer's accent-tinted `mark`.
+          <mark key={index}>{segment.text}</mark>
         ) : (
           <span key={index}>{segment.text}</span>
         ),
@@ -44,13 +46,18 @@ function HighlightedText({
  * One evidence row (spec_v2 §4.6): rank + final score, the trace badges,
  * source provenance (file, page, format, OCR fallback), the contextual
  * blurb, and the expandable full chunk text with query-term highlights.
+ * `className`/`style` pass through for the panel's arrival stagger.
  */
 export function ChunkCard({
   chunk,
   query,
+  className,
+  style,
 }: {
   chunk: EvidenceChunk;
   query: string | null;
+  className?: string;
+  style?: React.CSSProperties;
 }) {
   const [expanded, setExpanded] = useState(false);
   const ocr = chunk.extraction === "ocr_fallback";
@@ -59,15 +66,22 @@ export function ChunkCard({
     <article
       id={chunkCardId(chunk.key)}
       data-chunk-key={chunk.key}
-      className="space-y-2 rounded-lg border border-border bg-card p-3 text-card-foreground"
+      style={style}
+      className={cn(
+        "space-y-2 rounded-lg border border-border bg-card p-3 text-card-foreground",
+        className,
+      )}
     >
       <header className="flex items-baseline justify-between gap-2">
-        <span className="text-sm font-semibold" title={chunk.key}>
+        <span
+          className="font-mono text-sm font-semibold tabular-nums"
+          title={chunk.key}
+        >
           #{chunk.rank}
         </span>
         {chunk.score !== null && (
           <span
-            className="font-mono text-xs text-muted-foreground"
+            className="font-mono text-xs text-muted-foreground tabular-nums"
             title={
               chunk.trace?.rerank_score !== null &&
               chunk.trace?.rerank_score !== undefined
@@ -91,53 +105,50 @@ export function ChunkCard({
         </span>
         {chunk.page !== null && <span>page {chunk.page}</span>}
         {chunk.fileType && (
-          <span className="rounded border border-border/50 bg-muted px-1 py-px font-mono text-[10px] uppercase">
+          <Badge variant="outline" className="font-mono uppercase">
             {chunk.fileType}
-          </span>
+          </Badge>
         )}
         {ocr && (
-          <span
-            className="inline-flex items-center gap-0.5 rounded border border-amber-500/40 bg-amber-500/10 px-1 py-px font-mono text-[10px] text-amber-700 uppercase dark:text-amber-400"
+          <Badge
+            variant="warning"
+            className="font-mono uppercase"
             title="Extracted via OCR fallback — this text came off a scanned page"
           >
-            <ScanTextIcon className="size-3" aria-hidden />
+            <ScanTextIcon aria-hidden />
             OCR
-          </span>
+          </Badge>
         )}
       </p>
 
       {chunk.context && (
-        <p className="border-l-2 border-border pl-2 text-xs text-muted-foreground italic">
+        <p className="border-l-2 border-primary/25 pl-2 text-xs leading-relaxed text-muted-foreground italic">
           {chunk.context}
         </p>
       )}
 
-      <div>
-        <Button
-          variant="ghost"
-          size="xs"
-          className="-ml-1 text-muted-foreground"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((open) => !open)}
+      <Collapsible open={expanded} onOpenChange={setExpanded}>
+        <CollapsibleTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="xs"
+              className="-ml-1 text-muted-foreground"
+            />
+          }
         >
-          {expanded ? (
-            <ChevronDownIcon aria-hidden />
-          ) : (
-            <ChevronRightIcon aria-hidden />
-          )}
+          <ChevronRightIcon
+            aria-hidden
+            className="motion-safe:transition-transform group-aria-expanded/button:rotate-90"
+          />
           {expanded ? "Hide full text" : "Show full text"}
-        </Button>
-        {expanded && (
-          <p
-            className={cn(
-              "mt-1 rounded-md bg-muted/50 p-2 text-xs leading-relaxed",
-              "whitespace-pre-wrap",
-            )}
-          >
+        </CollapsibleTrigger>
+        <CollapsiblePanel>
+          <p className="mt-1 rounded-md bg-muted/50 p-2 text-xs leading-relaxed whitespace-pre-wrap">
             <HighlightedText text={chunk.content} query={query} />
           </p>
-        )}
-      </div>
+        </CollapsiblePanel>
+      </Collapsible>
     </article>
   );
 }

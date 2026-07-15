@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { IngestEvent, IngestRun } from "@/lib/api";
+import type { IngestEvent, IngestProgressEvent, IngestRun } from "@/lib/api";
 import {
   initialIngestView,
   MAX_LOG_LINES,
@@ -21,6 +21,24 @@ function run(state: string, overrides?: Partial<IngestRun>): IngestRun {
   };
 }
 
+/** A full progress frame: the wire shape carries every key, nulls included. */
+function progress(
+  data: Partial<IngestProgressEvent> & Pick<IngestProgressEvent, "stage">,
+): IngestEvent {
+  return {
+    type: "progress",
+    data: {
+      file: null,
+      outcome: null,
+      current: null,
+      total: null,
+      files_done: null,
+      files_total: null,
+      ...data,
+    },
+  };
+}
+
 function reduceAll(events: IngestEvent[], from: IngestView = initialIngestView): IngestView {
   return events.reduce(reduceIngestEvent, from);
 }
@@ -29,36 +47,30 @@ function reduceAll(events: IngestEvent[], from: IngestView = initialIngestView):
 function fullRunEvents(): IngestEvent[] {
   return [
     { type: "status", data: { run: run("running") } },
-    { type: "progress", data: { stage: "discover", total: 2 } },
-    { type: "progress", data: { stage: "parse", file: "a.txt" } },
-    { type: "progress", data: { stage: "chunk", file: "a.txt", total: 2 } },
-    { type: "progress", data: { stage: "contextualize", file: "a.txt", current: 0, total: 2 } },
-    { type: "progress", data: { stage: "contextualize", file: "a.txt", current: 1, total: 2 } },
-    { type: "progress", data: { stage: "contextualize", file: "a.txt", current: 2, total: 2 } },
-    { type: "progress", data: { stage: "embed", file: "a.txt", total: 2 } },
-    { type: "progress", data: { stage: "store", file: "a.txt", total: 2 } },
-    {
-      type: "progress",
-      data: {
-        stage: "file_done",
-        file: "a.txt",
-        outcome: "ingested",
-        total: 2,
-        files_done: 1,
-        files_total: 2,
-      },
-    },
+    progress({ stage: "discover", total: 2 }),
+    progress({ stage: "parse", file: "a.txt" }),
+    progress({ stage: "chunk", file: "a.txt", total: 2 }),
+    progress({ stage: "contextualize", file: "a.txt", current: 0, total: 2 }),
+    progress({ stage: "contextualize", file: "a.txt", current: 1, total: 2 }),
+    progress({ stage: "contextualize", file: "a.txt", current: 2, total: 2 }),
+    progress({ stage: "embed", file: "a.txt", total: 2 }),
+    progress({ stage: "store", file: "a.txt", total: 2 }),
+    progress({
+      stage: "file_done",
+      file: "a.txt",
+      outcome: "ingested",
+      total: 2,
+      files_done: 1,
+      files_total: 2,
+    }),
     { type: "log", data: { level: "INFO", message: "b.txt: unchanged — skipping" } },
-    {
-      type: "progress",
-      data: {
-        stage: "file_done",
-        file: "b.txt",
-        outcome: "skipped",
-        files_done: 2,
-        files_total: 2,
-      },
-    },
+    progress({
+      stage: "file_done",
+      file: "b.txt",
+      outcome: "skipped",
+      files_done: 2,
+      files_total: 2,
+    }),
     {
       type: "status",
       data: {
@@ -139,7 +151,7 @@ describe("reduceIngestEvent", () => {
   it("a failed run carries its error and clears the activity line", () => {
     const view = reduceAll([
       { type: "status", data: { run: run("running") } },
-      { type: "progress", data: { stage: "parse", file: "a.txt" } },
+      progress({ stage: "parse", file: "a.txt" }),
       { type: "status", data: { run: run("failed", { error: "RuntimeError: es fell over" }) } },
     ]);
     expect(view.run?.state).toBe("failed");
@@ -158,10 +170,10 @@ describe("reduceIngestEvent", () => {
   });
 
   it("ignores unknown progress stages (forward compatibility)", () => {
-    const view = reduceIngestEvent(initialIngestView, {
-      type: "progress",
-      data: { stage: "quantum_dedupe" },
-    });
+    const view = reduceIngestEvent(
+      initialIngestView,
+      progress({ stage: "quantum_dedupe" }),
+    );
     expect(view).toEqual(initialIngestView);
   });
 

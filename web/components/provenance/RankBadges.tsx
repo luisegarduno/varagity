@@ -1,12 +1,17 @@
+import { Badge } from "@/components/ui/badge";
 import type { RetrievalTrace } from "@/lib/api";
 import { buildTraceBadges, type BadgeTone } from "@/lib/trace";
 import { cn } from "@/lib/utils";
 
-const TONE_CLASSES: Record<BadgeTone, string> = {
-  neutral: "bg-muted text-muted-foreground",
-  muted: "bg-muted text-muted-foreground italic",
-  up: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  down: "bg-rose-500/10 text-rose-600 dark:text-rose-400",
+/** lib/trace's tone vocabulary mapped onto the Badge variants. */
+const TONE_VARIANTS: Record<
+  BadgeTone,
+  React.ComponentProps<typeof Badge>["variant"]
+> = {
+  neutral: "default",
+  muted: "default",
+  up: "success",
+  down: "destructive",
 };
 
 /**
@@ -19,17 +24,15 @@ export function RankBadges({ trace }: { trace: RetrievalTrace }) {
   return (
     <span className="flex flex-wrap items-center gap-1">
       {badges.map((badge) => (
-        <span
+        <Badge
           key={badge.kind}
           title={badge.detail}
           data-kind={badge.kind}
-          className={cn(
-            "rounded border border-border/50 px-1.5 py-px font-mono text-[11px] leading-4 whitespace-nowrap",
-            TONE_CLASSES[badge.tone],
-          )}
+          variant={TONE_VARIANTS[badge.tone]}
+          className={cn("font-mono", badge.tone === "muted" && "italic")}
         >
           {badge.label}
-        </span>
+        </Badge>
       ))}
     </span>
   );

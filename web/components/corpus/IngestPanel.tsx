@@ -2,6 +2,7 @@
 
 import { PlayIcon, RefreshCwIcon } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { IngestView } from "@/lib/ingest-reducer";
 import { cn } from "@/lib/utils";
@@ -12,6 +13,12 @@ const STAGE_LABELS: Record<string, string> = {
   contextualize: "contextualizing",
   embed: "embedding",
   store: "storing",
+};
+
+const STATE_BADGE_VARIANT: Record<string, "accent" | "success" | "destructive"> = {
+  running: "accent",
+  completed: "success",
+  failed: "destructive",
 };
 
 /**
@@ -63,41 +70,48 @@ export function IngestPanel({
         </p>
       ) : (
         <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-2 text-xs">
-            <span
-              className={cn(
-                "rounded-full px-2 py-0.5 font-medium",
-                running && "animate-pulse bg-primary/15",
-                run.state === "completed" && "bg-accent",
-                run.state === "failed" && "bg-destructive/15",
-              )}
-            >
-              {run.state}
-            </span>
-            <span className="text-muted-foreground">
+          {/* role=status: run-state flips (running → completed/failed) are
+              announced politely; the per-file churn below stays quiet. */}
+          <div role="status" className="flex items-center gap-2 text-xs">
+            <Badge variant={STATE_BADGE_VARIANT[run.state] ?? "default"}>
+              {running ? <span className="shimmer">running</span> : run.state}
+            </Badge>
+            <span className="font-mono text-muted-foreground">
               run {run.run_id}
               {run.reingest ? " · re-ingest" : ""}
             </span>
           </div>
 
           {view.filesTotal !== null && view.filesTotal > 0 && (
-            <div aria-label="Files progress">
-              <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-                <span>
+            <div>
+              <div className="mb-1.5 flex justify-between gap-3 text-xs text-muted-foreground">
+                <span className="shrink-0 tabular-nums">
                   {view.filesDone} / {view.filesTotal} files
                 </span>
                 {running && view.currentFile && (
-                  <span>
+                  <span className="min-w-0 truncate font-mono">
                     {STAGE_LABELS[view.currentStage ?? ""] ?? view.currentStage}{" "}
-                    <span className="font-medium">{view.currentFile}</span>
-                    {view.contextualize &&
-                      ` (${view.contextualize.done}/${view.contextualize.total} chunks)`}
+                    <span className="text-foreground">{view.currentFile}</span>
+                    {view.contextualize && (
+                      <span className="tabular-nums">
+                        {" "}
+                        ({view.contextualize.done}/{view.contextualize.total} chunks)
+                      </span>
+                    )}
                   </span>
                 )}
               </div>
-              <div className="h-2 overflow-hidden rounded-full bg-muted">
+              <div
+                role="progressbar"
+                aria-label="Files progress"
+                aria-valuemin={0}
+                aria-valuemax={view.filesTotal}
+                aria-valuenow={view.filesDone}
+                aria-valuetext={`${view.filesDone} of ${view.filesTotal} files`}
+                className="h-1.5 overflow-hidden rounded-full bg-muted"
+              >
                 <div
-                  className="h-full rounded-full bg-primary transition-[width] duration-300"
+                  className="h-full rounded-full bg-primary transition-[width] duration-300 motion-reduce:transition-none"
                   style={{
                     width: `${Math.min(100, (view.filesDone / view.filesTotal) * 100)}%`,
                   }}
@@ -126,7 +140,12 @@ export function IngestPanel({
               ).map(([label, count]) => (
                 <div key={label} className="flex gap-1">
                   <dt className="text-muted-foreground">{label}</dt>
-                  <dd className={cn("font-medium", label === "failed" && count > 0 && "text-destructive")}>
+                  <dd
+                    className={cn(
+                      "font-medium tabular-nums",
+                      label === "failed" && count > 0 && "text-destructive",
+                    )}
+                  >
                     {count}
                   </dd>
                 </div>
@@ -136,10 +155,10 @@ export function IngestPanel({
 
           {view.logs.length > 0 && (
             <details className="text-xs" open={running}>
-              <summary className="cursor-pointer text-muted-foreground">
+              <summary className="cursor-pointer text-muted-foreground transition-colors select-none hover:text-foreground">
                 Pipeline log ({view.logs.length})
               </summary>
-              <div className="mt-1 max-h-48 overflow-y-auto rounded-md border border-border bg-muted/40 p-2 font-mono leading-relaxed">
+              <div className="mt-1.5 max-h-48 overflow-y-auto rounded-md border border-border bg-muted/30 p-2 font-mono text-xs leading-relaxed text-muted-foreground scroll-fade-y">
                 {view.logs.map((line, index) => (
                   <p
                     key={index}

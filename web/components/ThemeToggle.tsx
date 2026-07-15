@@ -1,19 +1,35 @@
 "use client";
 
-import { MoonIcon, SunIcon } from "lucide-react";
+import { MonitorIcon, MoonIcon, SunIcon } from "lucide-react";
 import { useTheme } from "next-themes";
+import { useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-/** Light / dark / system selector (next-themes). */
+// A constant "am I hydrated?" external store: the client snapshot is
+// always true, the server snapshot false — the SSR-safe mounted check
+// (next-themes only knows the real theme on the client).
+const subscribeNever = () => () => {};
+
+/**
+ * Light / dark / system selector (next-themes): the trigger shows the
+ * current choice's icon, the menu checks the active item.
+ */
 export function ThemeToggle() {
-  const { setTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
+  const mounted = useSyncExternalStore(
+    subscribeNever,
+    () => true,
+    () => false,
+  );
+  const current = mounted ? (theme ?? "system") : "system";
 
   return (
     <DropdownMenu>
@@ -22,19 +38,29 @@ export function ThemeToggle() {
           <Button variant="ghost" size="icon-sm" aria-label="Change theme" />
         }
       >
-        <SunIcon className="size-4 scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90" />
-        <MoonIcon className="absolute size-4 scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
+        {current === "light" ? (
+          <SunIcon className="size-4" />
+        ) : current === "dark" ? (
+          <MoonIcon className="size-4" />
+        ) : (
+          <MonitorIcon className="size-4" />
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top">
-        <DropdownMenuItem onClick={() => setTheme("light")}>
-          Light
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setTheme("dark")}>
-          Dark
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setTheme("system")}>
-          System
-        </DropdownMenuItem>
+        <DropdownMenuRadioGroup
+          value={current}
+          onValueChange={(value) => setTheme(String(value))}
+        >
+          <DropdownMenuRadioItem value="light">
+            <SunIcon /> Light
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="dark">
+            <MoonIcon /> Dark
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="system">
+            <MonitorIcon /> System
+          </DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>
   );

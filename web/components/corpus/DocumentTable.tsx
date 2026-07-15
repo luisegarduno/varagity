@@ -3,15 +3,18 @@
 import { Trash2Icon } from "lucide-react";
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError, deleteDocument, type DocumentOut } from "@/lib/api";
 
 /**
@@ -54,7 +57,18 @@ export function DocumentTable({
       <h2 className="text-sm font-semibold">Documents</h2>
 
       {documents === null ? (
-        <p className="animate-pulse text-xs text-muted-foreground">Loading…</p>
+        <div className="overflow-hidden rounded-lg border border-border">
+          {[0, 1, 2].map((row) => (
+            <div
+              key={row}
+              className="flex items-center gap-4 border-t border-border px-3 py-3 first:border-t-0"
+            >
+              <Skeleton className="h-4 w-44" />
+              <Skeleton className="h-4 w-10" />
+              <Skeleton className="ml-auto h-4 w-28" />
+            </div>
+          ))}
+        </div>
       ) : documents.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           Nothing ingested yet — upload files above, then run an ingest.
@@ -62,30 +76,37 @@ export function DocumentTable({
       ) : (
         <div className="overflow-x-auto rounded-lg border border-border">
           <table className="w-full text-left text-sm">
-            <thead className="bg-muted/50 text-xs text-muted-foreground">
+            <thead className="bg-muted/40 text-xs text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 font-medium">File</th>
                 <th className="px-3 py-2 font-medium">Type</th>
                 <th className="px-3 py-2 font-medium">Chunks</th>
                 <th className="px-3 py-2 font-medium">Extraction</th>
                 <th className="px-3 py-2 font-medium">Ingested</th>
-                <th className="px-3 py-2" />
+                <th className="px-3 py-2">
+                  <span className="sr-only">Actions</span>
+                </th>
               </tr>
             </thead>
             <tbody>
               {documents.map((document) => (
-                <tr key={document.doc_id} className="border-t border-border">
+                <tr
+                  key={document.doc_id}
+                  className="border-t border-border transition-colors hover:bg-muted/40"
+                >
                   <td className="max-w-64 truncate px-3 py-2" title={document.source}>
                     {document.file_name}
                   </td>
                   <td className="px-3 py-2">
-                    <span className="rounded bg-accent px-1.5 py-0.5 font-mono text-xs uppercase">
+                    <Badge variant="outline" className="font-mono uppercase">
                       {document.file_type}
-                    </span>
+                    </Badge>
                   </td>
-                  <td className="px-3 py-2 tabular-nums">{document.n_chunks}</td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">
-                    {extractionMix(document)}
+                  <td className="px-3 py-2 font-mono text-xs tabular-nums">
+                    {document.n_chunks}
+                  </td>
+                  <td className="px-3 py-2">
+                    <ExtractionMix document={document} />
                   </td>
                   <td
                     className="px-3 py-2 text-xs text-muted-foreground"
@@ -114,46 +135,80 @@ export function DocumentTable({
         </div>
       )}
 
-      <Dialog open={target !== null} onOpenChange={(open) => !open && setTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete “{target?.file_name}”?</DialogTitle>
-            <DialogDescription>
+      <AlertDialog
+        open={target !== null}
+        onOpenChange={(open) => {
+          if (!open) setTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete “{target?.file_name}”?</AlertDialogTitle>
+            <AlertDialogDescription>
               Removes its {target?.n_chunks ?? 0} chunk(s) from both stores, so
               it can no longer ground answers. Persisted conversations keep
               their evidence snapshots.
-            </DialogDescription>
-          </DialogHeader>
-          <label className="flex items-center gap-2 text-sm">
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <label className="flex items-start gap-2 text-sm">
             <input
               type="checkbox"
+              className="mt-0.5 size-4 accent-primary"
               checked={removeFile}
               onChange={(event) => setRemoveFile(event.target.checked)}
             />
-            Also remove the file from the corpus directory (otherwise the next
-            ingest re-adds it)
+            <span>
+              Also remove the file from the corpus directory (otherwise the next
+              ingest re-adds it)
+            </span>
           </label>
           {error && (
             <p role="alert" className="text-sm text-destructive">
               {error}
             </p>
           )}
-          <DialogFooter showCloseButton>
-            <Button variant="destructive" onClick={() => void confirmDelete()} disabled={busy}>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>
+              Cancel
+            </AlertDialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => void confirmDelete()}
+              disabled={busy}
+            >
               {busy ? "Deleting…" : "Delete"}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }
 
-/** Render the extraction mix compactly, e.g. `text ×3 · ocr ×1`. */
-function extractionMix(document: DocumentOut): string {
+/**
+ * Render the extraction mix: plain-text methods stay quiet mono text, any
+ * OCR-fallback chunks get a warning badge (the lower-fidelity path).
+ */
+function ExtractionMix({ document }: { document: DocumentOut }) {
   const entries = Object.entries(document.extraction_mix);
-  if (entries.length === 0) return "—";
-  return entries
-    .map(([method, count]) => `${method === "ocr_fallback" ? "ocr" : method} ×${count}`)
-    .join(" · ");
+  if (entries.length === 0) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  const ocrCount = document.extraction_mix.ocr_fallback ?? 0;
+  return (
+    <span className="flex flex-wrap items-center gap-1.5">
+      {entries
+        .filter(([method]) => method !== "ocr_fallback")
+        .map(([method, count]) => (
+          <span key={method} className="font-mono text-xs text-muted-foreground">
+            {method} ×{count}
+          </span>
+        ))}
+      {ocrCount > 0 && (
+        <Badge variant="warning" className="font-mono">
+          ocr ×{ocrCount}
+        </Badge>
+      )}
+    </span>
+  );
 }

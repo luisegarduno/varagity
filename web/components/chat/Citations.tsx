@@ -54,11 +54,14 @@ export function CitationChip({
       title={`Show evidence #${chunkIndex + 1} — ${citation.path}`}
       onClick={() => onCite(chunkIndex)}
       className={cn(
-        "inline-flex max-w-full cursor-pointer items-center gap-1 rounded-md border border-border bg-secondary px-1.5 align-baseline font-mono text-xs text-secondary-foreground",
-        "transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
+        // The Badge accent recipe, interactive: the chip is the doorway
+        // into the evidence panel, so it carries the accent quietly.
+        "inline-flex max-w-full cursor-pointer items-center gap-1 rounded-md border border-primary/15 bg-primary/10 px-1.5 align-baseline font-mono text-xs text-primary",
+        "dark:border-primary/25 dark:bg-primary/15 dark:text-[oklch(0.78_calc(var(--accent-chroma)*0.7)_var(--accent-hue))]",
+        "transition-colors hover:bg-primary/15 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none dark:hover:bg-primary/25",
       )}
     >
-      <span className="text-muted-foreground">#{chunkIndex + 1}</span>
+      <span className="opacity-70 tabular-nums">#{chunkIndex + 1}</span>
       <span className="truncate">{citation.label}</span>
     </button>
   );

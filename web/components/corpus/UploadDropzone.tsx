@@ -3,6 +3,7 @@
 import { UploadIcon } from "lucide-react";
 import { useRef, useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import {
   ApiError,
   uploadDocuments,
@@ -17,6 +18,13 @@ interface UploadOutcome {
   ok: boolean;
   detail: string;
 }
+
+/** Human phrasing for the client-side rejection reasons (lib/upload.ts). */
+const REJECTION_LABELS: Record<string, string> = {
+  extension_not_allowed: "file type not allowed",
+  file_too_large: "over the size limit",
+  invalid_filename: "invalid file name",
+};
 
 /**
  * Drag-drop / click-to-pick upload into `DOCS_PATH` (spec_v2 §4.2).
@@ -51,7 +59,15 @@ export function UploadDropzone({
           )
         : { fileName: file.name, ok: true as const };
       if (check.ok) accepted.push(file);
-      else rejected.push({ fileName: check.fileName, ok: false, detail: check.reason ?? "rejected" });
+      else
+        rejected.push({
+          fileName: check.fileName,
+          ok: false,
+          detail:
+            (check.reason && REJECTION_LABELS[check.reason]) ??
+            check.reason ??
+            "rejected",
+        });
     }
 
     let stored: UploadOutcome[] = [];
@@ -105,19 +121,31 @@ export function UploadDropzone({
           event.preventDefault();
           setDragging(true);
         }}
-        onDragLeave={() => setDragging(false)}
+        onDragLeave={(event) => {
+          // Ignore leave events fired by moving over the dropzone's children.
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setDragging(false);
+          }
+        }}
         onDrop={(event) => {
           event.preventDefault();
           setDragging(false);
           void handleFiles(Array.from(event.dataTransfer.files));
         }}
         className={cn(
-          "flex cursor-pointer flex-col items-center gap-1 rounded-lg border-2 border-dashed border-border p-6 text-center transition-colors",
-          dragging ? "border-primary bg-accent/50" : "hover:bg-accent/30",
+          "flex cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed border-border p-8 text-center select-none motion-safe:transition-colors motion-safe:duration-150",
+          dragging
+            ? "border-ring bg-primary/5"
+            : "hover:border-muted-foreground/40 hover:bg-muted/30",
           busy && "pointer-events-none opacity-60",
         )}
       >
-        <UploadIcon className="size-5 text-muted-foreground" aria-hidden />
+        <span
+          aria-hidden
+          className="flex size-9 items-center justify-center rounded-full bg-muted"
+        >
+          <UploadIcon className="size-4 text-muted-foreground" />
+        </span>
         <p className="text-sm font-medium">
           {busy ? "Uploading…" : "Drop files here or click to upload"}
         </p>
@@ -136,16 +164,18 @@ export function UploadDropzone({
       </div>
 
       {outcomes.length > 0 && (
-        <ul className="mt-2 flex flex-col gap-1 text-xs" aria-label="Upload outcomes">
+        <ul className="mt-2 flex flex-col gap-1" aria-label="Upload outcomes">
           {outcomes.map((outcome, index) => (
             <li
               key={`${outcome.fileName}-${index}`}
-              className={cn(
-                "flex items-baseline gap-2 rounded px-2 py-1",
-                outcome.ok ? "bg-accent/40" : "bg-destructive/10",
-              )}
+              className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs"
             >
-              <span className="font-medium">{outcome.fileName}</span>
+              <Badge variant={outcome.ok ? "success" : "destructive"}>
+                {outcome.ok ? "uploaded" : "rejected"}
+              </Badge>
+              <span className="max-w-56 truncate font-medium" title={outcome.fileName}>
+                {outcome.fileName}
+              </span>
               <span className="text-muted-foreground">{outcome.detail}</span>
             </li>
           ))}

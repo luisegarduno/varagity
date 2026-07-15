@@ -5,6 +5,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DocumentTable } from "@/components/corpus/DocumentTable";
 import { IngestPanel } from "@/components/corpus/IngestPanel";
 import { UploadDropzone } from "@/components/corpus/UploadDropzone";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   ApiError,
   getConfig,
@@ -26,13 +28,15 @@ import { notifySettingsChanged, onSettingsChanged } from "@/lib/settings-bus";
  * The corpus management page (spec_v2 §4.2): upload dropzone, live ingest
  * progress (the status SSE replays, so reloading mid-run re-renders the
  * same picture), the ingested-document table, and the stale-corpus
- * "Re-ingest to apply" affordance.
+ * "Re-ingest to apply" affordance. An empty corpus gets the guided
+ * upload → ingest → ask flow instead of a bare table.
  */
 export function CorpusView() {
   const [config, setConfig] = useState<ConfigResponse | null>(null);
   const [documents, setDocuments] = useState<DocumentOut[] | null>(null);
   const [ingest, setIngest] = useState<IngestView>(initialIngestView);
   const [corpusStale, setCorpusStale] = useState(false);
+  const [hasUploaded, setHasUploaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const followingRef = useRef(false);
 
@@ -112,23 +116,32 @@ export function CorpusView() {
     [followIngest],
   );
 
+  const handleUploaded = useCallback(() => {
+    setHasUploaded(true);
+    refreshDocuments();
+  }, [refreshDocuments]);
+
   const isRunning = ingest.run?.state === "running";
+  // The guided first-run flow: corpus confirmed empty and nothing has run
+  // (a live or terminal run renders the normal layout with its panel).
+  const guided =
+    documents !== null && documents.length === 0 && ingest.run === null;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto">
-      <header className="border-b border-border p-4">
-        <h1 className="text-lg font-semibold tracking-tight">Corpus</h1>
-        <p className="text-sm text-muted-foreground">
+      <header className="border-b border-border px-4 py-5 sm:px-6">
+        <h1 className="font-heading text-2xl font-normal">Corpus</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
           Upload documents, ingest them into both stores, and manage what the
           assistant can ground on.
         </p>
       </header>
 
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 p-4">
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 p-4 sm:p-6">
         {error && (
           <p
             role="alert"
-            className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm"
+            className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"
           >
             {error}
           </p>
@@ -137,33 +150,91 @@ export function CorpusView() {
         {corpusStale && (
           <div
             role="status"
-            className="flex items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm"
           >
-            <span>
-              Ingest-time settings changed since the last ingest — the corpus is
-              <strong> stale</strong>. Re-ingest to apply them.
+            <span className="flex min-w-0 items-center gap-2.5">
+              <Badge variant="warning">stale</Badge>
+              <span>
+                Ingest-time settings changed since the last ingest — re-ingest
+                to apply them.
+              </span>
             </span>
-            <button
-              type="button"
-              className="shrink-0 rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
+            <Button
+              variant="outline"
+              size="sm"
               disabled={isRunning}
               onClick={() => void handleStartIngest(true)}
             >
               Re-ingest to apply
-            </button>
+            </Button>
           </div>
         )}
 
-        <UploadDropzone config={config} onUploaded={refreshDocuments} />
+        {guided ? (
+          <section
+            aria-label="Getting started"
+            className="flex flex-col gap-6 rounded-xl border border-border bg-card p-6 sm:p-8"
+          >
+            <div>
+              <h2 className="font-heading text-xl font-normal">
+                Build your corpus
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Nothing is ingested yet — ground the assistant in your own
+                documents in three steps.
+              </p>
+            </div>
 
-        <IngestPanel
-          view={ingest}
-          disabled={isRunning}
-          onIngest={() => void handleStartIngest(false)}
-          onReingest={() => void handleStartIngest(true)}
-        />
+            <ol className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:gap-6">
+              {["Upload documents", "Run an ingest", "Ask questions"].map(
+                (step, index) => (
+                  <li key={step} className="flex items-center gap-2">
+                    <span className="flex size-5 shrink-0 items-center justify-center rounded-full border border-border font-mono text-[10px]">
+                      {index + 1}
+                    </span>
+                    {step}
+                  </li>
+                ),
+              )}
+            </ol>
 
-        <DocumentTable documents={documents} onChanged={refreshDocuments} />
+            <UploadDropzone config={config} onUploaded={handleUploaded} />
+
+            {hasUploaded ? (
+              <IngestPanel
+                view={ingest}
+                disabled={isRunning}
+                onIngest={() => void handleStartIngest(false)}
+                onReingest={() => void handleStartIngest(true)}
+              />
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Files already in the corpus directory?{" "}
+                <button
+                  type="button"
+                  className="underline underline-offset-2 transition-colors hover:text-foreground"
+                  onClick={() => void handleStartIngest(false)}
+                >
+                  Run an ingest
+                </button>
+                .
+              </p>
+            )}
+          </section>
+        ) : (
+          <>
+            <UploadDropzone config={config} onUploaded={handleUploaded} />
+
+            <IngestPanel
+              view={ingest}
+              disabled={isRunning}
+              onIngest={() => void handleStartIngest(false)}
+              onReingest={() => void handleStartIngest(true)}
+            />
+
+            <DocumentTable documents={documents} onChanged={refreshDocuments} />
+          </>
+        )}
       </div>
     </div>
   );
