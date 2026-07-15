@@ -8,14 +8,23 @@ pages are generated from the same text a reader sees in the source.
 One page per package:
 
 - [Configuration & logging](config.md) — `config`, `logging_setup`, `tokens`
-- [Model clients](models.md) — the llama.cpp / infinity clients and factory
-- [Ingestion](ingest.md) — discovery, parsers (text, PDF/OCR), the loader
-- [Chunking](chunking.md) — strategy registry + `recursive_character`
+- [Model clients](models.md) — the llama.cpp / infinity clients (chat,
+  embeddings, rerank), the streaming `<think>` splitter, and the factory
+- [Ingestion](ingest.md) — discovery, parsers (text, PDF/OCR, office, web —
+  over a shared Docling core), the loader
+- [Chunking](chunking.md) — strategy registry + the five strategies
+  (`recursive_character`, `token_based`, `markdown_aware`, `docling_hybrid`,
+  `semantic`)
 - [Contextual Retrieval](context.md) — `situate_context()`
-- [Stores](stores.md) — `ChunkRecord`, pgvector, Elasticsearch BM25
-- [Retrieval](retrieval.md) — semantic / bm25 / hybrid + fusion
+- [Stores](stores.md) — `ChunkRecord`, pgvector, Elasticsearch BM25,
+  conversation persistence, app settings, the migration runner
+- [Retrieval](retrieval.md) — semantic / bm25 / hybrid + fusion, and the
+  `reranked` composition over them
 - [Generation](generation.md) — context prompt & grounded answers
 - [Orchestration](pipeline.md) — the Prefect flows
-- [HTTP API](api.md) — the FastAPI service: SSE chat, conversations, health
+- [HTTP API](api.md) — the FastAPI service: SSE chat, conversations,
+  settings, documents/corpus, ingest, health
+- [Observability](observability.md) — the Prometheus metric catalog and its
+  recording helpers
 - [Evaluation](eval.md) — golden set, metrics, OCR benchmark, testcontainers
 - [CLI & debug output](cli.md) — subcommands and the `v_<name>` renderers
