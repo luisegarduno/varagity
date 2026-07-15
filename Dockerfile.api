@@ -4,6 +4,14 @@
 # Use a Python image with uv pre-installed (same base as the app image)
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
+# Tesseract for the pluggable OCR fallback, mirroring the app image: the API
+# runs the same parsers (v2 Phase 8) and the settings drawer can select
+# OCR_ENGINE=tesseract at runtime, so both engines must exist here too
+# (EasyOCR arrives as a pip dependency of docling).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+ && rm -rf /var/lib/apt/lists/*
+
 # Setup a non-root user. Its uid/gid default to 1000 — the first (and on a
 # single-user box, the only) host account — because the ./docs bind mount is
 # owned by the host user and the API must WRITE it (uploads + delete, v2
