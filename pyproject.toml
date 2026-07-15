@@ -41,6 +41,7 @@ dev = [
     "mkdocs-material>=9.7.6",
     "mkdocstrings[python]>=1.0.4",
     "mypy>=2.2.0",
+    "neoteroi-mkdocs>=1.2.0",
     "pre-commit>=4.6.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.0",
@@ -108,5 +109,5 @@ markers = [
 addopts = "--cov=varagity --cov-report=term-missing -m 'not integration and not e2e'"
 
 [tool.coverage.report]
-# The spec §15.3 floor; ratchet upward as coverage grows (unit suite ~83%).
+# The spec §15.3 floor; ratchet upward as coverage grows (unit suite ~87%).
 fail_under = 80

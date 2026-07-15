@@ -1,0 +1,1874 @@
+{
+  "components": {
+    "schemas": {
+      "Body_upload_documents_api_documents_post": {
+        "properties": {
+          "files": {
+            "items": {
+              "contentMediaType": "application/octet-stream",
+              "type": "string"
+            },
+            "title": "Files",
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "title": "Body_upload_documents_api_documents_post",
+        "type": "object"
+      },
+      "ChatOverrides": {
+        "additionalProperties": false,
+        "description": "Per-request overrides of query-time settings (spec_v2 \u00a74.2).\n\nPhase 2 honors the two knobs the thin client needs; the persisted\nruntime-override layer (spec_v2 \u00a74.7) lands with its GUI in Phase 8.\nUnknown fields are rejected so a typo'd override fails loudly instead\nof silently running with defaults.\n\nAttributes:\n    retrieval_method: Registry name of the retrieval method for this\n        question only (``semantic`` | ``bm25`` | ``hybrid`` |\n        ``reranked``).\n    top_k: Number of chunks retrieved for this question only.",
+        "properties": {
+          "retrieval_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Method"
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K"
+          }
+        },
+        "title": "ChatOverrides",
+        "type": "object"
+      },
+      "ChatRequest": {
+        "description": "Body of ``POST /api/chat`` (spec_v2 \u00a74.2).\n\nAttributes:\n    query: The user's question.\n    conversation_id: Existing conversation to append the turn to; a new\n        conversation is created when omitted.\n    overrides: Optional per-request setting overrides.",
+        "properties": {
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "overrides": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatOverrides"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "query": {
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "ChatRequest",
+        "type": "object"
+      },
+      "ConfigResponse": {
+        "description": "Response of ``GET /api/config`` \u2014 static capabilities (spec_v2 \u00a74.2).\n\nThe GUI builds its settings controls from this, so a newly registered\nimplementation (one file + one import) appears in the UI automatically.\n\nAttributes:\n    retrievers: Registered retrieval method names.\n    chunkers: Registered chunking strategy names.\n    ocr_engines: Available OCR engine names.\n    model_types: Valid ``get_model`` types.\n    llm_model_types: The chat-capable subset of ``model_types`` \u2014 the\n        ``CHAT_MODEL_TYPE`` vocabulary the composer quick-toggle offers.\n    ranges: Valid ranges for the numeric query-time knobs, keyed by\n        setting name (lowercase).\n    upload_max_mb: Effective per-file upload cap (``UPLOAD_MAX_MB``) \u2014\n        the dropzone validates against it client-side.\n    allowed_extensions: Effective ingestable extensions\n        (``ALLOWED_EXTENSIONS``, normalized with leading dots), sorted.",
+        "properties": {
+          "allowed_extensions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Extensions",
+            "type": "array"
+          },
+          "chunkers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Chunkers",
+            "type": "array"
+          },
+          "llm_model_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Llm Model Types",
+            "type": "array"
+          },
+          "model_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Model Types",
+            "type": "array"
+          },
+          "ocr_engines": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ocr Engines",
+            "type": "array"
+          },
+          "ranges": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/NumericRange"
+            },
+            "title": "Ranges",
+            "type": "object"
+          },
+          "retrievers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retrievers",
+            "type": "array"
+          },
+          "upload_max_mb": {
+            "title": "Upload Max Mb",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "retrievers",
+          "chunkers",
+          "ocr_engines",
+          "model_types",
+          "llm_model_types",
+          "ranges",
+          "upload_max_mb",
+          "allowed_extensions"
+        ],
+        "title": "ConfigResponse",
+        "type": "object"
+      },
+      "ConversationCreateRequest": {
+        "description": "Body of ``POST /api/conversations``.\n\nAttributes:\n    title: Optional explicit title; defaults to the placeholder the\n        first chat turn auto-replaces.",
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "ConversationCreateRequest",
+        "type": "object"
+      },
+      "ConversationDetailOut": {
+        "description": "Response of ``GET /api/conversations/{id}`` \u2014 the full transcript.\n\nAttributes:\n    conversation_id: The app-generated id.\n    title: Current title.\n    created_at: Creation timestamp.\n    updated_at: Last-turn timestamp.\n    messages: All messages, oldest first, each with its sources.",
+        "properties": {
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/MessageOut"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "title",
+          "created_at",
+          "updated_at",
+          "messages"
+        ],
+        "title": "ConversationDetailOut",
+        "type": "object"
+      },
+      "ConversationSummaryOut": {
+        "description": "One conversation in the ``GET /api/conversations`` list.\n\nAttributes:\n    conversation_id: The app-generated id.\n    title: Current title.\n    created_at: Creation timestamp.\n    updated_at: Last-turn timestamp (list ordering key).\n    message_count: Number of persisted messages.",
+        "properties": {
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "message_count": {
+            "title": "Message Count",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "title",
+          "created_at",
+          "updated_at",
+          "message_count"
+        ],
+        "title": "ConversationSummaryOut",
+        "type": "object"
+      },
+      "DeltaEvent": {
+        "description": "Payload of the SSE ``reasoning`` and ``token`` events.\n\nAttributes:\n    delta: The next text fragment, in stream order.",
+        "properties": {
+          "delta": {
+            "title": "Delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delta"
+        ],
+        "title": "DeltaEvent",
+        "type": "object"
+      },
+      "DocumentDeleteResponse": {
+        "description": "Response of ``DELETE /api/documents/{doc_id}`` (spec_v2 \u00a74.2).\n\nAttributes:\n    doc_id: The deleted document.\n    chunks_deleted: Chunks removed (the pgvector count; the\n        Elasticsearch ``delete_by_query`` removes the same identity-\n        addressed set).\n    file_removed: Whether the source file was also deleted from\n        ``DOCS_PATH`` (requested via ``?remove_file=true`` and only\n        honored inside the corpus directory).",
+        "properties": {
+          "chunks_deleted": {
+            "title": "Chunks Deleted",
+            "type": "integer"
+          },
+          "doc_id": {
+            "title": "Doc Id",
+            "type": "string"
+          },
+          "file_removed": {
+            "title": "File Removed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "doc_id",
+          "chunks_deleted",
+          "file_removed"
+        ],
+        "title": "DocumentDeleteResponse",
+        "type": "object"
+      },
+      "DocumentOut": {
+        "description": "One corpus document in the ``GET /api/documents`` list (spec_v2 \u00a74.2).\n\nAttributes:\n    doc_id: The document's stable id.\n    file_name: Base name of the source file.\n    source: Absolute file path recorded at ingest time.\n    file_type: File extension without the dot (``pdf``, ``docx``, \u2026).\n    n_chunks: Chunks ingested (``0`` = no extractable text).\n    ingested_at: When the document (last) landed in the stores.\n    extraction_mix: Chunk count per extraction method (``text`` /\n        ``ocr_fallback``).",
+        "properties": {
+          "doc_id": {
+            "title": "Doc Id",
+            "type": "string"
+          },
+          "extraction_mix": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Extraction Mix",
+            "type": "object"
+          },
+          "file_name": {
+            "title": "File Name",
+            "type": "string"
+          },
+          "file_type": {
+            "title": "File Type",
+            "type": "string"
+          },
+          "ingested_at": {
+            "format": "date-time",
+            "title": "Ingested At",
+            "type": "string"
+          },
+          "n_chunks": {
+            "title": "N Chunks",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "doc_id",
+          "file_name",
+          "source",
+          "file_type",
+          "n_chunks",
+          "ingested_at",
+          "extraction_mix"
+        ],
+        "title": "DocumentOut",
+        "type": "object"
+      },
+      "DoneEvent": {
+        "description": "Payload of the terminal SSE ``done`` event (spec_v2 \u00a74.3).\n\nAttributes:\n    message_id: Persisted assistant message id.\n    conversation_id: The conversation the turn was persisted into (the\n        one just created, when the request named none).\n    answer: The full, ``<think>``-stripped answer (authoritative \u2014 the\n        streamed deltas are best-effort display).\n    usage: Token usage and per-stage latency.",
+        "properties": {
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/UsageInfo"
+          }
+        },
+        "required": [
+          "message_id",
+          "conversation_id",
+          "answer",
+          "usage"
+        ],
+        "title": "DoneEvent",
+        "type": "object"
+      },
+      "ErrorBody": {
+        "description": "The machine-readable error inside the envelope (spec_v2 \u00a74.1).\n\nAttributes:\n    code: Stable, machine-readable code (e.g. ``\"es_unreachable\"``) the\n        GUI maps to an actionable banner.\n    message: Human-readable detail.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorBody",
+        "type": "object"
+      },
+      "ErrorEvent": {
+        "description": "Payload of the in-band SSE ``error`` event.\n\nEmitted when the pipeline fails after the stream already opened (the\n200 headers are gone \u2014 status can't change; spec_v2 plan decision #7).\n\nAttributes:\n    code: Stable, machine-readable code.\n    message: Human-readable detail.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorEvent",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "The structured error envelope every non-2xx response carries.\n\nAttributes:\n    error: The error body.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "Response of ``GET /api/health``.\n\nThe endpoint answers ``200`` whenever the API process itself is alive \u2014\nper-dependency state lives in the body, so a flapping backing service\ndoesn't mark the ``api`` container unhealthy.\n\nAttributes:\n    ok: ``True`` when every dependency probe succeeded.\n    services: Probe result per service name (``llamacpp``,\n        ``infinity``, ``postgres``, ``elasticsearch``, ``prefect``).",
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "services": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ServiceHealth"
+            },
+            "title": "Services",
+            "type": "object"
+          }
+        },
+        "required": [
+          "ok",
+          "services"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "IngestLogEvent": {
+        "description": "Payload of the ingest-status SSE ``log`` event.\n\nRelayed ``varagity.ingest`` log records (the per-file outcome lines the\nterminal shows: skipped-unchanged, no-text, failure tracebacks' heads),\nso the browser progress view mirrors the CLI run.\n\nAttributes:\n    level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).\n    message: The formatted log message.",
+        "properties": {
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "level",
+          "message"
+        ],
+        "title": "IngestLogEvent",
+        "type": "object"
+      },
+      "IngestProgressEvent": {
+        "description": "Payload of the ingest-status SSE ``progress`` event.\n\nOne frame per pipeline stage transition, mirroring the CLI's ``rich``\ndisplay: ``discover`` (with ``total`` files), then per file ``parse`` \u2192\n``chunk`` \u2192 ``contextualize`` (with per-chunk ``current``/``total``\nticks) \u2192 ``embed`` \u2192 ``store``, and a ``file_done`` frame carrying the\nfile's outcome plus the run-level progress counters.\n\nAttributes:\n    stage: ``discover`` | ``parse`` | ``chunk`` | ``contextualize`` |\n        ``embed`` | ``store`` | ``file_done``.\n    file: The file being processed (``None`` for ``discover``).\n    outcome: ``file_done`` only \u2014 ``ingested`` | ``skipped`` |\n        ``no_text`` | ``failed``.\n    current: Intra-stage progress (contextualized chunks so far).\n    total: Stage denominator (files for ``discover``, chunks for\n        ``chunk``/``contextualize``, texts for ``embed``).\n    files_done: Files finished so far (``file_done`` only).\n    files_total: Files discovered (``file_done`` only).",
+        "properties": {
+          "current": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Current"
+          },
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File"
+          },
+          "files_done": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Files Done"
+          },
+          "files_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Files Total"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Outcome"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total"
+          }
+        },
+        "required": [
+          "stage"
+        ],
+        "title": "IngestProgressEvent",
+        "type": "object"
+      },
+      "IngestRunOut": {
+        "description": "One ingest run's state (``POST /api/ingest`` + the status stream).\n\nAttributes:\n    run_id: The run handle.\n    state: ``running`` | ``completed`` | ``failed``.\n    reingest: Whether the run re-processes unchanged files.\n    started_at: When the run started.\n    finished_at: When it reached a terminal state (``None`` while\n        running).\n    summary: The final counters (terminal states only; ``failed`` runs\n        may carry ``None`` when the flow died before summarizing).\n    error: The flow-level failure (``failed`` only; per-file failures\n        ride in ``summary.failed`` and the ``log`` events instead).",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "reingest": {
+            "title": "Reingest",
+            "type": "boolean"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestSummaryOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "state",
+          "reingest",
+          "started_at"
+        ],
+        "title": "IngestRunOut",
+        "type": "object"
+      },
+      "IngestStartRequest": {
+        "description": "Body of ``POST /api/ingest``.\n\nAttributes:\n    reingest: Delete each discovered document's previous ingest and\n        re-process it (required after reingest-affecting setting\n        changes \u2014 content hashes don't change, so unchanged files are\n        otherwise skipped).",
+        "properties": {
+          "reingest": {
+            "default": false,
+            "title": "Reingest",
+            "type": "boolean"
+          }
+        },
+        "title": "IngestStartRequest",
+        "type": "object"
+      },
+      "IngestStatusEvent": {
+        "description": "Payload of the ingest-status SSE ``status`` event.\n\nThe stream's first frame (a snapshot on connect) and its last (the\nterminal state). ``run=None`` means no ingest has run in this API\nprocess \u2014 the stream closes immediately after.\n\nAttributes:\n    run: The current (or last) run, if any.",
+        "properties": {
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "IngestStatusEvent",
+        "type": "object"
+      },
+      "IngestSummaryOut": {
+        "description": "The ingest run counters (mirrors the loader's ``IngestSummary``).\n\nAttributes:\n    discovered: Files found in the corpus buckets.\n    ingested: Files parsed, chunked, embedded, and stored this run.\n    skipped: Unchanged files skipped via the idempotency check.\n    no_text: Files with no extractable text.\n    unsupported: Files whose bucket has no registered parser.\n    failed: Files that raised during ingestion (run continued).\n    chunks: Total chunks stored this run.",
+        "properties": {
+          "chunks": {
+            "title": "Chunks",
+            "type": "integer"
+          },
+          "discovered": {
+            "title": "Discovered",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "ingested": {
+            "title": "Ingested",
+            "type": "integer"
+          },
+          "no_text": {
+            "title": "No Text",
+            "type": "integer"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "unsupported": {
+            "title": "Unsupported",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "discovered",
+          "ingested",
+          "skipped",
+          "no_text",
+          "unsupported",
+          "failed",
+          "chunks"
+        ],
+        "title": "IngestSummaryOut",
+        "type": "object"
+      },
+      "MessageOut": {
+        "description": "One persisted message in a transcript.\n\nAttributes:\n    message_id: The app-generated id.\n    role: ``\"user\"`` or ``\"assistant\"``.\n    content: The question or the generated answer.\n    created_at: Persistence timestamp.\n    retrieval_method: Retrieval method of an assistant turn.\n    latency_ms: Per-stage timings of an assistant turn.\n    reasoning: Captured ``<think>`` stream, if any.\n    sources: The turn's snapshotted evidence, rank order.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "string"
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning"
+          },
+          "retrieval_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Method"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "sources": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MessageSourceOut"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "message_id",
+          "role",
+          "content",
+          "created_at"
+        ],
+        "title": "MessageOut",
+        "type": "object"
+      },
+      "MessageSourceOut": {
+        "description": "One snapshotted evidence row of a persisted assistant turn.\n\nAttributes:\n    rank: Final rank in the answer's evidence (1-based).\n    chunk_id: Soft reference to the producing chunk.\n    trace: The spec_v2 \u00a79.1 snapshot: score, content, context, source\n        provenance, and the serialized retrieval trace.",
+        "properties": {
+          "chunk_id": {
+            "title": "Chunk Id",
+            "type": "string"
+          },
+          "rank": {
+            "title": "Rank",
+            "type": "integer"
+          },
+          "trace": {
+            "additionalProperties": true,
+            "title": "Trace",
+            "type": "object"
+          }
+        },
+        "required": [
+          "rank",
+          "chunk_id",
+          "trace"
+        ],
+        "title": "MessageSourceOut",
+        "type": "object"
+      },
+      "NumericRange": {
+        "description": "Valid range of one numeric setting, for GUI control generation.\n\nAttributes:\n    min: Inclusive lower bound (``None`` = unbounded).\n    max: Inclusive upper bound (``None`` = unbounded).",
+        "properties": {
+          "max": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min"
+          }
+        },
+        "title": "NumericRange",
+        "type": "object"
+      },
+      "RetrievalEvent": {
+        "description": "Payload of the SSE ``retrieval`` event \u2014 the provenance panel's data.\n\nEmitted once retrieval (+rerank) completes, **before** any answer token\n(spec_v2 \u00a74.3): the browser gets the evidence before the prose.\n\nAttributes:\n    chunks: The retrieved chunks, best first, each carrying its full\n        metadata record and (when the method fills it) the\n        :class:`~varagity.stores.records.RetrievalTrace`.\n    method: The retrieval method that produced them.\n    top_k: Chunks requested from the retriever.\n    reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrowed\n        the list; ``None`` otherwise.",
+        "properties": {
+          "chunks": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievedChunk"
+            },
+            "title": "Chunks",
+            "type": "array"
+          },
+          "method": {
+            "title": "Method",
+            "type": "string"
+          },
+          "reranked_to": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reranked To"
+          },
+          "top_k": {
+            "title": "Top K",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chunks",
+          "method",
+          "top_k"
+        ],
+        "title": "RetrievalEvent",
+        "type": "object"
+      },
+      "RetrievalTrace": {
+        "description": "Why one retrieved chunk ranked where it did (spec_v2 \u00a79.2).\n\nQuery-time only \u2014 computed per answer by the retrievers, never persisted\non the immutable chunk rows. Ranks are 1-based (display-ready); an arm's\nrank/score are ``None`` when that arm's ranked list never surfaced the\nchunk. Single-arm retrievers report their arm's score/rank as the fused\nvalues (there is nothing to fuse).\n\nAttributes:\n    semantic_rank: Rank in the semantic (pgvector) arm.\n    semantic_score: Cosine similarity in the semantic arm.\n    bm25_rank: Rank in the BM25 (Elasticsearch) arm.\n    bm25_score: BM25 relevance in that arm.\n    fused_score: Weighted reciprocal-rank fusion score (spec \u00a711.4).\n    fused_rank: Rank after fusion.\n    rerank_score: Cross-encoder relevance (``None`` when reranking is\n        off the path).\n    rerank_delta: Positions moved by reranking, ``pre \u2212 post`` (+ moved\n        up / \u2212 moved down; ``None`` when reranking is off the path).\n    final_rank: The rank actually returned to the caller.",
+        "properties": {
+          "bm25_rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Bm25 Rank"
+          },
+          "bm25_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Bm25 Score"
+          },
+          "final_rank": {
+            "title": "Final Rank",
+            "type": "integer"
+          },
+          "fused_rank": {
+            "title": "Fused Rank",
+            "type": "integer"
+          },
+          "fused_score": {
+            "title": "Fused Score",
+            "type": "number"
+          },
+          "rerank_delta": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rerank Delta"
+          },
+          "rerank_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rerank Score"
+          },
+          "semantic_rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Semantic Rank"
+          },
+          "semantic_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Semantic Score"
+          }
+        },
+        "required": [
+          "fused_score",
+          "fused_rank",
+          "final_rank"
+        ],
+        "title": "RetrievalTrace",
+        "type": "object"
+      },
+      "RetrievedChunk": {
+        "description": "A chunk returned by a store search, with its relevance score.\n\nField set mirrors the spec \u00a711.2 ``SELECT`` list; ``metadata`` holds the\nfull :class:`ChunkRecord` dump persisted at ingest time.\n\nAttributes:\n    chunk_id: The chunk's primary key.\n    doc_id: Parent document id.\n    original_index: Global chunk index (fusion identity).\n    content: Original chunk text.\n    context: LLM situating blurb (``None`` when ingested with\n        ``CONTEXTUALIZE`` off).\n    metadata: Full persisted metadata record.\n    score: Similarity score \u2014 cosine similarity ``1 - distance`` for the\n        vector store (higher is better).\n    trace: Rank provenance attached by the retrievers (spec_v2 \u00a79.2);\n        ``None`` on raw store results, so pre-trace callers are\n        unaffected.",
+        "properties": {
+          "chunk_id": {
+            "title": "Chunk Id",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "doc_id": {
+            "title": "Doc Id",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "original_index": {
+            "title": "Original Index",
+            "type": "integer"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "trace": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RetrievalTrace"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "chunk_id",
+          "doc_id",
+          "original_index",
+          "content",
+          "context",
+          "metadata",
+          "score"
+        ],
+        "title": "RetrievedChunk",
+        "type": "object"
+      },
+      "ServiceHealth": {
+        "description": "Reachability of one backing service (spec_v2 \u00a74.2).\n\nAttributes:\n    ok: Whether the service answered its probe.\n    detail: Failure detail when it didn't (``None`` when healthy).",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "ServiceHealth",
+        "type": "object"
+      },
+      "SettingOut": {
+        "description": "One effective setting in the ``GET /api/settings`` catalog (spec_v2 \u00a74.7).\n\nAttributes:\n    name: The ``Settings`` field name (e.g. ``\"RETRIEVAL_METHOD\"``).\n    value: The effective value (env defaults merged with any override).\n    group: Drawer group \u2014 ``retrieval`` | ``generation`` | ``ingestion``.\n    overridden: Whether a persisted runtime override is in effect (the\n        drawer shows a reset affordance).\n    reingest_affecting: Whether changing it marks the corpus stale (it\n        doesn't change content hashes \u2014 the surfaced v1 footgun).\n    choices: Valid values for enum-like settings (registry-derived, so a\n        new implementation appears automatically); ``None`` for numeric\n        and free-form settings (ranges live in ``GET /api/config``).",
+        "properties": {
+          "choices": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Choices"
+          },
+          "group": {
+            "title": "Group",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "overridden": {
+            "title": "Overridden",
+            "type": "boolean"
+          },
+          "reingest_affecting": {
+            "title": "Reingest Affecting",
+            "type": "boolean"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "name",
+          "value",
+          "group",
+          "overridden",
+          "reingest_affecting"
+        ],
+        "title": "SettingOut",
+        "type": "object"
+      },
+      "SettingsPatchRequest": {
+        "additionalProperties": false,
+        "description": "Body of ``PATCH /api/settings``.\n\nAttributes:\n    overrides: Setting name \u2192 new value, or ``None`` to clear that\n        override (reverting to the env value). Linked settings (the\n        fusion weight pair) must be patched together \u2014 validation runs\n        on the merged whole.",
+        "properties": {
+          "overrides": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "minProperties": 1,
+            "title": "Overrides",
+            "type": "object"
+          }
+        },
+        "required": [
+          "overrides"
+        ],
+        "title": "SettingsPatchRequest",
+        "type": "object"
+      },
+      "SettingsResponse": {
+        "description": "Response of ``GET /api/settings`` and ``PATCH /api/settings``.\n\nAttributes:\n    settings: The full overridable catalog with effective values.\n    corpus_stale: Whether a reingest-affecting setting changed since the\n        corpus was last (re)ingested \u2014 the \"Re-ingest to apply\" banner.",
+        "properties": {
+          "corpus_stale": {
+            "title": "Corpus Stale",
+            "type": "boolean"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/SettingOut"
+            },
+            "title": "Settings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "settings",
+          "corpus_stale"
+        ],
+        "title": "SettingsResponse",
+        "type": "object"
+      },
+      "UploadResponse": {
+        "description": "Response of ``POST /api/documents``.\n\nAttributes:\n    files: Per-file outcomes, in upload order.",
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/UploadedFileOut"
+            },
+            "title": "Files",
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "title": "UploadResponse",
+        "type": "object"
+      },
+      "UploadedFileOut": {
+        "description": "Outcome for one file of a ``POST /api/documents`` upload.\n\nAttributes:\n    file_name: The stored (sanitized) file name.\n    size_bytes: Bytes written (``0`` when rejected).\n    stored: Whether the file landed in ``DOCS_PATH``.\n    replaced: Whether an existing same-named file was overwritten (a\n        re-upload; the next ingest re-processes it under a new hash).\n    reason: Rejection reason when ``stored`` is false\n        (``extension_not_allowed`` | ``file_too_large`` |\n        ``invalid_filename`` | ``write_failed`` \u2014 the last is a server-\n        side problem, escalated to a structured ``500`` when no file in\n        the batch landed).",
+        "properties": {
+          "file_name": {
+            "title": "File Name",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "replaced": {
+            "default": false,
+            "title": "Replaced",
+            "type": "boolean"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "stored": {
+            "title": "Stored",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "file_name",
+          "size_bytes",
+          "stored"
+        ],
+        "title": "UploadedFileOut",
+        "type": "object"
+      },
+      "UsageInfo": {
+        "description": "Token usage and per-stage latency reported by the ``done`` event.\n\nAttributes:\n    prompt_tokens: Server-reported prompt tokens (``None`` when the\n        model server reports no usage).\n    completion_tokens: Server-reported completion tokens (``None`` when\n        unreported).\n    latency_ms: Wall-clock milliseconds per stage: ``retrieval``,\n        ``generation``, ``total``.",
+        "properties": {
+          "completion_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Completion Tokens"
+          },
+          "latency_ms": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Latency Ms",
+            "type": "object"
+          },
+          "prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Prompt Tokens"
+          }
+        },
+        "required": [
+          "latency_ms"
+        ],
+        "title": "UsageInfo",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Contextual-Retrieval RAG over local GPUs (spec_v2 \u00a74).",
+    "title": "Varagity API",
+    "version": "0.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/chat": {
+      "post": {
+        "description": "Answer one question as a typed SSE stream (spec_v2 \u00a74.3).\n\nEvent order: ``retrieval`` (the provenance payload) \u2192 ``reasoning``/\n``token`` deltas \u2192 ``done`` (ids, full answer, usage + per-stage\nlatency). A failure after the stream opened emits an in-band ``error``\nevent instead. Aborted turns (client disconnect) persist nothing \u2014 the\nturn is persisted *at* ``done``.\n\nArgs:\n    plan: The validated request plan.\n\nYields:\n    The framed SSE events, in protocol order.",
+        "operationId": "chat_api_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Chat",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/config": {
+      "get": {
+        "description": "Expose the registered capabilities and valid ranges.\n\nMostly static registry contents; the two upload constraints\n(``upload_max_mb``, ``allowed_extensions``) are read from the effective\nsettings per request so the dropzone always validates against what the\nserver enforces (``ALLOWED_EXTENSIONS`` is runtime-overridable).\n\nReturns:\n    Registry contents (retrievers, chunkers, OCR engines, model types),\n    the numeric knobs' valid ranges, and the upload constraints.",
+        "operationId": "config_api_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Config",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/conversations": {
+      "get": {
+        "description": "List every conversation, most recently updated first.\n\nArgs:\n    store: The per-request conversation store.\n\nReturns:\n    Summaries with message counts.",
+        "operationId": "list_conversations_api_conversations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationSummaryOut"
+                  },
+                  "title": "Response List Conversations Api Conversations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Conversations",
+        "tags": [
+          "conversations"
+        ]
+      },
+      "post": {
+        "description": "Start a conversation.\n\nArgs:\n    payload: Optional explicit title (the first chat turn auto-titles\n        otherwise).\n    store: The per-request conversation store.\n\nReturns:\n    The created conversation's summary.",
+        "operationId": "create_conversation_api_conversations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationSummaryOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Conversation",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/api/conversations/{conversation_id}": {
+      "delete": {
+        "description": "Delete a conversation; messages and sources cascade.\n\nArgs:\n    conversation_id: The conversation to delete.\n    store: The per-request conversation store.\n\nReturns:\n    An empty ``204`` response.\n\nRaises:\n    HTTPException: ``404 conversation_not_found`` for an unknown id.",
+        "operationId": "delete_conversation_api_conversations__conversation_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Conversation",
+        "tags": [
+          "conversations"
+        ]
+      },
+      "get": {
+        "description": "Fetch a full transcript: messages plus each answer's stored sources.\n\nArgs:\n    conversation_id: The conversation to fetch.\n    store: The per-request conversation store.\n\nReturns:\n    The transcript, oldest message first.\n\nRaises:\n    HTTPException: ``404 conversation_not_found`` for an unknown id.",
+        "operationId": "get_conversation_api_conversations__conversation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Conversation",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/api/documents": {
+      "get": {
+        "description": "List every ingested document (the corpus-management table).\n\nFiles uploaded but not yet ingested don't appear here \u2014 the ``documents``\ntable records ingests; the GUI pairs this list with the upload outcomes\nit already holds.\n\nArgs:\n    store: The per-request vector store.\n\nReturns:\n    One entry per document, newest ingest first.",
+        "operationId": "list_documents_api_documents_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DocumentOut"
+                  },
+                  "title": "Response List Documents Api Documents Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Documents",
+        "tags": [
+          "documents"
+        ]
+      },
+      "post": {
+        "description": "Upload file(s) into ``DOCS_PATH`` (no auto-ingest).\n\nEach file is validated and stored independently; rejected files are\nreported per-file so a mixed batch partially succeeds. A same-named\nexisting file is replaced (the re-upload flow) \u2014 its changed content\nhash makes the next ingest re-process it.\n\nArgs:\n    files: The multipart file parts.\n\nReturns:\n    Per-file outcomes, in upload order.\n\nRaises:\n    HTTPException: ``422 no_file_stored`` when every file was rejected\n        on its own merits (extension/size/name); ``500\n        docs_path_not_writable`` when nothing landed because the server\n        couldn't write ``DOCS_PATH`` (e.g. the ``./docs`` bind mount is\n        not writable by the api container's user).",
+        "operationId": "upload_documents_api_documents_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_documents_api_documents_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Documents",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{doc_id}": {
+      "delete": {
+        "description": "Remove a document's chunks from both stores (GUI-driven GC).\n\nElasticsearch first, pgvector last: the pgvector ``documents`` row is\nthe marker \u2014 if the ES delete fails, the document still lists and the\ndelete can be retried; a marker deleted first would strand ES chunks\ninvisibly (the exact v1 gap this route closes).\n\nArgs:\n    doc_id: The document to remove.\n    store: The per-request vector store.\n    bm25: The per-request BM25 store.\n    remove_file: Also unlink the source file \u2014 honored only when it\n        resolves inside ``DOCS_PATH`` (otherwise the next ingest would\n        simply re-add the document).\n\nReturns:\n    The deletion counts and whether the file was removed.\n\nRaises:\n    HTTPException: ``404 document_not_found`` for an unknown id;\n        ``503 es_unreachable`` when Elasticsearch is down (nothing\n        deleted \u2014 retry when it returns).",
+        "operationId": "delete_document_api_documents__doc_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "remove_file",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Remove File",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "description": "Report API liveness and per-dependency reachability.\n\nAlways ``200`` while the API process is alive \u2014 the compose healthcheck\ngates on the process, and per-dependency state lives in the body so a\nflapping backing service doesn't flap the ``api`` container.\n\nReturns:\n    The aggregate flag and each service's probe outcome.",
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/ingest": {
+      "post": {
+        "description": "Trigger a background ingest run and return its handle.\n\nArgs:\n    payload: ``reingest=true`` re-processes unchanged files (the\n        stale-corpus action; setting changes don't change content\n        hashes).\n    runner: The process-wide ingest runner.\n    preflight: The awaitable reachability check (structured 503).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``409 ingest_already_running`` while a run is in\n        flight; ``503 <service>_unreachable`` when a required backing\n        service is down.",
+        "operationId": "start_ingest_api_ingest_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Start Ingest",
+        "tags": [
+          "ingest"
+        ]
+      }
+    },
+    "/api/ingest/status": {
+      "get": {
+        "description": "Stream the current (or last) ingest run's progress as SSE.\n\nFrames: ``status`` (snapshot; also terminal, with the summary),\n``progress`` (per stage/file/chunk), ``log`` (relayed pipeline lines).\nWith no run in this API process the stream is a single idle ``status``\nframe; after a terminal run it replays that run and closes.\n\nArgs:\n    runner: The process-wide ingest runner.\n\nYields:\n    The framed events, oldest first, then live until terminal.",
+        "operationId": "ingest_status_api_ingest_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ingest Status",
+        "tags": [
+          "ingest"
+        ]
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "description": "Report the effective settings and the corpus-stale flag.\n\nArgs:\n    store: The per-request app-settings store.\n\nReturns:\n    The overridable catalog with effective (env + override) values.",
+        "operationId": "read_settings_api_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read Settings",
+        "tags": [
+          "settings"
+        ]
+      },
+      "patch": {
+        "description": "Apply, validate, and persist runtime setting overrides.\n\nA ``None`` value clears that override (reverting to the env value).\nValidation runs on the *merged whole* through every config validator,\nso linked constraints (the fusion weight pair, the rerank bounds) hold\nexactly as they do for ``.env`` \u2014 an invalid patch changes nothing.\n\nArgs:\n    payload: The overrides to set or clear.\n    store: The per-request app-settings store (persistence + flag).\n    vector_store: The vector store (the corpus-emptiness check).\n\nReturns:\n    The full post-patch catalog; ``corpus_stale`` reports whether a\n    reingest is now needed.\n\nRaises:\n    HTTPException: ``422 unknown_setting`` for a name outside the\n        catalog; ``422 invalid_settings`` when the merged settings fail\n        validation; ``503 postgres_unreachable`` if persistence fails\n        (the overrides are rolled back \u2014 the process never diverges\n        from the table).",
+        "operationId": "patch_settings_api_settings_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsPatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Settings",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "description": "Expose the metric catalog for a Prometheus scrape.\n\nReturns:\n    The default registry rendered in the Prometheus text format\n    (``text/plain; version=0.0.4``).",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Metrics",
+        "tags": [
+          "observability"
+        ]
+      }
+    }
+  }
+}
