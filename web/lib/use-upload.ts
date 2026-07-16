@@ -3,9 +3,10 @@
 /**
  * The shared upload machinery (spec_v3 §5.3) behind both upload surfaces:
  *
- * - `useUpload` — the corpus dropzone's validate → upload → report flow,
- *   lifted verbatim out of `UploadDropzone` so the composer doesn't
- *   duplicate it. Per-file outcome rows, no ingest.
+ * - `useUpload` — the corpus dropzone's validate → upload → report flow.
+ *   Per-file outcome rows, no ingest. Dropped folders are walked
+ *   (`filesFromDrop`) and then share the composer's filter, so they upload
+ *   with their structure and summarize rather than enumerate.
  * - `useComposerAttach` — the composer's 📎 flow: filter (summarized, never
  *   enumerated) → upload with relative paths → auto-ingest
  *   (`reingest: false` — it never clears the stale-corpus flag) → live
@@ -32,6 +33,7 @@ import {
   type UploadResponse,
   type UploadedFile,
 } from "@/lib/api";
+import { filesFromDrop } from "@/lib/dropped-files";
 import {
   initialIngestView,
   reduceIngestEvent,
@@ -84,15 +86,39 @@ function outcomeFromEntry(entry: UploadedFile): UploadOutcome {
 /** What `useUpload` hands the dropzone. */
 export interface UploadHandle {
   busy: boolean;
+  /** Per-file rows — a flat pick's files are each worth naming. */
   outcomes: UploadOutcome[];
+  /** A folder drop's one-line roll-up; `null` for flat picks. */
+  summary: string | null;
+  /** The click-to-pick input's files (always flat — no `webkitdirectory`). */
   handleFiles: (files: File[]) => Promise<void>;
+  /** A drop, descending into any folders in it. */
+  handleDrop: (transfer: DataTransfer) => Promise<void>;
 }
 
 /**
- * The dropzone's validate → upload → report machinery (flat uploads, no
- * ingest). Client-side validation mirrors the server's extension/size
- * rules (from `GET /api/config`); the server's per-file outcomes render
- * afterwards.
+ * The one line a folder drop reports instead of hundreds of rows: what
+ * landed, plus the skip summary when anything was filtered.
+ */
+function folderSummary(stored: number, skipped: SkipCounts): string {
+  const head =
+    stored === 0
+      ? "Nothing uploaded"
+      : `${stored} ${stored === 1 ? "file" : "files"} uploaded — not yet ingested`;
+  const skips = summarizeSkipped(skipped);
+  return skips === null ? head : `${head} · ${skips}`;
+}
+
+/**
+ * The dropzone's validate → upload → report machinery (no ingest — that's
+ * the explicit action). Client-side validation mirrors the server's
+ * extension/size rules (from `GET /api/config`); the server's per-file
+ * outcomes render afterwards.
+ *
+ * Folders report differently from files, not incidentally: a picked folder
+ * ignores `accept` and arrives with `.DS_Store`, `.git/` and every image in
+ * it, so it's filtered and summarized (spec_v3 §5.3) rather than turned
+ * into one rejection row per file.
  */
 export function useUpload(
   config: ConfigResponse | null,
@@ -100,55 +126,104 @@ export function useUpload(
 ): UploadHandle {
   const [busy, setBusy] = useState(false);
   const [outcomes, setOutcomes] = useState<UploadOutcome[]>([]);
+  const [summary, setSummary] = useState<string | null>(null);
 
-  async function handleFiles(files: File[]): Promise<void> {
-    if (files.length === 0 || busy) return;
+  async function runUpload(
+    files: File[],
+    folder: boolean,
+    walkSkips: SkipCounts,
+  ): Promise<void> {
+    if (busy) return;
+    const skips: SkipCounts = { ...walkSkips };
     const rejected: UploadOutcome[] = [];
-    const accepted: File[] = [];
-    for (const file of files) {
-      const check = config
-        ? validateUpload(
-            file.name,
-            file.size,
-            config.allowed_extensions,
-            config.upload_max_mb,
-          )
-        : { fileName: file.name, ok: true as const };
-      if (check.ok) accepted.push(file);
-      else
-        rejected.push({
-          fileName: check.fileName,
-          ok: false,
-          detail:
-            (check.reason && REJECTION_LABELS[check.reason]) ??
-            check.reason ??
-            "rejected",
-        });
+    let accepted: File[];
+    let paths: readonly string[] | null = null;
+
+    if (folder) {
+      const plan = planAttachments(
+        files,
+        config?.allowed_extensions ?? null,
+        config?.upload_max_mb ?? null,
+        { folder: true },
+      );
+      accepted = plan.accepted;
+      paths = plan.paths;
+      for (const [label, count] of Object.entries(plan.skipped) as [
+        SkipLabel,
+        number,
+      ][]) {
+        skips[label] = (skips[label] ?? 0) + count;
+      }
+    } else {
+      if (files.length === 0) return;
+      accepted = [];
+      for (const file of files) {
+        const check = config
+          ? validateUpload(
+              file.name,
+              file.size,
+              config.allowed_extensions,
+              config.upload_max_mb,
+            )
+          : { fileName: file.name, ok: true as const };
+        if (check.ok) accepted.push(file);
+        else
+          rejected.push({
+            fileName: check.fileName,
+            ok: false,
+            detail:
+              (check.reason && REJECTION_LABELS[check.reason]) ??
+              check.reason ??
+              "rejected",
+          });
+      }
     }
 
     let stored: UploadOutcome[] = [];
+    let storedCount = 0;
+    let failed: string | null = null;
     if (accepted.length > 0) {
       setBusy(true);
       try {
-        const response = await uploadDocuments(accepted);
-        stored = response.files.map(outcomeFromEntry);
-        if (response.files.some((entry) => entry.stored)) onUploaded();
+        const response = await uploadDocuments(accepted, paths);
+        storedCount = response.files.filter((entry) => entry.stored).length;
+        if (folder) {
+          for (const entry of response.files) {
+            if (!entry.stored) countSkip(skips, skipLabel(entry.reason ?? "rejected"));
+          }
+        } else {
+          stored = response.files.map(outcomeFromEntry);
+        }
+        if (storedCount > 0) onUploaded();
       } catch (failure) {
-        stored = [
-          {
-            fileName: `${accepted.length} file(s)`,
-            ok: false,
-            detail: failureMessage(failure),
-          },
-        ];
+        failed = failureMessage(failure);
+        stored = [{ fileName: `${accepted.length} file(s)`, ok: false, detail: failed }];
       } finally {
         setBusy(false);
       }
     }
-    setOutcomes([...stored, ...rejected]);
+
+    if (folder) {
+      setOutcomes([]);
+      setSummary(failed ?? folderSummary(storedCount, skips));
+    } else {
+      setSummary(null);
+      setOutcomes([...stored, ...rejected]);
+    }
   }
 
-  return { busy, outcomes, handleFiles };
+  return {
+    busy,
+    outcomes,
+    summary,
+    handleFiles: (files) => runUpload(files, false, {}),
+    // `filesFromDrop` takes its handles before its first await, so kicking
+    // it off from the handler (rather than awaiting the drop event) is safe.
+    handleDrop: async (transfer) => {
+      const dropped = await filesFromDrop(transfer);
+      await runUpload(dropped.files, dropped.folder, dropped.skipped);
+    },
+  };
 }
 
 // ── The composer attach flow ────────────────────────────────────────────

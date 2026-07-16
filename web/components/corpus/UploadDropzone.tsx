@@ -10,10 +10,13 @@ import { cn } from "@/lib/utils";
 
 /**
  * Drag-drop / click-to-pick upload into `DOCS_PATH` (spec_v2 §4.2).
- * The validate → upload → report machinery lives in the shared
- * `useUpload` hook (spec_v3 §5.3 — the composer's 📎 flow reuses it);
- * this component owns only the dropzone chrome and the outcome rows.
+ * The validate → upload → report machinery lives in the `useUpload` hook
+ * (spec_v3 §5.3); this component owns only the dropzone chrome, the
+ * per-file outcome rows, and a folder drop's one-line summary.
  * Uploading does **not** ingest — that's the explicit ingest action.
+ *
+ * Dropping a folder keeps its structure; the click-to-pick input is files
+ * only (`webkitdirectory` would exclude files), matching its label.
  */
 export function UploadDropzone({
   config,
@@ -24,7 +27,10 @@ export function UploadDropzone({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
-  const { busy, outcomes, handleFiles } = useUpload(config, onUploaded);
+  const { busy, outcomes, summary, handleFiles, handleDrop } = useUpload(
+    config,
+    onUploaded,
+  );
 
   const constraints = config
     ? `${config.allowed_extensions.join(" ")} · up to ${config.upload_max_mb} MB each`
@@ -56,7 +62,7 @@ export function UploadDropzone({
         onDrop={(event) => {
           event.preventDefault();
           setDragging(false);
-          void handleFiles(Array.from(event.dataTransfer.files));
+          void handleDrop(event.dataTransfer);
         }}
         className={cn(
           "flex cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed border-border p-8 text-center select-none motion-safe:transition-colors motion-safe:duration-150",
@@ -73,7 +79,7 @@ export function UploadDropzone({
           <UploadIcon className="size-4 text-muted-foreground" />
         </span>
         <p className="text-sm font-medium">
-          {busy ? "Uploading…" : "Drop files here or click to upload"}
+          {busy ? "Uploading…" : "Drop files or folders here, or click to upload"}
         </p>
         <p className="text-xs text-muted-foreground">{constraints}</p>
         <input
@@ -88,6 +94,15 @@ export function UploadDropzone({
           }}
         />
       </div>
+
+      {summary !== null && (
+        <p
+          aria-live="polite"
+          className="mt-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs text-muted-foreground"
+        >
+          {summary}
+        </p>
+      )}
 
       {outcomes.length > 0 && (
         <ul className="mt-2 flex flex-col gap-1" aria-label="Upload outcomes">
