@@ -2,6 +2,8 @@
 .serena/
 .webui_secret_key
 
+/thoughts/
+
 # Ingest corpus (the DOCS_PATH input directory — NOT golden-docs/, which is tracked)
 /docs/
 
