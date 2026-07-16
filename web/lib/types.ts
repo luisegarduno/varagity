@@ -264,7 +264,11 @@ export interface paths {
          *         Per-file outcomes, in upload order.
          *
          *     Raises:
-         *         HTTPException: ``422 no_file_stored`` when every file was rejected.
+         *         HTTPException: ``422 no_file_stored`` when every file was rejected
+         *             on its own merits (extension/size/name); ``500
+         *             docs_path_not_writable`` when nothing landed because the server
+         *             couldn't write ``DOCS_PATH`` (e.g. the ``./docs`` bind mount is
+         *             not writable by the api container's user).
          */
         post: operations["upload_documents_api_documents_post"];
         delete?: never;
@@ -921,7 +925,9 @@ export interface components {
          *             re-upload; the next ingest re-processes it under a new hash).
          *         reason: Rejection reason when ``stored`` is false
          *             (``extension_not_allowed`` | ``file_too_large`` |
-         *             ``invalid_filename``).
+         *             ``invalid_filename`` | ``write_failed`` — the last is a server-
+         *             side problem, escalated to a structured ``500`` when no file in
+         *             the batch landed).
          */
         UploadedFileOut: {
             /** File Name */
