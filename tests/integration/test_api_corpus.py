@@ -189,6 +189,64 @@ class TestUploadValidation:
         assert sorted(p.name for p in docs_root.iterdir()) == ["ok.md"]
 
 
+class TestNestedUploadIdentity:
+    async def test_nested_paths_land_and_yield_distinct_doc_ids(
+        self,
+        app: FastAPI,
+        settings_env: Callable[..., None],
+    ) -> None:
+        """The spec_v3 §5.2 identity claim, end to end over the real multipart path.
+
+        Two same-named, same-content files in different subfolders must land
+        at their declared relative paths and come out of the real loader as
+        two documents with **distinct** ``doc_id``s (structure is identity:
+        flattened, the second would silently replace the first).
+        """
+        from tests.unit.test_loader import FakeBM25, FakeEmbeddings, FakeStore
+        from varagity.ingest.loader import ingest_corpus
+        from varagity.stores.records import content_hash, derive_doc_id
+
+        docs_root = Path(get_settings().DOCS_PATH)
+        content = b"The same quarterly notes, long enough to clear the extraction guard."
+        files = [
+            ("files", ("notes.md", content, "text/markdown")),
+            ("files", ("notes.md", content, "text/markdown")),
+        ]
+        response = await request(
+            app,
+            "POST",
+            "/api/documents",
+            files=files,
+            data={"paths": ["q3/notes.md", "q4/notes.md"]},
+        )
+        assert response.status_code == 201
+        entries = response.json()["files"]
+        assert [entry["relative_path"] for entry in entries] == ["q3/notes.md", "q4/notes.md"]
+        assert (docs_root / "q3" / "notes.md").read_bytes() == content
+        assert (docs_root / "q4" / "notes.md").read_bytes() == content
+
+        # The real loader over the uploaded tree (fake stores/embeddings —
+        # what's under test is identity derivation, not the databases).
+        settings_env(CONTEXTUALIZE="false", EMBEDDING_MODEL="test-model")
+        store = FakeStore()
+        summary = ingest_corpus(
+            str(docs_root),
+            store=store,  # type: ignore[arg-type]
+            bm25=FakeBM25(),  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),  # type: ignore[arg-type]
+            llm=None,
+            verbose=0,
+        )
+        assert summary.ingested == 2
+        file_hash = content_hash(content)
+        expected = {
+            derive_doc_id("q3/notes.md", file_hash),
+            derive_doc_id("q4/notes.md", file_hash),
+        }
+        assert set(store.documents) == expected
+        assert len(expected) == 2  # distinct ids from identical bytes — the path is the identity
+
+
 class TestDocumentDelete:
     async def test_delete_removes_chunks_from_both_stores(
         self, app: FastAPI, stores: EphemeralStores

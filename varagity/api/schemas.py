@@ -397,16 +397,21 @@ class UploadedFileOut(BaseModel):
     """Outcome for one file of a ``POST /api/documents`` upload.
 
     Attributes:
-        file_name: The stored (sanitized) file name.
+        file_name: The stored (sanitized) file name (rejections echo the
+            client-supplied name/path they rejected).
         size_bytes: Bytes written (``0`` when rejected).
         stored: Whether the file landed in ``DOCS_PATH``.
-        replaced: Whether an existing same-named file was overwritten (a
-            re-upload; the next ingest re-processes it under a new hash).
+        replaced: Whether an existing file at the same target was
+            overwritten (a re-upload; the next ingest re-processes it under
+            a new hash).
         reason: Rejection reason when ``stored`` is false
             (``extension_not_allowed`` | ``file_too_large`` |
-            ``invalid_filename`` | ``write_failed`` — the last is a server-
-            side problem, escalated to a structured ``500`` when no file in
-            the batch landed).
+            ``invalid_filename`` | ``invalid_path`` | ``path_too_deep`` |
+            ``write_failed`` — the last is a server-side problem, escalated
+            to a structured ``500`` when no file in the batch landed).
+        relative_path: The stored path relative to ``DOCS_PATH`` when the
+            upload declared one (folder uploads, spec_v3 §5.2); ``None``
+            for flat uploads and rejections.
     """
 
     file_name: str
@@ -414,6 +419,7 @@ class UploadedFileOut(BaseModel):
     stored: bool
     replaced: bool = False
     reason: str | None = None
+    relative_path: str | None = None
 
 
 class UploadResponse(BaseModel):

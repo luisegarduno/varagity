@@ -257,15 +257,30 @@ export interface paths {
          *     existing file is replaced (the re-upload flow) — its changed content
          *     hash makes the next ingest re-process it.
          *
+         *     With ``paths`` (folder uploads, spec_v3 §5.2), each file lands at its
+         *     sanitized relative path under ``DOCS_PATH``, preserving nested
+         *     structure — structure is *identity*: ``doc_id`` hashes the relative
+         *     path, so ``q3/notes.md`` and ``q4/notes.md`` must not collapse onto one
+         *     name. Entries pair with ``files`` positionally; an empty-string entry
+         *     keeps that file on the flat path. Without ``paths`` the flat contract
+         *     is untouched.
+         *
          *     Args:
          *         files: The multipart file parts.
+         *         paths: Optional relative path per file, positionally aligned with
+         *             ``files``.
          *
          *     Returns:
          *         Per-file outcomes, in upload order.
          *
          *     Raises:
-         *         HTTPException: ``422 no_file_stored`` when every file was rejected
-         *             on its own merits (extension/size/name); ``500
+         *         HTTPException: ``422 paths_mismatch`` when ``paths`` is present
+         *             with a different length than ``files`` (a positional contract
+         *             must be checked, not trusted); ``422 too_many_files`` / ``422
+         *             batch_too_large`` when the batch busts ``UPLOAD_MAX_FILES`` /
+         *             ``UPLOAD_MAX_TOTAL_MB`` (checked before anything is written);
+         *             ``422 no_file_stored`` when every file was rejected on its own
+         *             merits (extension/size/name/path); ``500
          *             docs_path_not_writable`` when nothing landed because the server
          *             couldn't write ``DOCS_PATH`` (e.g. the ``./docs`` bind mount is
          *             not writable by the api container's user).
@@ -416,6 +431,8 @@ export interface components {
         Body_upload_documents_api_documents_post: {
             /** Files */
             files: string[];
+            /** Paths */
+            paths?: string[] | null;
         };
         /**
          * ChatOverrides
@@ -918,16 +935,21 @@ export interface components {
          * @description Outcome for one file of a ``POST /api/documents`` upload.
          *
          *     Attributes:
-         *         file_name: The stored (sanitized) file name.
+         *         file_name: The stored (sanitized) file name (rejections echo the
+         *             client-supplied name/path they rejected).
          *         size_bytes: Bytes written (``0`` when rejected).
          *         stored: Whether the file landed in ``DOCS_PATH``.
-         *         replaced: Whether an existing same-named file was overwritten (a
-         *             re-upload; the next ingest re-processes it under a new hash).
+         *         replaced: Whether an existing file at the same target was
+         *             overwritten (a re-upload; the next ingest re-processes it under
+         *             a new hash).
          *         reason: Rejection reason when ``stored`` is false
          *             (``extension_not_allowed`` | ``file_too_large`` |
-         *             ``invalid_filename`` | ``write_failed`` — the last is a server-
-         *             side problem, escalated to a structured ``500`` when no file in
-         *             the batch landed).
+         *             ``invalid_filename`` | ``invalid_path`` | ``path_too_deep`` |
+         *             ``write_failed`` — the last is a server-side problem, escalated
+         *             to a structured ``500`` when no file in the batch landed).
+         *         relative_path: The stored path relative to ``DOCS_PATH`` when the
+         *             upload declared one (folder uploads, spec_v3 §5.2); ``None``
+         *             for flat uploads and rejections.
          */
         UploadedFileOut: {
             /** File Name */
@@ -943,6 +965,8 @@ export interface components {
             replaced: boolean;
             /** Reason */
             reason?: string | null;
+            /** Relative Path */
+            relative_path?: string | null;
         };
         /** ValidationError */
         ValidationError: {

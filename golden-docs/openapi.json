@@ -10,6 +10,20 @@
             },
             "title": "Files",
             "type": "array"
+          },
+          "paths": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paths"
           }
         },
         "required": [
@@ -1177,7 +1191,7 @@
         "type": "object"
       },
       "UploadedFileOut": {
-        "description": "Outcome for one file of a ``POST /api/documents`` upload.\n\nAttributes:\n    file_name: The stored (sanitized) file name.\n    size_bytes: Bytes written (``0`` when rejected).\n    stored: Whether the file landed in ``DOCS_PATH``.\n    replaced: Whether an existing same-named file was overwritten (a\n        re-upload; the next ingest re-processes it under a new hash).\n    reason: Rejection reason when ``stored`` is false\n        (``extension_not_allowed`` | ``file_too_large`` |\n        ``invalid_filename`` | ``write_failed`` \u2014 the last is a server-\n        side problem, escalated to a structured ``500`` when no file in\n        the batch landed).",
+        "description": "Outcome for one file of a ``POST /api/documents`` upload.\n\nAttributes:\n    file_name: The stored (sanitized) file name (rejections echo the\n        client-supplied name/path they rejected).\n    size_bytes: Bytes written (``0`` when rejected).\n    stored: Whether the file landed in ``DOCS_PATH``.\n    replaced: Whether an existing file at the same target was\n        overwritten (a re-upload; the next ingest re-processes it under\n        a new hash).\n    reason: Rejection reason when ``stored`` is false\n        (``extension_not_allowed`` | ``file_too_large`` |\n        ``invalid_filename`` | ``invalid_path`` | ``path_too_deep`` |\n        ``write_failed`` \u2014 the last is a server-side problem, escalated\n        to a structured ``500`` when no file in the batch landed).\n    relative_path: The stored path relative to ``DOCS_PATH`` when the\n        upload declared one (folder uploads, spec_v3 \u00a75.2); ``None``\n        for flat uploads and rejections.",
         "properties": {
           "file_name": {
             "title": "File Name",
@@ -1193,6 +1207,17 @@
               }
             ],
             "title": "Reason"
+          },
+          "relative_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relative Path"
           },
           "replaced": {
             "default": false,
@@ -1574,7 +1599,7 @@
         ]
       },
       "post": {
-        "description": "Upload file(s) into ``DOCS_PATH`` (no auto-ingest).\n\nEach file is validated and stored independently; rejected files are\nreported per-file so a mixed batch partially succeeds. A same-named\nexisting file is replaced (the re-upload flow) \u2014 its changed content\nhash makes the next ingest re-process it.\n\nArgs:\n    files: The multipart file parts.\n\nReturns:\n    Per-file outcomes, in upload order.\n\nRaises:\n    HTTPException: ``422 no_file_stored`` when every file was rejected\n        on its own merits (extension/size/name); ``500\n        docs_path_not_writable`` when nothing landed because the server\n        couldn't write ``DOCS_PATH`` (e.g. the ``./docs`` bind mount is\n        not writable by the api container's user).",
+        "description": "Upload file(s) into ``DOCS_PATH`` (no auto-ingest).\n\nEach file is validated and stored independently; rejected files are\nreported per-file so a mixed batch partially succeeds. A same-named\nexisting file is replaced (the re-upload flow) \u2014 its changed content\nhash makes the next ingest re-process it.\n\nWith ``paths`` (folder uploads, spec_v3 \u00a75.2), each file lands at its\nsanitized relative path under ``DOCS_PATH``, preserving nested\nstructure \u2014 structure is *identity*: ``doc_id`` hashes the relative\npath, so ``q3/notes.md`` and ``q4/notes.md`` must not collapse onto one\nname. Entries pair with ``files`` positionally; an empty-string entry\nkeeps that file on the flat path. Without ``paths`` the flat contract\nis untouched.\n\nArgs:\n    files: The multipart file parts.\n    paths: Optional relative path per file, positionally aligned with\n        ``files``.\n\nReturns:\n    Per-file outcomes, in upload order.\n\nRaises:\n    HTTPException: ``422 paths_mismatch`` when ``paths`` is present\n        with a different length than ``files`` (a positional contract\n        must be checked, not trusted); ``422 too_many_files`` / ``422\n        batch_too_large`` when the batch busts ``UPLOAD_MAX_FILES`` /\n        ``UPLOAD_MAX_TOTAL_MB`` (checked before anything is written);\n        ``422 no_file_stored`` when every file was rejected on its own\n        merits (extension/size/name/path); ``500\n        docs_path_not_writable`` when nothing landed because the server\n        couldn't write ``DOCS_PATH`` (e.g. the ``./docs`` bind mount is\n        not writable by the api container's user).",
         "operationId": "upload_documents_api_documents_post",
         "requestBody": {
           "content": {

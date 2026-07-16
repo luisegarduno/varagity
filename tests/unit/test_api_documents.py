@@ -17,6 +17,7 @@ from fastapi import FastAPI
 
 from varagity.api.deps import get_bm25_store, get_vector_store
 from varagity.api.main import create_app
+from varagity.api.routes.documents import _safe_relative_path
 from varagity.stores.records import DocumentInfo
 
 
@@ -102,6 +103,7 @@ class TestUpload:
             "stored": True,
             "replaced": False,
             "reason": None,
+            "relative_path": None,
         }
         assert (docs_root / "notes.md").read_bytes() == b"# hi there"
 
@@ -133,6 +135,7 @@ class TestUpload:
             "stored": False,
             "replaced": False,
             "reason": "extension_not_allowed",
+            "relative_path": None,
         }
         assert not (docs_root / "bad.exe").exists()
 
@@ -209,6 +212,220 @@ class TestUpload:
             docs_root.chmod(0o755)
         assert response.status_code == 500
         assert response.json()["error"]["code"] == "docs_path_not_writable"
+
+
+class TestSafeRelativePath:
+    """The spec_v3 §5.2 traversal table — rules 1–5, straight on the function."""
+
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "../evil.md",  # parent escape
+            "..\\evil.md",  # backslash parent escape
+            "q3/../../evil.md",  # nested parent escape
+            "/etc/evil.md",  # absolute
+            "//etc/evil.md",  # protocol-relative-ish absolute
+            "C:\\evil.md",  # drive letter, backslashes
+            "C:/evil.md",  # drive letter, forward slashes
+            "%2e%2e/evil.md",  # URL-encoded dot-dot (never decoded, never stored)
+            "q3/%2fevil.md",  # URL-encoded slash
+            "q3／evil.md",  # fullwidth solidus — NFKC-normalizes to "/"
+            "q3/ev\x00il.md",  # embedded NUL
+            "q3/ev\x07il.md",  # control character
+            ".git/config",  # dot-directory
+            "q3/.hidden.md",  # dotfile segment
+            "q3//evil.md",  # empty segment
+            "q3/./evil.md",  # "." segment
+            "q3/evil.md/",  # trailing separator (empty final segment)
+            "q3/ evil.md",  # segment sanitization would strip it ⇒ rejected, not transformed
+            "CON/evil.md",  # Windows reserved device name
+            "q3/NUL.md",  # reserved stem in the file position
+            "",  # empty path
+            "a/" * 600 + "evil.md",  # over the total length bound
+            "q3/" + "x" * 300 + ".md",  # over the per-segment length bound
+        ],
+    )
+    def test_hostile_paths_are_rejected(self, hostile: str) -> None:
+        assert _safe_relative_path(hostile) is None
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("notes.md", "notes.md"),
+            ("q3/notes.md", "q3/notes.md"),
+            ("reports/2026/q3/notes.md", "reports/2026/q3/notes.md"),
+            ("q3\\notes.md", "q3/notes.md"),  # backslash-separated but contained
+            ("Ünïcode/nötes.md", "Ünïcode/nötes.md"),  # non-ASCII is fine, lookalikes aren't
+        ],
+    )
+    def test_contained_paths_normalize(self, raw: str, expected: str) -> None:
+        assert str(_safe_relative_path(raw)) == expected
+
+
+class TestRelativePathUpload:
+    async def test_nested_paths_land_and_report(self, docs_root: Path) -> None:
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("notes.md", b"q3 notes"), upload_part("notes.md", b"q4 notes")],
+            data={"paths": ["q3/notes.md", "q4/notes.md"]},
+        )
+        assert response.status_code == 201
+        entries = response.json()["files"]
+        assert [e["relative_path"] for e in entries] == ["q3/notes.md", "q4/notes.md"]
+        assert all(e["file_name"] == "notes.md" and e["stored"] for e in entries)
+        assert (docs_root / "q3" / "notes.md").read_bytes() == b"q3 notes"
+        assert (docs_root / "q4" / "notes.md").read_bytes() == b"q4 notes"
+
+    async def test_traversal_path_is_rejected_and_lands_nowhere(self, docs_root: Path) -> None:
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("evil.md", b"nope")],
+            data={"paths": ["../evil.md"]},
+        )
+        assert response.status_code == 422  # nothing in the batch stored
+        assert "invalid_path" in response.json()["error"]["message"]
+        assert list(docs_root.iterdir()) == []
+        assert not (docs_root.parent / "evil.md").exists()
+
+    async def test_symlink_escape_is_caught_by_the_containment_backstop(
+        self, docs_root: Path, tmp_path: Path
+    ) -> None:
+        """Rules 1–5 pass ("link/evil.md" looks clean) — rule 6 must still hold."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (docs_root / "link").symlink_to(outside, target_is_directory=True)
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("evil.md", b"nope")],
+            data={"paths": ["link/evil.md"]},
+        )
+        assert response.status_code == 422
+        assert "invalid_path" in response.json()["error"]["message"]
+        assert list(outside.iterdir()) == []
+
+    async def test_depth_overflow_is_its_own_reason(
+        self, docs_root: Path, settings_env: Callable[..., None]
+    ) -> None:
+        settings_env(UPLOAD_MAX_PATH_DEPTH=2)
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("deep.md", b"fine"), upload_part("ok.md", b"fine")],
+            data={"paths": ["a/b/deep.md", "a/ok.md"]},
+        )
+        assert response.status_code == 201  # the shallow file landed
+        entries = {e["file_name"]: e for e in response.json()["files"]}
+        assert entries["a/b/deep.md"]["reason"] == "path_too_deep"
+        assert entries["ok.md"]["stored"] is True
+
+    async def test_empty_path_entry_keeps_that_file_flat(self, docs_root: Path) -> None:
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("flat.md", b"flat"), upload_part("nested.md", b"nested")],
+            data={"paths": ["", "q3/nested.md"]},
+        )
+        entries = {e["file_name"]: e for e in response.json()["files"]}
+        assert entries["flat.md"]["relative_path"] is None
+        assert (docs_root / "flat.md").exists()
+        assert (docs_root / "q3" / "nested.md").exists()
+
+    async def test_paths_length_mismatch_is_a_structured_422(self, docs_root: Path) -> None:
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("a.md", b"a"), upload_part("b.md", b"b")],
+            data={"paths": ["a.md"]},
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "paths_mismatch"
+        assert list(docs_root.iterdir()) == []  # checked before anything is written
+
+    async def test_nested_reupload_replaces_in_place(self, docs_root: Path) -> None:
+        await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("notes.md", b"v1")],
+            data={"paths": ["q3/notes.md"]},
+        )
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("notes.md", b"v2 longer")],
+            data={"paths": ["q3/notes.md"]},
+        )
+        (entry,) = response.json()["files"]
+        assert entry["replaced"] is True
+        assert (docs_root / "q3" / "notes.md").read_bytes() == b"v2 longer"
+
+    async def test_disallowed_extension_still_rejected_on_the_path_route(
+        self, docs_root: Path
+    ) -> None:
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("run.exe", b"nope")],
+            data={"paths": ["q3/run.exe"]},
+        )
+        assert response.status_code == 422
+        assert "extension_not_allowed" in response.json()["error"]["message"]
+        assert list(docs_root.iterdir()) == []
+
+
+class TestBatchCaps:
+    async def test_too_many_files_is_a_clean_422(
+        self, docs_root: Path, settings_env: Callable[..., None]
+    ) -> None:
+        settings_env(UPLOAD_MAX_FILES=2)
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part(f"f{i}.md", b"x") for i in range(3)],
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "too_many_files"
+        assert list(docs_root.iterdir()) == []  # nothing written
+
+    async def test_batch_over_total_budget_is_a_clean_422(
+        self, docs_root: Path, settings_env: Callable[..., None]
+    ) -> None:
+        settings_env(UPLOAD_MAX_TOTAL_MB=1)  # per-file cap is already 1 MB here
+        just_under = b"x" * (700 * 1024)  # two of these clear per-file, bust the total
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("a.md", just_under), upload_part("b.md", just_under)],
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "batch_too_large"
+        assert list(docs_root.iterdir()) == []
+
+    async def test_batch_at_the_cap_passes(
+        self, docs_root: Path, settings_env: Callable[..., None]
+    ) -> None:
+        settings_env(UPLOAD_MAX_FILES=2)
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("a.md", b"a"), upload_part("b.md", b"b")],
+        )
+        assert response.status_code == 201
+        assert all(e["stored"] for e in response.json()["files"])
 
 
 class TestList:

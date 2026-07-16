@@ -142,6 +142,15 @@ class Settings(BaseSettings):
             the API (the web app's origin; dev-only posture — spec_v2 §14).
         UPLOAD_MAX_MB: Per-file size cap for corpus uploads
             (``POST /api/documents``, spec_v2 §4.2).
+        UPLOAD_MAX_FILES: Per-request file-count cap for corpus uploads
+            (spec_v3 §5.2) — a dragged home directory gets a clean 422
+            instead of a filled disk.
+        UPLOAD_MAX_TOTAL_MB: Per-request size cap summed across every file
+            of one upload (``UPLOAD_MAX_MB`` stays the per-file cap; this
+            bounds the batch).
+        UPLOAD_MAX_PATH_DEPTH: Maximum path segments (folders plus the file
+            name) a relative upload path may carry (spec_v3 §5.2 — folder
+            uploads preserve structure, bounded).
         METRICS_ENABLED: Whether the API serves ``GET /metrics`` (spec_v2
             §6). Gates the endpoint only — the in-app collectors always
             record (cheap in-memory counters).
@@ -213,6 +222,9 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     API_CORS_ORIGINS: str = "http://localhost:3000"
     UPLOAD_MAX_MB: int = 50
+    UPLOAD_MAX_FILES: int = 500
+    UPLOAD_MAX_TOTAL_MB: int = 2048
+    UPLOAD_MAX_PATH_DEPTH: int = 12
 
     METRICS_ENABLED: bool = True
     PROMETHEUS_PORT: int = 9090
@@ -288,6 +300,34 @@ class Settings(BaseSettings):
                 raise ValueError(f"{name} must be a valid TCP port (1–65535); got {port}")
         if self.UPLOAD_MAX_MB <= 0:
             raise ValueError(f"UPLOAD_MAX_MB must be positive; got {self.UPLOAD_MAX_MB}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_upload_limits(self) -> "Settings":
+        """Reject upload batch caps that cannot admit a valid batch (spec_v3 §5.2).
+
+        ``UPLOAD_MAX_MB``'s own positivity lives in :meth:`_validate_api`;
+        this validator owns the batch-level caps and their one cross
+        constraint: a per-file cap above the whole batch's budget is a
+        config bug, not a tighter limit.
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If ``UPLOAD_MAX_FILES``, ``UPLOAD_MAX_TOTAL_MB``, or
+                ``UPLOAD_MAX_PATH_DEPTH`` is not positive, or if
+                ``UPLOAD_MAX_MB`` exceeds ``UPLOAD_MAX_TOTAL_MB``.
+        """
+        for name in ("UPLOAD_MAX_FILES", "UPLOAD_MAX_TOTAL_MB", "UPLOAD_MAX_PATH_DEPTH"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive; got {getattr(self, name)}")
+        if self.UPLOAD_MAX_MB > self.UPLOAD_MAX_TOTAL_MB:
+            raise ValueError(
+                f"UPLOAD_MAX_MB ({self.UPLOAD_MAX_MB}) must not exceed "
+                f"UPLOAD_MAX_TOTAL_MB ({self.UPLOAD_MAX_TOTAL_MB}) — a per-file cap "
+                "above the whole batch's budget is a config bug"
+            )
         return self
 
     @field_validator("OCR_LANGUAGES")

@@ -49,6 +49,9 @@ SETTINGS_ENV_VARS = (
     "API_PORT",
     "API_CORS_ORIGINS",
     "UPLOAD_MAX_MB",
+    "UPLOAD_MAX_FILES",
+    "UPLOAD_MAX_TOTAL_MB",
+    "UPLOAD_MAX_PATH_DEPTH",
 )
 
 
@@ -343,6 +346,29 @@ class TestApiSettings:
     def test_non_positive_upload_cap_fails_fast(self, bad_mb: int) -> None:
         with pytest.raises(ValidationError, match="UPLOAD_MAX_MB"):
             Settings(_env_file=None, UPLOAD_MAX_MB=bad_mb)
+
+    def test_upload_batch_defaults(self) -> None:
+        settings = Settings(_env_file=None)
+        assert settings.UPLOAD_MAX_FILES == 500
+        assert settings.UPLOAD_MAX_TOTAL_MB == 2048
+        assert settings.UPLOAD_MAX_PATH_DEPTH == 12
+
+    @pytest.mark.parametrize(
+        "field", ["UPLOAD_MAX_FILES", "UPLOAD_MAX_TOTAL_MB", "UPLOAD_MAX_PATH_DEPTH"]
+    )
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_non_positive_batch_caps_fail_fast(self, field: str, bad: int) -> None:
+        with pytest.raises(ValidationError, match=field):
+            Settings(_env_file=None, **{field: bad})
+
+    def test_per_file_cap_above_batch_budget_fails_fast(self) -> None:
+        """A per-file cap larger than the whole batch's budget is a config bug."""
+        with pytest.raises(ValidationError, match="UPLOAD_MAX_TOTAL_MB"):
+            Settings(_env_file=None, UPLOAD_MAX_MB=100, UPLOAD_MAX_TOTAL_MB=50)
+
+    def test_per_file_cap_equal_to_batch_budget_is_valid(self) -> None:
+        settings = Settings(_env_file=None, UPLOAD_MAX_MB=50, UPLOAD_MAX_TOTAL_MB=50)
+        assert settings.UPLOAD_MAX_TOTAL_MB == 50
 
     def test_cors_origins_parse_strip_and_dedupe(self) -> None:
         settings = Settings(

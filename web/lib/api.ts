@@ -147,10 +147,16 @@ export function listDocuments(): Promise<DocumentOut[]> {
 /**
  * Upload files into the corpus directory (no auto-ingest). The browser
  * sets the multipart boundary itself, so no content-type header here.
+ * `paths` (folder uploads, spec_v3 §5.2) pairs one relative path per file,
+ * positionally — the server rejects the batch when the lengths differ.
  */
-export async function uploadDocuments(files: File[]): Promise<UploadResponse> {
+export async function uploadDocuments(
+  files: File[],
+  paths?: readonly string[] | null,
+): Promise<UploadResponse> {
   const form = new FormData();
   for (const file of files) form.append("files", file, file.name);
+  if (paths != null) for (const path of paths) form.append("paths", path);
   const response = await fetch(`${API_URL}/api/documents`, {
     method: "POST",
     body: form,

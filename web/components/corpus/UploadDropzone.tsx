@@ -4,33 +4,15 @@ import { UploadIcon } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import {
-  ApiError,
-  uploadDocuments,
-  type ConfigResponse,
-  type UploadedFile,
-} from "@/lib/api";
-import { validateUpload } from "@/lib/upload";
+import { type ConfigResponse } from "@/lib/api";
+import { useUpload } from "@/lib/use-upload";
 import { cn } from "@/lib/utils";
-
-interface UploadOutcome {
-  fileName: string;
-  ok: boolean;
-  detail: string;
-}
-
-/** Human phrasing for the client-side rejection reasons (lib/upload.ts). */
-const REJECTION_LABELS: Record<string, string> = {
-  extension_not_allowed: "file type not allowed",
-  file_too_large: "over the size limit",
-  invalid_filename: "invalid file name",
-};
 
 /**
  * Drag-drop / click-to-pick upload into `DOCS_PATH` (spec_v2 §4.2).
- * Client-side validation mirrors the server's extension/size rules (from
- * `GET /api/config`) so bad files are refused before uploading; accepted
- * files go up in one multipart POST and the per-file outcomes render.
+ * The validate → upload → report machinery lives in the shared
+ * `useUpload` hook (spec_v3 §5.3 — the composer's 📎 flow reuses it);
+ * this component owns only the dropzone chrome and the outcome rows.
  * Uploading does **not** ingest — that's the explicit ingest action.
  */
 export function UploadDropzone({
@@ -42,63 +24,7 @@ export function UploadDropzone({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [outcomes, setOutcomes] = useState<UploadOutcome[]>([]);
-
-  async function handleFiles(files: File[]) {
-    if (files.length === 0 || busy) return;
-    const rejected: UploadOutcome[] = [];
-    const accepted: File[] = [];
-    for (const file of files) {
-      const check = config
-        ? validateUpload(
-            file.name,
-            file.size,
-            config.allowed_extensions,
-            config.upload_max_mb,
-          )
-        : { fileName: file.name, ok: true as const };
-      if (check.ok) accepted.push(file);
-      else
-        rejected.push({
-          fileName: check.fileName,
-          ok: false,
-          detail:
-            (check.reason && REJECTION_LABELS[check.reason]) ??
-            check.reason ??
-            "rejected",
-        });
-    }
-
-    let stored: UploadOutcome[] = [];
-    if (accepted.length > 0) {
-      setBusy(true);
-      try {
-        const response = await uploadDocuments(accepted);
-        stored = response.files.map((entry: UploadedFile) => ({
-          fileName: entry.file_name,
-          ok: entry.stored,
-          detail: entry.stored
-            ? entry.replaced
-              ? "replaced — re-ingest to pick up the new content"
-              : "uploaded — not yet ingested"
-            : (entry.reason ?? "rejected"),
-        }));
-        if (response.files.some((entry) => entry.stored)) onUploaded();
-      } catch (failure) {
-        stored = [
-          {
-            fileName: `${accepted.length} file(s)`,
-            ok: false,
-            detail: failure instanceof ApiError ? failure.message : String(failure),
-          },
-        ];
-      } finally {
-        setBusy(false);
-      }
-    }
-    setOutcomes([...stored, ...rejected]);
-  }
+  const { busy, outcomes, handleFiles } = useUpload(config, onUploaded);
 
   const constraints = config
     ? `${config.allowed_extensions.join(" ")} · up to ${config.upload_max_mb} MB each`
