@@ -279,9 +279,21 @@ services:
   # (port 8000) — no host port (the api service owns host 8000).
   prefect-exporter:
     container_name: prefect-exporter
+    # Do NOT unpin: there is no published compatibility matrix between the
+    # exporter and Prefect-server versions — 3.6.1 working against this
+    # Prefect 3.x server is verified, not implied by the version numbers.
     image: prefecthq/prometheus-prefect-exporter:3.6.1
     profiles: ["prefect-exporter"]
     environment:
+      # The exporter windows its flow-RUN queries to the last OFFSET_MINUTES
+      # (default 3 — main.py:22, metrics/flow_runs.py). Our flows are bursty
+      # and rare, so a 3-minute window reads 0 for the same reason increase()
+      # over the ingest counters does (spec_v3 §6.1). 24h answers "did
+      # anything run today?". prefect_flows_total is unwindowed and unaffected.
+      OFFSET_MINUTES: "1440"
+      # MUST keep the /api suffix: metrics/healthz.py builds its probe as
+      # f"{url}/health" with no fixup and SystemExit()s on failure — a wrong
+      # URL is a crash-loop, not an empty panel. Do not "clean this up".
       PREFECT_API_URL: ${PREFECT_API_URL}
     depends_on:
       prefect:

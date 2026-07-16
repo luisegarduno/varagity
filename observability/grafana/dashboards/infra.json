@@ -6,7 +6,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "10s",
@@ -38,6 +38,21 @@
   },
   "panels": [
     {
+      "id": 26,
+      "type": "text",
+      "title": "Reading this dashboard",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**The GPU and Prefect rows need opt-in profiles:**\n\n`docker compose --profile gpu-metrics --profile prefect-exporter up -d`\n\nA profile is **not sticky** \u2014 plain `docker compose` commands don't include the exporter (a `down` + plain `up -d` loses it and its target goes red; config changes never reach it). Set `COMPOSE_PROFILES` in `.env` to keep it."
+      }
+    },
+    {
       "id": 16,
       "type": "state-timeline",
       "title": "Backing services (last health probe)",
@@ -50,7 +65,7 @@
         "h": 8,
         "w": 14,
         "x": 0,
-        "y": 0
+        "y": 4
       },
       "fieldConfig": {
         "defaults": {
@@ -131,7 +146,7 @@
         "h": 8,
         "w": 10,
         "x": 14,
-        "y": 0
+        "y": 4
       },
       "fieldConfig": {
         "defaults": {
@@ -214,7 +229,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 12
       },
       "fieldConfig": {
         "defaults": {
@@ -233,7 +248,8 @@
               "mode": "none",
               "group": "A"
             }
-          }
+          },
+          "noValue": "enable the gpu-metrics profile: docker compose --profile gpu-metrics up -d"
         },
         "overrides": []
       },
@@ -273,7 +289,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 12
       },
       "fieldConfig": {
         "defaults": {
@@ -292,7 +308,8 @@
               "mode": "none",
               "group": "A"
             }
-          }
+          },
+          "noValue": "enable the gpu-metrics profile: docker compose --profile gpu-metrics up -d"
         },
         "overrides": []
       },
@@ -323,7 +340,7 @@
       "id": 20,
       "type": "timeseries",
       "title": "Prefect flow runs by state \u2014 prefect-exporter profile",
-      "description": "Populated when the prefect-exporter compose profile is enabled \u2014 orchestration-level run states polled from the Prefect API.",
+      "description": "Populated when the prefect-exporter compose profile is enabled \u2014 orchestration-level run states polled from the Prefect API, windowed to runs started within the exporter's OFFSET_MINUTES (24 h in this compose; the image default of 3 minutes reads 0 on a bursty workload).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -332,7 +349,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -351,7 +368,8 @@
               "mode": "none",
               "group": "A"
             }
-          }
+          },
+          "noValue": "enable the prefect-exporter profile: docker compose --profile prefect-exporter up -d"
         },
         "overrides": []
       },
@@ -382,7 +400,7 @@
       "id": 21,
       "type": "timeseries",
       "title": "Prefect totals \u2014 prefect-exporter profile",
-      "description": "Cumulative Prefect object counts from the optional exporter.",
+      "description": "Prefect object counts from the optional exporter. deployments reads 0 forever by design \u2014 flows run in-process from the CLI/API, so there are no deployments (or work pools) to count. flow runs counts only runs started within OFFSET_MINUTES (24 h in this compose); flows is unwindowed.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -391,7 +409,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -410,7 +428,8 @@
               "mode": "none",
               "group": "A"
             }
-          }
+          },
+          "noValue": "enable the prefect-exporter profile: docker compose --profile prefect-exporter up -d"
         },
         "overrides": []
       },
@@ -452,6 +471,300 @@
           },
           "expr": "prefect_deployments_total",
           "legendFormat": "deployments"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "API uptime",
+      "description": "Time since the API process started (prometheus_client's default process collector). A restart resets this \u2014 and zeroes every in-process counter with it; the corpus gauges survive because they read pgvector.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "noValue": "\u2014",
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "time() - process_start_time_seconds{job=\"varagity-api\"}",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "Scrape duration",
+      "description": "Wall-clock time of Prometheus's last scrape of api:8000/metrics. The corpus gauges query pgvector inside this window (behind a 10 s TTL), so a slow store surfaces here first.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "noValue": "\u2014",
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "scrape_duration_seconds{job=\"varagity-api\"}",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "stat",
+      "title": "/metrics samples",
+      "description": "Samples in the last scrape of the varagity-api target \u2014 a cheap 'the metric surface is alive and its shape is stable' signal.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 12,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "noValue": "\u2014",
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "scrape_samples_scraped{job=\"varagity-api\"}",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "stat",
+      "title": "Corpus documents",
+      "description": "Documents currently in pgvector. Store-derived: survives an API restart and counts CLI ingests too \u2014 the same gauge the Ingestion dashboard reads.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 16,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "\u2014",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(varagity_corpus_documents)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "Corpus chunks",
+      "description": "Chunks currently in pgvector. Store-derived: survives an API restart and counts CLI ingests too \u2014 the same gauge the Ingestion dashboard reads.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 20,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "\u2014",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(varagity_corpus_chunks)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
         }
       ]
     }

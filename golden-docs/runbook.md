@@ -114,7 +114,9 @@ docker compose --profile gpu-metrics up -d        # dcgm-exporter: GPU VRAM/util
 
 `prefect-exporter` exposes no host port (Prometheus scrapes it in-network at
 `prefect-exporter:8000`); `dcgm-exporter` reserves **all** GPUs and runs with
-`cap_add: SYS_ADMIN` (DCGM's documented posture).
+`cap_add: SYS_ADMIN` (DCGM's documented posture). Profiles are **not
+sticky** across plain compose invocations — see
+[the optional exporter profiles](#the-optional-exporter-profiles).
 
 `scripts/smoke.sh` then verifies substance, not just liveness — ten
 sequenced checks over the default stack: (1) every container's health state
@@ -561,6 +563,45 @@ App metrics flow api → Prometheus → Grafana; everything is provisioned —
   2080 Ti / RTX 5060 included. Blank panels there are the cards, not broken
   wiring.
 
+### The optional exporter profiles
+
+Both exporters are compose **profiles** — defined in `docker-compose.yml`
+but excluded from a plain `docker compose up -d`:
+
+```bash
+docker compose --profile prefect-exporter up -d   # Prefect flow/task-run metrics
+docker compose --profile gpu-metrics up -d        # dcgm-exporter: GPU VRAM/utilization
+```
+
+- **Profiles are not sticky.** Plain `docker compose` commands don't include
+  a profiled service: a `down` + plain `up -d` loses the exporter (its
+  target goes red on the Infra dashboard), and compose config changes never
+  reach a running one — though a plain `up -d` does leave it running,
+  unmanaged. To make a profile part of every invocation, set
+  `COMPOSE_PROFILES=prefect-exporter` in `.env` (comma-separate to add
+  `gpu-metrics`).
+- **`OFFSET_MINUTES` — why the compose sets 1440.** The exporter windows its
+  flow-*run* queries to runs **started within the last `OFFSET_MINUTES`**
+  (image default **3**). Our flows are bursty and rare, so a 3-minute window
+  reads `prefect_flow_runs_total = 0` and an empty `prefect_info_flow_runs`
+  nearly always — the same failure class as `increase()` over the ingest
+  counters (spec_v3 §6.1). 1440 (24 h) answers "did anything run today?".
+  `prefect_flows_total` is unwindowed and unaffected;
+  `prefect_deployments_total` and the work-pool counts read **0 forever by
+  design** — flows run in-process, so there are no deployments or workers to
+  count.
+- **`PREFECT_API_URL` must keep its `/api` suffix**: the exporter's health
+  probe concatenates `/health` onto it and `SystemExit`s on failure — a
+  wrong URL is a crash-loop, not an empty panel.
+- **A pre-start scrape error reads "server misbehaving".** While the
+  exporter container is down, Docker's embedded DNS reports the target's
+  failed lookup as `lookup prefect-exporter ... server misbehaving` rather
+  than NXDOMAIN — that is the container being absent, not a real network
+  fault.
+- **The exporter image ships no `wget`/`curl`** — probe it via Prometheus's
+  `/api/v1/targets` (or the Infra dashboard's scrape-targets panel), not
+  from a sibling container.
+
 ## Security posture (dev-only)
 
 This stack is a **single-user development posture** — do not expose it:
@@ -609,3 +650,5 @@ context):
 | `POST /api/ingest` answers 409 | One run at a time — watch `GET /api/ingest/status`, retry once it's terminal |
 | First PDF ingest very slow | One-time Docling/EasyOCR model downloads ([above](#first-run-model-downloads)) |
 | Flow runs missing from the Prefect UI (host run) | `PREFECT_API_URL` not set for the process — pass the localhost override |
+| Prefect flow-run panels read 0 with the exporter up | The exporter only reports runs started within `OFFSET_MINUTES` (compose sets 1440; the image default of 3 reads 0 between runs) — check the container's env ([above](#the-optional-exporter-profiles)) |
+| Exporter gone after a plain `docker compose up -d`/`down` | Profiles are not sticky — set `COMPOSE_PROFILES` in `.env` ([above](#the-optional-exporter-profiles)) |
