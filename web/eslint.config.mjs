@@ -2,9 +2,40 @@ import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";
 
+// Effects are the codebase's sharpest footgun: they add render passes,
+// race on fetches, and turn user actions into flag-then-react choreography.
+// The two legitimate uses are wrapped as named primitives in hooks/, each
+// with a scoped disable — everything else has a better answer.
+const NO_USE_EFFECT = [
+  "Don't call useEffect directly.",
+  "Deriving state? Compute it inline.",
+  "Fetching? useQuery over lib/queries.ts.",
+  "Responding to a user action? Do it in the event handler.",
+  "Syncing with an external system on mount? hooks/use-mount-effect.ts.",
+  "Resetting state when a prop changes? key the component instead.",
+  "See .claude/skills/no-use-effect and https://react.dev/learn/you-might-not-need-an-effect",
+].join(" ");
+
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        // Bare `useEffect(...)`.
+        {
+          selector: "CallExpression[callee.name='useEffect']",
+          message: NO_USE_EFFECT,
+        },
+        // Namespaced `React.useEffect(...)`.
+        {
+          selector: "CallExpression[callee.property.name='useEffect']",
+          message: NO_USE_EFFECT,
+        },
+      ],
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:

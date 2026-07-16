@@ -93,7 +93,7 @@ uv run python scripts/export_openapi.py   # refresh golden-docs/openapi.json aft
 bun run dev                        # dev server against NEXT_PUBLIC_API_URL
 bun run test                       # Vitest unit tests — the suite that CI coverage-gates
 bun run e2e                        # opt-in Playwright — needs the live stack on :3000/:8000
-bun run lint && bun run build
+bun run lint && bun run typecheck && bun run build
 bun run gen:types                  # regenerate lib/types.ts from the API's OpenAPI schema
 ```
 
@@ -119,6 +119,19 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
   evidence before prose. Frontend types are generated (`bun run gen:types`), never hand-edited;
   the `golden-docs/openapi.json` snapshot is drift-guarded — rerun
   `scripts/export_openapi.py` after surface changes (a unit test fails otherwise).
+- **No `useEffect` in `web/`** (`.claude/skills/no-use-effect`, enforced by
+  `no-restricted-syntax` — `bun run lint` fails on a direct call): derive state inline,
+  act in event handlers, fetch with `useQuery` over the `lib/queries.ts` factories, or
+  `key` a component to re-run on a value change. The only two sanctioned `useEffect`s are
+  the named primitives in `web/hooks/` (`useMountEffect` for mount-scoped external sync,
+  `useDebouncedValue` for the streaming anti-flash timer), each with a scoped disable.
+- **Server state lives in TanStack Query** (`web/lib/queries.ts`): one `queryOptions`
+  factory per dataset, so every consumer of the same data shares a cache entry and one
+  in-flight request. The window buses (`lib/*-bus.ts`) stayed the decoupling seam for
+  mutating surfaces, but only `QueryBusBridge` subscribes — it turns each event into
+  `invalidateQueries`. Conversation *list* and *transcript* keys are deliberately
+  disjoint (invalidation is prefix-matched), so a persisted turn re-orders the list
+  without discarding the transcript it was just folded into.
 - **Migrations**: ordered, idempotent SQL in `varagity/stores/migrations/NNN_*.sql`,
   tracked in `schema_migrations`, applied by the API on startup. `schema.sql` stays the
   fresh-install fast path — keep both in sync.
