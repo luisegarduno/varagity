@@ -6,6 +6,8 @@ import "./globals.css";
 
 import { AppearanceApplier } from "@/components/AppearanceApplier";
 import { CommandPalette } from "@/components/palette/CommandPalette";
+import { QueryBusBridge } from "@/components/query-bus-bridge";
+import { QueryProvider } from "@/components/query-provider";
 import { MobileTopBar } from "@/components/shell/MobileTopBar";
 import { Sidebar } from "@/components/Sidebar";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -58,23 +60,26 @@ export default function RootLayout({
         <a href="#main" className="skip-link">
           Skip to content
         </a>
-        <ThemeProvider>
-          <AppearanceApplier />
-          {/* Mounted once at the root: ⌘K works everywhere and navigation
-              can't unmount the palette mid-command. */}
-          <CommandPalette />
-          <TooltipProvider>
-            <div className="flex h-full flex-col">
-              <MobileTopBar />
-              <div className="flex min-h-0 flex-1">
-                <Sidebar />
-                <main id="main" className="flex min-w-0 flex-1 flex-col">
-                  {children}
-                </main>
+        <QueryProvider>
+          <QueryBusBridge />
+          <ThemeProvider>
+            <AppearanceApplier />
+            {/* Mounted once at the root: ⌘K works everywhere and navigation
+                can't unmount the palette mid-command. */}
+            <CommandPalette />
+            <TooltipProvider>
+              <div className="flex h-full flex-col">
+                <MobileTopBar />
+                <div className="flex min-h-0 flex-1">
+                  <Sidebar />
+                  <main id="main" className="flex min-w-0 flex-1 flex-col">
+                    {children}
+                  </main>
+                </div>
               </div>
-            </div>
-          </TooltipProvider>
-        </ThemeProvider>
+            </TooltipProvider>
+          </ThemeProvider>
+        </QueryProvider>
       </body>
     </html>
   );

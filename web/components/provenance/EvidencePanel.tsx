@@ -1,7 +1,7 @@
 "use client";
 
 import { PanelRightCloseIcon } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useRef, type RefObject } from "react";
 
 import { ChunkCard } from "@/components/provenance/ChunkCard";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,7 @@ import {
   DrawerHeader,
   DrawerTitle,
 } from "@/components/ui/drawer";
+import { useMountEffect } from "@/hooks/use-mount-effect";
 import { LIVE_EVIDENCE_KEY, type Evidence } from "@/lib/evidence";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,36 @@ import { cn } from "@/lib/utils";
 export interface EvidenceScrollTarget {
   chunkKey: string;
   nonce: number;
+}
+
+/**
+ * Scrolls one evidence card into view and pulses it. The list keys this on
+ * the request's `nonce`, so each citation click mounts a fresh instance and
+ * replays the scroll — which is what the nonce existed for all along.
+ * Unmounting (the sheet closing, the request clearing) settles the pulse.
+ */
+function ScrollToChunk({
+  chunkKey,
+  listRef,
+}: {
+  chunkKey: string;
+  listRef: RefObject<HTMLDivElement | null>;
+}) {
+  useMountEffect(() => {
+    const card = listRef.current?.querySelector<HTMLElement>(
+      `[data-chunk-key="${CSS.escape(chunkKey)}"]`,
+    );
+    if (!card) return;
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    card.classList.add("evidence-pulse");
+    const settle = () => card.classList.remove("evidence-pulse");
+    card.addEventListener("animationend", settle, { once: true });
+    return () => {
+      card.removeEventListener("animationend", settle);
+      settle();
+    };
+  });
+  return null;
 }
 
 // Preferred stage order; anything else the API adds renders after.
@@ -82,28 +113,19 @@ function EvidenceCardList({
 }) {
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  // Citation-chip clicks land here after the host re-rendered with the
-  // right answer's evidence: scroll the card into view and pulse it.
-  useEffect(() => {
-    if (!scrollTarget) return;
-    const card = listRef.current?.querySelector<HTMLElement>(
-      `[data-chunk-key="${CSS.escape(scrollTarget.chunkKey)}"]`,
-    );
-    if (!card) return;
-    card.scrollIntoView({ behavior: "smooth", block: "center" });
-    card.classList.add("evidence-pulse");
-    const settle = () => card.classList.remove("evidence-pulse");
-    card.addEventListener("animationend", settle, { once: true });
-    return () => {
-      card.removeEventListener("animationend", settle);
-      settle();
-    };
-  }, [scrollTarget]);
-
   const live = evidence?.key === LIVE_EVIDENCE_KEY;
 
   return (
     <div ref={listRef} className={cn("space-y-2", className)}>
+      {/* Citation-chip clicks land here after the host re-rendered with the
+          right answer's evidence. */}
+      {scrollTarget && (
+        <ScrollToChunk
+          key={scrollTarget.nonce}
+          chunkKey={scrollTarget.chunkKey}
+          listRef={listRef}
+        />
+      )}
       {evidence === null ? (
         <p className="p-4 text-center text-sm text-muted-foreground">
           Evidence appears here as answers are built.

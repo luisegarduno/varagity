@@ -1,7 +1,7 @@
 "use client";
 
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { memo, useEffect, useState } from "react";
+import { memo, useState } from "react";
 import ReactMarkdown, {
   type Components,
   type ExtraProps,
@@ -15,16 +15,6 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
 import { Button } from "@/components/ui/button";
-
-/** Debounce a fast-changing value (the ~80 ms anti-flash for streaming). */
-export function useDebouncedValue<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), delayMs);
-    return () => clearTimeout(timer);
-  }, [value, delayMs]);
-  return debounced;
-}
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);

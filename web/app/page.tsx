@@ -1,13 +1,51 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { RotateCcwIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useMountEffect } from "@/hooks/use-mount-effect";
 import { createConversation, listConversations } from "@/lib/api";
 import { describeChatError } from "@/lib/errors";
+
+/** Resolve the conversation to land on, creating one on a fresh install. */
+async function bootstrapConversation(): Promise<string> {
+  const conversations = await listConversations();
+  const target = conversations[0] ?? (await createConversation());
+  return target.conversation_id;
+}
+
+function LoadingSkeleton() {
+  return (
+    <div
+      role="status"
+      aria-busy="true"
+      aria-label="Loading"
+      className="flex flex-1 items-center justify-center p-8"
+    >
+      <div className="flex w-full max-w-sm flex-col gap-3">
+        <Skeleton className="h-4 w-3/5" />
+        <Skeleton className="h-4 w-4/5" />
+        <Skeleton className="h-4 w-2/5" />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Mounts only once a target id exists, which turns the redirect into a
+ * mount-time hand-off to the router rather than an effect watching for
+ * data to land.
+ */
+function RedirectToConversation({ conversationId }: { conversationId: string }) {
+  const router = useRouter();
+  useMountEffect(() => {
+    router.replace(`/c/${conversationId}`);
+  });
+  return <LoadingSkeleton />;
+}
 
 /**
  * Entry: land on the newest conversation, creating the first one on a
@@ -15,31 +53,22 @@ import { describeChatError } from "@/lib/errors";
  * (`NEXT_PUBLIC_API_URL`) — the web container never proxies the API.
  */
 export default function Home() {
-  const router = useRouter();
-  const [error, setError] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0); // bump to retry the bootstrap
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const conversations = await listConversations();
-        const target = conversations[0] ?? (await createConversation());
-        if (!cancelled) router.replace(`/c/${target.conversation_id}`);
-      } catch (caught) {
-        if (!cancelled) setError(String(caught));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [router, attempt]);
+  const { data, error, refetch } = useQuery({
+    queryKey: ["bootstrap-conversation"],
+    queryFn: bootstrapConversation,
+    // Nothing may outlive one visit: coming back here after deleting the
+    // conversation we last resolved must re-ask rather than redirect
+    // straight into the 404 the cache still remembers.
+    gcTime: 0,
+    staleTime: 0,
+  });
 
   if (error) {
     // The same banner language the chat's error path speaks (lib/errors).
+    const message = String(error);
     const descriptor = describeChatError({
       code: "network_error",
-      message: error,
+      message,
     });
     return (
       <div className="flex flex-1 items-center justify-center p-8">
@@ -58,16 +87,11 @@ export default function Home() {
               {descriptor.command}
             </code>
           )}
-          <p className="font-mono break-words text-muted-foreground">{error}</p>
+          <p className="font-mono break-words text-muted-foreground">
+            {message}
+          </p>
           <div className="pt-1">
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() => {
-                setError(null);
-                setAttempt((current) => current + 1);
-              }}
-            >
+            <Button size="xs" variant="outline" onClick={() => void refetch()}>
               <RotateCcwIcon aria-hidden />
               Try again
             </Button>
@@ -77,18 +101,7 @@ export default function Home() {
     );
   }
 
-  return (
-    <div
-      role="status"
-      aria-busy="true"
-      aria-label="Loading"
-      className="flex flex-1 items-center justify-center p-8"
-    >
-      <div className="flex w-full max-w-sm flex-col gap-3">
-        <Skeleton className="h-4 w-3/5" />
-        <Skeleton className="h-4 w-4/5" />
-        <Skeleton className="h-4 w-2/5" />
-      </div>
-    </div>
-  );
+  if (data === undefined) return <LoadingSkeleton />;
+
+  return <RedirectToConversation conversationId={data} />;
 }

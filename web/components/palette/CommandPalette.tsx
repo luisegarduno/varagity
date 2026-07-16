@@ -2,17 +2,15 @@
 
 import { Autocomplete } from "@base-ui/react/autocomplete";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
+import { useQuery } from "@tanstack/react-query";
 import { SearchIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import * as React from "react";
 
 import { Kbd } from "@/components/ui/kbd";
-import {
-  createConversation,
-  listConversations,
-  type ConversationSummary,
-} from "@/lib/api";
+import { useMountEffect } from "@/hooks/use-mount-effect";
+import { createConversation, type ConversationSummary } from "@/lib/api";
 import { notifyConversationsChanged } from "@/lib/conversations-bus";
 import {
   filterCommands,
@@ -20,6 +18,7 @@ import {
   type PaletteCommand,
   type PaletteGroup,
 } from "@/lib/palette";
+import { conversationsQuery } from "@/lib/queries";
 import {
   notifyFocusComposer,
   notifyOpenSettings,
@@ -133,49 +132,35 @@ export function CommandPalette() {
 
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
-  const [conversations, setConversations] = React.useState<
-    ConversationSummary[]
-  >([]);
   // The selected command's action, parked until the dialog finishes closing.
   const pendingActionRef = React.useRef<(() => void) | null>(null);
 
   // Global shortcut: ⌘K on mac, Ctrl+K elsewhere — also while inputs are
-  // focused (preventDefault stops the browser default). State changes stay
-  // inside the event callback, never in the effect body.
-  React.useEffect(() => {
+  // focused (preventDefault stops the browser default). Registered once:
+  // the updater reads `open`, so the listener never re-binds, and state
+  // changes stay inside the event callback.
+  useMountEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.defaultPrevented) return;
       if (!(event.metaKey || event.ctrlKey)) return;
       if (event.key.toLowerCase() !== "k") return;
       event.preventDefault();
-      if (open) {
-        setOpen(false);
-      } else {
-        setQuery("");
-        setOpen(true);
-      }
+      // Unconditional: a close is about to discard the query anyway, and
+      // every open path resets it (see `handleOpenChange`).
+      setQuery("");
+      setOpen((current) => !current);
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open]);
+  });
 
-  // Refresh the Conversations group each time the palette opens; on failure
-  // the group is silently omitted. State lands in the promise callbacks.
-  React.useEffect(() => {
-    if (!open) return;
-    let stale = false;
-    listConversations().then(
-      (list) => {
-        if (!stale) setConversations(list);
-      },
-      () => {
-        if (!stale) setConversations([]);
-      },
-    );
-    return () => {
-      stale = true;
-    };
-  }, [open]);
+  // The Conversations group. Only fetched once the palette opens, and
+  // shared with the sidebar's list — which usually has it warm already, so
+  // an open paints instantly. On failure the group is silently omitted.
+  const { data: conversations } = useQuery({
+    ...conversationsQuery(),
+    enabled: open,
+  });
 
   const executeCommand = React.useCallback(
     (command: PaletteCommand) => {
@@ -248,7 +233,7 @@ export function CommandPalette() {
   }
 
   const conversationCommands = React.useMemo(
-    () => conversations.map(toConversationCommand),
+    () => (conversations ?? []).map(toConversationCommand),
     [conversations],
   );
 

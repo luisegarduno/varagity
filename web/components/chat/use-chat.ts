@@ -1,13 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useMemo, useRef, useState } from "react";
 
-import {
-  ApiError,
-  getConversation,
-  streamChat,
-  type ChatMessage,
-} from "@/lib/api";
+import { useMountEffect } from "@/hooks/use-mount-effect";
+import { ApiError, streamChat, type ChatMessage } from "@/lib/api";
 import {
   newTurn,
   reduceChatEvent,
@@ -15,6 +12,7 @@ import {
 } from "@/lib/chat-reducer";
 import { notifyConversationsChanged } from "@/lib/conversations-bus";
 import { assistantMessageFromTurn } from "@/lib/evidence";
+import { conversationQuery } from "@/lib/queries";
 
 /** What `useChat` exposes to the conversation UI. */
 export interface ChatState {
@@ -49,41 +47,33 @@ function localMessage(
  * Own one conversation's transcript + streaming turn.
  *
  * `send` drives the SSE loop through the token-accumulation reducer; on
- * `done` the turn folds into the transcript exactly as the server
- * persisted it (the authoritative answer rides in the event). A stopped
- * stream keeps its partial text visible but flagged — the server persists
- * nothing for aborted turns.
+ * `done` the turn folds into the cached transcript exactly as the server
+ * persisted it (the authoritative answer rides in the event), so no
+ * refetch is needed to render what was just answered. A stopped stream
+ * keeps its partial text visible but flagged — the server persists nothing
+ * for aborted turns.
  */
 export function useChat(conversationId: string): ChatState {
-  const [messages, setMessages] = useState<ChatMessage[] | null>(null);
+  const queryClient = useQueryClient();
   const [turn, setTurn] = useState<StreamingTurn | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [loadError, setLoadError] = useState<ApiError | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // No reset-on-id-change here: the conversation page keys its component
   // by conversation id, so switching remounts with fresh initial state.
-  useEffect(() => {
-    let cancelled = false;
-    getConversation(conversationId).then(
-      (detail) => {
-        if (!cancelled) setMessages(detail.messages);
-      },
-      (error: unknown) => {
-        if (!cancelled) {
-          setLoadError(
-            error instanceof ApiError
-              ? error
-              : new ApiError(0, "network_error", String(error)),
-          );
-        }
-      },
-    );
-    return () => {
-      cancelled = true;
-      abortRef.current?.abort();
-    };
-  }, [conversationId]);
+  const { data, error } = useQuery(conversationQuery(conversationId));
+  const messages = data?.messages ?? null;
+  const loadError = useMemo(() => {
+    if (error === null) return null;
+    return error instanceof ApiError
+      ? error
+      : new ApiError(0, "network_error", String(error));
+  }, [error]);
+
+  // The stream outlives a render, so leaving the conversation has to stop
+  // it explicitly. A ref is exactly the stable handle a mount-scoped
+  // cleanup can close over.
+  useMountEffect(() => () => abortRef.current?.abort());
 
   const send = useCallback(
     (query: string) => {
@@ -109,14 +99,28 @@ export function useChat(conversationId: string): ChatState {
           if (current.done) {
             const done = current.done;
             const settled = current;
-            setMessages((previous) => [
-              ...(previous ?? []),
-              localMessage("user", trimmed, `${done.message_id}-user`),
-              // Fold the turn in as the server persisted it — evidence
-              // snapshot, reasoning, latency — so the just-answered turn
-              // renders exactly like a reload (the evidence panel included).
-              assistantMessageFromTurn(done, settled.retrieval, settled.reasoning),
-            ]);
+            // Fold the turn into the cache as the server persisted it —
+            // evidence snapshot, reasoning, latency — so the just-answered
+            // turn renders exactly like a reload (the evidence panel
+            // included) without a round trip. Returning `undefined` from
+            // the updater is TanStack's bail-out, which is the right
+            // answer if the transcript somehow isn't cached.
+            queryClient.setQueryData(
+              conversationQuery(conversationId).queryKey,
+              (previous) =>
+                previous && {
+                  ...previous,
+                  messages: [
+                    ...previous.messages,
+                    localMessage("user", trimmed, `${done.message_id}-user`),
+                    assistantMessageFromTurn(
+                      done,
+                      settled.retrieval,
+                      settled.reasoning,
+                    ),
+                  ],
+                },
+            );
             setTurn(null);
             notifyConversationsChanged(); // list order + the async auto-title
           }
@@ -137,7 +141,7 @@ export function useChat(conversationId: string): ChatState {
         }
       })();
     },
-    [conversationId],
+    [conversationId, queryClient],
   );
 
   const stop = useCallback(() => {

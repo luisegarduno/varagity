@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 
+import { useMountEffect } from "@/hooks/use-mount-effect";
 import {
   DEFAULT_ACCENT,
   DEFAULT_DENSITY,
@@ -11,6 +12,32 @@ import {
   densityServer,
   subscribeDisplayPrefs,
 } from "@/lib/display-prefs";
+
+/**
+ * Stamps one `data-*` attribute onto <html>, or clears it when the value is
+ * the default. The caller keys this on `value`, so each distinct preference
+ * mounts a fresh instance and the write stays a mount-time sync with the
+ * document rather than an effect chasing a dependency.
+ */
+function RootAttribute({
+  name,
+  value,
+  isDefault,
+}: {
+  name: string;
+  value: string;
+  isDefault: boolean;
+}) {
+  useMountEffect(() => {
+    const root = document.documentElement;
+    if (isDefault) {
+      root.removeAttribute(name);
+    } else {
+      root.setAttribute(name, value);
+    }
+  });
+  return null;
+}
 
 /**
  * Stamps the display preferences onto <html> as `data-accent` /
@@ -30,23 +57,20 @@ export function AppearanceApplier() {
     densityServer,
   );
 
-  useEffect(() => {
-    const root = document.documentElement;
-    if (currentAccent === DEFAULT_ACCENT) {
-      root.removeAttribute("data-accent");
-    } else {
-      root.setAttribute("data-accent", currentAccent);
-    }
-  }, [currentAccent]);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    if (currentDensity === DEFAULT_DENSITY) {
-      root.removeAttribute("data-density");
-    } else {
-      root.setAttribute("data-density", currentDensity);
-    }
-  }, [currentDensity]);
-
-  return null;
+  return (
+    <>
+      <RootAttribute
+        key={`accent:${currentAccent}`}
+        name="data-accent"
+        value={currentAccent}
+        isDefault={currentAccent === DEFAULT_ACCENT}
+      />
+      <RootAttribute
+        key={`density:${currentDensity}`}
+        name="data-density"
+        value={currentDensity}
+        isDefault={currentDensity === DEFAULT_DENSITY}
+      />
+    </>
+  );
 }

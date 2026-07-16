@@ -1,8 +1,9 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { DatabaseIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 
 import { SettingsDrawer } from "@/components/settings/SettingsDrawer";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -20,13 +21,10 @@ import {
   ApiError,
   createConversation,
   deleteConversation,
-  listConversations,
   type ConversationSummary,
 } from "@/lib/api";
-import {
-  notifyConversationsChanged,
-  onConversationsChanged,
-} from "@/lib/conversations-bus";
+import { notifyConversationsChanged } from "@/lib/conversations-bus";
+import { conversationsQuery } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 /**
@@ -36,47 +34,23 @@ import { cn } from "@/lib/utils";
  * (`MobileTopBar`), which passes `onNavigate` so the drawer can close
  * before a route change.
  *
- * Refetches on route changes and on the conversations bus; a trailing
- * refetch catches the background auto-title that lands a few seconds after
- * a turn persists.
+ * The list is the shared `conversations` query, so mutations anywhere —
+ * here, the ⌘K palette, a persisted turn — refresh it through the bus, and
+ * the trailing auto-title refetch is handled once in `QueryBusBridge`.
  */
 export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const router = useRouter();
   const pathname = usePathname();
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [unreachable, setUnreachable] = useState(false);
+  const { data: conversations = [], isError } = useQuery(conversationsQuery());
+  // "Is the stack up?" is one question, so a failure from either the list or
+  // a new-chat POST raises the same banner. Each new-chat attempt starts
+  // from a clean slate; the list clears itself on any successful refetch.
+  const [newChatFailed, setNewChatFailed] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  // State lands only in the promise callbacks (never synchronously in an
-  // effect body) — the fetch resolution is the "external system" signal.
-  const refresh = useCallback(() => {
-    listConversations().then(
-      (list) => {
-        setConversations(list);
-        setUnreachable(false);
-      },
-      () => setUnreachable(true),
-    );
-  }, []);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh, pathname]);
-
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const unsubscribe = onConversationsChanged(() => {
-      refresh();
-      clearTimeout(timer);
-      timer = setTimeout(refresh, 4000); // catch the async auto-title
-    });
-    return () => {
-      unsubscribe();
-      clearTimeout(timer);
-    };
-  }, [refresh]);
+  const unreachable = isError || newChatFailed;
 
   /** Close the hosting drawer (if any) before pushing the route. */
   function go(href: string) {
@@ -85,12 +59,13 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   }
 
   async function handleNewChat() {
+    setNewChatFailed(false);
     try {
       const created = await createConversation();
       notifyConversationsChanged();
       go(`/c/${created.conversation_id}`);
     } catch {
-      setUnreachable(true);
+      setNewChatFailed(true);
     }
   }
 
@@ -102,12 +77,8 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       await deleteConversation(deleteTarget.conversation_id);
       const wasActive = pathname === `/c/${deleteTarget.conversation_id}`;
       setDeleteTarget(null);
-      notifyConversationsChanged();
-      if (wasActive) {
-        go("/");
-      } else {
-        refresh();
-      }
+      notifyConversationsChanged(); // the bridge refetches the list for us
+      if (wasActive) go("/");
     } catch (failure) {
       setDeleteError(failure instanceof ApiError ? failure.message : String(failure));
     } finally {

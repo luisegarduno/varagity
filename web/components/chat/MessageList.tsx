@@ -1,5 +1,6 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import {
   CheckIcon,
   DatabaseZapIcon,
@@ -11,10 +12,10 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import { citationComponents } from "@/components/chat/Citations";
-import { Markdown, useDebouncedValue } from "@/components/chat/Markdown";
+import { Markdown } from "@/components/chat/Markdown";
 import { ReasoningTrace } from "@/components/chat/ReasoningTrace";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -27,11 +28,13 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
-import { listDocuments, type ChatErrorEvent, type ChatMessage } from "@/lib/api";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
+import type { ChatErrorEvent, ChatMessage } from "@/lib/api";
 import type { StreamingTurn } from "@/lib/chat-reducer";
 import { annotateCitations } from "@/lib/citations";
 import { describeChatError } from "@/lib/errors";
 import type { Evidence } from "@/lib/evidence";
+import { documentsQuery } from "@/lib/queries";
 import { currentStage, deriveStages } from "@/lib/stage";
 import { cn } from "@/lib/utils";
 
@@ -196,23 +199,10 @@ function NoMatchesNotice() {
  * the send path owns error reporting.
  */
 function EmptyConversation() {
-  // null = unknown (probe pending or failed) → the plain hero.
-  const [corpusEmpty, setCorpusEmpty] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    listDocuments().then(
-      (documents) => {
-        if (!cancelled) setCorpusEmpty(documents.length === 0);
-      },
-      () => {
-        // Unreachable — keep the plain hero.
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // `undefined` while the probe is pending, and after it fails (the send
+  // path owns error reporting) — both mean "unknown", i.e. the plain hero.
+  const { data: documents } = useQuery(documentsQuery());
+  const corpusEmpty = documents?.length === 0;
 
   if (corpusEmpty) {
     return (

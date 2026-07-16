@@ -1,28 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useRef, useState } from "react";
 
 import { DocumentTable } from "@/components/corpus/DocumentTable";
 import { IngestPanel } from "@/components/corpus/IngestPanel";
 import { UploadDropzone } from "@/components/corpus/UploadDropzone";
+import { useSettingsCatalog } from "@/components/settings/use-settings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  ApiError,
-  getConfig,
-  getSettings,
-  listDocuments,
-  startIngest,
-  streamIngestStatus,
-  type ConfigResponse,
-  type DocumentOut,
-} from "@/lib/api";
+import { useMountEffect } from "@/hooks/use-mount-effect";
+import { ApiError, startIngest, streamIngestStatus } from "@/lib/api";
 import {
   initialIngestView,
   reduceIngestEvent,
   type IngestView,
 } from "@/lib/ingest-reducer";
-import { notifySettingsChanged, onSettingsChanged } from "@/lib/settings-bus";
+import { configQuery, documentsQuery, queryKeys } from "@/lib/queries";
+import { notifySettingsChanged } from "@/lib/settings-bus";
+
+const UNREACHABLE = "API unreachable — is the stack up? (docker compose up -d)";
 
 /**
  * The corpus management page (spec_v2 §4.2): upload dropzone, live ingest
@@ -32,39 +29,35 @@ import { notifySettingsChanged, onSettingsChanged } from "@/lib/settings-bus";
  * upload → ingest → ask flow instead of a bare table.
  */
 export function CorpusView() {
-  const [config, setConfig] = useState<ConfigResponse | null>(null);
-  const [documents, setDocuments] = useState<DocumentOut[] | null>(null);
+  const queryClient = useQueryClient();
+  const { data: config = null } = useQuery(configQuery());
+  const { data: documents = null, error: documentsError } =
+    useQuery(documentsQuery());
+  // The stale flag rides the shared settings catalog, so the drawer's
+  // banner and this one always agree and refresh together.
+  const { catalog } = useSettingsCatalog();
   const [ingest, setIngest] = useState<IngestView>(initialIngestView);
-  const [corpusStale, setCorpusStale] = useState(false);
-  const [hasUploaded, setHasUploaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [ingestError, setIngestError] = useState<string | null>(null);
   const followingRef = useRef(false);
 
-  const refreshDocuments = useCallback(() => {
-    listDocuments().then(
-      (list) => {
-        setDocuments(list);
-        setError(null);
-      },
-      (failure: unknown) => {
-        setError(
-          failure instanceof ApiError
-            ? failure.message
-            : "API unreachable — is the stack up? (docker compose up -d)",
-        );
-      },
-    );
-  }, []);
+  const corpusStale = catalog?.corpus_stale ?? false;
+  const [hasUploaded, setHasUploaded] = useState(false);
 
-  const refreshStale = useCallback(() => {
-    getSettings().then(
-      (catalog) => setCorpusStale(catalog.corpus_stale),
-      () => undefined, // the banner is best-effort; the table error covers outages
-    );
-  }, []);
+  const documentsErrorMessage =
+    documentsError === null
+      ? null
+      : documentsError instanceof ApiError
+        ? documentsError.message
+        : UNREACHABLE;
+  const error = documentsErrorMessage ?? ingestError;
+
+  const refreshDocuments = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.documents });
+  }, [queryClient]);
 
   // Follow the current (or last) run; the generator ends at the terminal
-  // frame, after which the document table reflects the run's writes.
+  // frame, after which the document table reflects the run's writes and the
+  // stale flag reflects the settings it ingested under.
   const followIngest = useCallback(() => {
     if (followingRef.current) return;
     followingRef.current = true;
@@ -77,8 +70,8 @@ export function CorpusView() {
           setIngest(view);
         }
         if (view.run !== null && view.run.state !== "running") {
-          refreshDocuments();
-          refreshStale();
+          void queryClient.invalidateQueries({ queryKey: queryKeys.documents });
+          void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
         }
       } catch {
         // Stream dropped (API restart, network): the panel keeps the last
@@ -87,26 +80,24 @@ export function CorpusView() {
         followingRef.current = false;
       }
     })();
-  }, [refreshDocuments, refreshStale]);
+  }, [queryClient]);
 
-  useEffect(() => {
-    getConfig().then(setConfig, () => undefined);
-    refreshDocuments();
-    refreshStale();
+  // The status stream replays a run from its start, so attaching once on
+  // mount renders the same picture whether a run is live, already finished,
+  // or absent entirely.
+  useMountEffect(() => {
     followIngest();
-  }, [refreshDocuments, refreshStale, followIngest]);
-
-  useEffect(() => onSettingsChanged(refreshStale), [refreshStale]);
+  });
 
   const handleStartIngest = useCallback(
     async (reingest: boolean) => {
       try {
         await startIngest(reingest);
-        setError(null);
+        setIngestError(null);
         followIngest();
         if (reingest) notifySettingsChanged(); // the stale flag clears on completion
       } catch (failure) {
-        setError(
+        setIngestError(
           failure instanceof ApiError
             ? failure.message
             : "Could not start the ingest — is the stack up?",

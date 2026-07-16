@@ -1,51 +1,44 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback } from "react";
 
 import {
-  getSettings,
   patchSettings,
   type SettingsResponse,
   type SettingValue,
 } from "@/lib/api";
-import { notifySettingsChanged, onSettingsChanged } from "@/lib/settings-bus";
+import { settingsQuery } from "@/lib/queries";
+import { notifySettingsChanged } from "@/lib/settings-bus";
 
 /**
  * Shared access to the runtime settings catalog (spec_v2 §4.7). Every
- * consumer (drawer, composer quick-toggles, stale indicators) sees the
- * same override layer: a PATCH from any of them re-broadcasts on the
- * settings bus, and everyone refetches.
+ * consumer (drawer, composer quick-toggles, stale indicators) reads the
+ * same cache entry, so a PATCH from any of them repaints all of them at
+ * once — no per-consumer subscription, no per-consumer refetch.
  */
 export function useSettingsCatalog() {
-  const [catalog, setCatalog] = useState<SettingsResponse | null>(null);
-  const [unreachable, setUnreachable] = useState(false);
-
-  const refresh = useCallback(() => {
-    getSettings().then(
-      (response) => {
-        setCatalog(response);
-        setUnreachable(false);
-      },
-      () => setUnreachable(true),
-    );
-  }, []);
-
-  useEffect(() => {
-    refresh();
-    return onSettingsChanged(refresh);
-  }, [refresh]);
+  const queryClient = useQueryClient();
+  const { data: catalog = null, isError: unreachable } =
+    useQuery(settingsQuery());
 
   const patch = useCallback(
-    async (overrides: Record<string, SettingValue | null>): Promise<SettingsResponse> => {
+    async (
+      overrides: Record<string, SettingValue | null>,
+    ): Promise<SettingsResponse> => {
       const response = await patchSettings(overrides);
-      setCatalog(response);
+      // The response *is* the new catalog, so paint it without a round
+      // trip; the bus then has every surface confirm against the server
+      // (which is also how an out-of-band change, like a re-ingest
+      // clearing the stale flag, gets picked up).
+      queryClient.setQueryData(settingsQuery().queryKey, response);
       notifySettingsChanged();
       return response;
     },
-    [],
+    [queryClient],
   );
 
-  return { catalog, unreachable, refresh, patch };
+  return { catalog, unreachable, patch };
 }
 
 /** Pick one setting's effective value out of the catalog. */

@@ -2,13 +2,7 @@
 
 import { PanelRightOpenIcon } from "lucide-react";
 import Link from "next/link";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 
 import { Composer } from "@/components/chat/Composer";
 import { MessageList } from "@/components/chat/MessageList";
@@ -24,6 +18,7 @@ import {
 } from "@/components/settings/use-settings";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useMountEffect } from "@/hooks/use-mount-effect";
 import {
   evidenceRailOpen,
   evidenceRailOpenServer,
@@ -64,6 +59,26 @@ function isDesktopServerSnapshot(): boolean {
 // their presence alone means open (or still animating out).
 const OPEN_LAYER_SELECTOR =
   '[data-open]:is([role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]), [data-slot=drawer-popup]';
+
+/**
+ * Esc stops the stream — unless an open layer (dialog, menu, the evidence
+ * sheet) owns the key press. Mounted only while a stream is open, so the
+ * listener's lifetime is the stream's and nothing has to watch a flag.
+ * `onStop` is read once at mount, which is sound because `useChat` hands
+ * back a stable callback.
+ */
+function EscapeToStop({ onStop }: { onStop: () => void }) {
+  useMountEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (document.querySelector(OPEN_LAYER_SELECTOR)) return;
+      onStop();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+  return null;
+}
 
 /**
  * One conversation: transcript, streaming turn, composer — and the
@@ -209,29 +224,18 @@ export function Conversation({ conversationId }: { conversationId: string }) {
     if (!open) setScrollTarget(null); // a reopen shouldn't replay the scroll
   }, []);
 
-  // ⌘K's "toggle evidence" lands here: the rail ≥lg, the sheet below.
-  useEffect(() => {
-    return onToggleEvidence(() => {
+  // ⌘K's "toggle evidence" lands here: the rail ≥lg, the sheet below. The
+  // ui-bus subscription is a window listener with nothing to track, so it
+  // sets up and tears down with the conversation itself.
+  useMountEffect(() =>
+    onToggleEvidence(() => {
       if (isDesktopSnapshot()) {
         setEvidenceRailOpen(!evidenceRailOpen());
       } else {
         setSheetOpen((open) => !open);
       }
-    });
-  }, []);
-
-  // Esc stops the stream — unless an open layer (dialog, menu, the
-  // evidence sheet) owns the key press.
-  useEffect(() => {
-    if (!isStreaming) return;
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
-      if (document.querySelector(OPEN_LAYER_SELECTOR)) return;
-      stop();
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isStreaming, stop]);
+    }),
+  );
 
   if (loadError) {
     return (
@@ -286,6 +290,7 @@ export function Conversation({ conversationId }: { conversationId: string }) {
           isStreaming={isStreaming}
           lastUserQuery={lastUserQuery}
         />
+        {isStreaming && <EscapeToStop onStop={stop} />}
         {isDesktop && !railOpen && (
           <Button
             variant="outline"

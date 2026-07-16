@@ -1,9 +1,10 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { CheckIcon, RotateCcwIcon, SettingsIcon, XIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useRouter } from "next/navigation";
-import { Fragment, useEffect, useState, useSyncExternalStore } from "react";
+import { Fragment, useState, useSyncExternalStore } from "react";
 
 import { useSettingsCatalog } from "@/components/settings/use-settings";
 import { Badge } from "@/components/ui/badge";
@@ -27,7 +28,8 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-import { ApiError, getConfig, startIngest, type ConfigResponse } from "@/lib/api";
+import { useMountEffect } from "@/hooks/use-mount-effect";
+import { ApiError, startIngest, type ConfigResponse } from "@/lib/api";
 import {
   ACCENTS,
   DENSITIES,
@@ -43,6 +45,7 @@ import {
   subscribeDisplayPrefs,
   type Accent,
 } from "@/lib/display-prefs";
+import { configQuery } from "@/lib/queries";
 import {
   dirtyFields,
   groupFields,
@@ -77,6 +80,16 @@ const SHEET_CLASSES =
   "data-ending-style:scale-100 data-ending-style:opacity-100 sm:max-w-md";
 
 /**
+ * Opens the drawer when the ⌘K palette asks over the UI bus. Mounted only
+ * by the instance that answers the bus, so the precondition *is* the mount
+ * and no listener has to re-check a flag.
+ */
+function OpenOnBusEvent({ onOpen }: { onOpen: () => void }) {
+  useMountEffect(() => onOpenSettings(onOpen));
+  return null;
+}
+
+/**
  * The live settings drawer (spec_v2 §4.7): controls generated from
  * `GET /api/settings` (+ ranges from `GET /api/config`), grouped
  * Retrieval / Generation / Ingestion / Display. Edits stage locally and
@@ -95,23 +108,12 @@ export function SettingsDrawer({
 }) {
   const router = useRouter();
   const { catalog, unreachable, patch } = useSettingsCatalog();
+  const { data: config = null } = useQuery(configQuery());
   const [open, setOpen] = useState(false);
-  const [config, setConfig] = useState<ConfigResponse | null>(null);
   const [form, setForm] = useState<SettingsFormState | null>(null);
   const [adopted, setAdopted] = useState<typeof catalog>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    getConfig().then(setConfig, () => undefined);
-  }, []);
-
-  // The palette (and other global surfaces) ask us to open via the UI bus;
-  // state changes only inside the event listener.
-  useEffect(() => {
-    if (!openOnBusEvent) return;
-    return onOpenSettings(() => setOpen(true));
-  }, [openOnBusEvent]);
 
   // Adopt a newly fetched catalog during render (the React "adjust state
   // when props change" pattern) whenever nothing is staged locally, so a
@@ -166,6 +168,7 @@ export function SettingsDrawer({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
+      {openOnBusEvent && <OpenOnBusEvent onOpen={() => setOpen(true)} />}
       <DialogTrigger
         render={
           <Button

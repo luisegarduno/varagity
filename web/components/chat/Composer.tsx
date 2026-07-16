@@ -1,12 +1,13 @@
 "use client";
 
 import { SendIcon, SquareIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { QuickToggles } from "@/components/settings/QuickToggles";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
+import { useMountEffect } from "@/hooks/use-mount-effect";
 import { onFocusComposer } from "@/lib/ui-bus";
 
 /**
@@ -35,12 +36,12 @@ export function Composer({
 
   // Take focus on mount (a fresh conversation is for typing into) unless
   // something else already holds it, and whenever the palette asks.
-  useEffect(() => {
+  useMountEffect(() => {
     if (document.activeElement === document.body) {
       textareaRef.current?.focus();
     }
     return onFocusComposer(() => textareaRef.current?.focus());
-  }, []);
+  });
 
   function submit() {
     const query = draft.trim();
