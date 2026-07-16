@@ -5,8 +5,9 @@ from collections.abc import Sequence
 
 import pytest
 
+from varagity.config import Settings, get_settings
 from varagity.context import contextual as contextual_module
-from varagity.context.contextual import DOC_TOKEN_BUDGET, situate_context
+from varagity.context.contextual import doc_token_budget, situate_context
 from varagity.debug.show import console
 from varagity.tokens import count_tokens
 
@@ -27,12 +28,13 @@ Answer only with the succinct context and nothing else."""
 
 
 class RecordingLLM:
-    """Stub LLM: records the exact messages, returns a scripted response."""
+    """Stub LLM: records the exact messages and caps, returns a scripted response."""
 
     def __init__(self, response: str) -> None:
         self.response = response
         self.prompts: list[str] = []
         self.roles: list[list[str]] = []
+        self.max_tokens_seen: list[int | None] = []
 
     def generate(
         self,
@@ -44,6 +46,7 @@ class RecordingLLM:
     ) -> str:
         self.roles.append([message["role"] for message in messages])
         self.prompts.append(messages[0]["content"])
+        self.max_tokens_seen.append(max_tokens)
         return self.response
 
 
@@ -70,8 +73,9 @@ def test_blurb_is_whitespace_stripped() -> None:
 
 def test_long_document_truncated_with_warning(caplog: pytest.LogCaptureFixture) -> None:
     """An over-budget document warns and truncates — never crashes ingest."""
-    document = "word " * (DOC_TOKEN_BUDGET + 3000) + "ENDSENTINEL"
-    assert count_tokens(document) > DOC_TOKEN_BUDGET
+    budget = doc_token_budget(get_settings())
+    document = "word " * (budget + 3000) + "ENDSENTINEL"
+    assert count_tokens(document) > budget
     llm = RecordingLLM("blurb")
     with caplog.at_level(logging.WARNING):
         situate_context(document, "CHUNK SENTINEL", llm=llm, verbose=0)  # type: ignore[arg-type]
@@ -85,7 +89,7 @@ def test_long_document_truncated_with_warning(caplog: pytest.LogCaptureFixture) 
     assert prompt.startswith("<document>\nword word")
     assert prompt.endswith("Answer only with the succinct context and nothing else.")
     doc_section = prompt.split("</document>")[0]
-    assert count_tokens(doc_section) <= DOC_TOKEN_BUDGET + 10  # scaffolding slack
+    assert count_tokens(doc_section) <= budget + 10  # scaffolding slack
 
 
 def test_document_within_budget_is_not_truncated(caplog: pytest.LogCaptureFixture) -> None:
@@ -95,6 +99,47 @@ def test_document_within_budget_is_not_truncated(caplog: pytest.LogCaptureFixtur
         situate_context(document, "chunk", llm=llm, verbose=0)  # type: ignore[arg-type]
     assert not any("truncating" in r.message for r in caplog.records)
     assert document in llm.prompts[0]
+
+
+def test_blurb_generation_uses_the_contextualize_cap() -> None:
+    """Blurbs run under CONTEXTUALIZE_MAX_TOKENS, never the chat-sized cap.
+
+    The regression that motivated this: inheriting MAX_TOKENS=8192 reserves
+    half a 16k window for generation, so llama.cpp hard-rejects any document
+    over ~8k tokens ("Context size has been exceeded") and the file fails
+    ingest.
+    """
+    llm = RecordingLLM("blurb")
+    situate_context("doc", "chunk", llm=llm, verbose=0)  # type: ignore[arg-type]
+    assert llm.max_tokens_seen == [get_settings().CONTEXTUALIZE_MAX_TOKENS]
+
+
+def test_doc_token_budget_reserves_generation_chunk_and_scaffolding() -> None:
+    """The preamble budget is the window minus every reserve — never more."""
+    settings = get_settings()
+    budget = doc_token_budget(settings)
+    assert 0 < budget < settings.LLM_CONTEXT_TOKENS - settings.CONTEXTUALIZE_MAX_TOKENS
+    # Regression bound: a preamble at the budget plus the reserves must fit
+    # the window, so a maximal prompt can never trip llama.cpp's hard 500.
+    assert budget + settings.CONTEXTUALIZE_MAX_TOKENS < settings.LLM_CONTEXT_TOKENS
+
+
+def test_tiny_window_degrades_to_chunk_only_prompt(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window too small for any preamble drops the document, not the file."""
+    tiny = Settings(
+        _env_file=None, LLM_CONTEXT_TOKENS=4096, CONTEXTUALIZE_MAX_TOKENS=2048, MAX_TOKENS=1024
+    )
+    assert doc_token_budget(tiny) <= 0
+    monkeypatch.setattr(contextual_module, "get_settings", lambda: tiny)
+    llm = RecordingLLM("blurb")
+    with caplog.at_level(logging.WARNING):
+        blurb = situate_context("DOC SENTINEL", "CHUNK SENTINEL", llm=llm, verbose=0)  # type: ignore[arg-type]
+    assert blurb == "blurb"
+    assert any("no room for a document preamble" in r.message for r in caplog.records)
+    assert "DOC SENTINEL" not in llm.prompts[0]
+    assert "CHUNK SENTINEL" in llm.prompts[0]
 
 
 def test_empty_blurb_warns_instead_of_raising(caplog: pytest.LogCaptureFixture) -> None:

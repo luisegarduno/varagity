@@ -26,6 +26,8 @@ SETTINGS_ENV_VARS = (
     "BASE_MODEL_API_KEY",
     "MAX_TOKENS",
     "LLM_TEMPERATURE",
+    "LLM_CONTEXT_TOKENS",
+    "CONTEXTUALIZE_MAX_TOKENS",
     "CHAT_MODEL_TYPE",
     "POSTGRES_HOST",
     "POSTGRES_PORT",
@@ -86,6 +88,8 @@ def test_defaults_load() -> None:
     assert settings.BASE_MODEL_API_KEY == "none"
     assert settings.MAX_TOKENS == 8192
     assert settings.LLM_TEMPERATURE == 0.6
+    assert settings.LLM_CONTEXT_TOKENS == 16384  # mirrors the compose --ctx-size
+    assert settings.CONTEXTUALIZE_MAX_TOKENS == 2048
     assert settings.ELASTICSEARCH_URL == "http://elasticsearch:9200"
     assert settings.BM25_INDEX_NAME == "varagity_contextual_bm25"
     assert settings.RETRIEVAL_METHOD == "hybrid"  # the v1 default (spec §10.1)
@@ -121,11 +125,30 @@ class TestSizeValidation:
 
     @pytest.mark.parametrize(
         "field",
-        ["CHUNK_SIZE", "EMBEDDING_DIM", "EMBEDDING_BATCH_SIZE", "MAX_TOKENS", "TOP_K"],
+        [
+            "CHUNK_SIZE",
+            "EMBEDDING_DIM",
+            "EMBEDDING_BATCH_SIZE",
+            "MAX_TOKENS",
+            "TOP_K",
+            "LLM_CONTEXT_TOKENS",
+            "CONTEXTUALIZE_MAX_TOKENS",
+        ],
     )
     def test_positive_sizes_enforced(self, field: str) -> None:
         with pytest.raises(ValidationError, match=field):
             Settings(_env_file=None, **{field: 0})
+
+    @pytest.mark.parametrize("field", ["MAX_TOKENS", "CONTEXTUALIZE_MAX_TOKENS"])
+    def test_generation_caps_must_fit_the_context_window(self, field: str) -> None:
+        """A cap at or over the window leaves no room for any prompt."""
+        kwargs = {"LLM_CONTEXT_TOKENS": 4096, "MAX_TOKENS": 1024, field: 4096}
+        with pytest.raises(ValidationError, match=field):
+            Settings(_env_file=None, **kwargs)
+
+    def test_generation_cap_under_the_window_is_valid(self) -> None:
+        settings = Settings(_env_file=None, LLM_CONTEXT_TOKENS=4096, MAX_TOKENS=4095)
+        assert settings.MAX_TOKENS == 4095
 
 
 class TestRetrievalMethodValidation:

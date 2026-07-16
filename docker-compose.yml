@@ -14,10 +14,17 @@ services:
       - ${models_volume}:/models:ro           # no copy — model stays on host disk
     ports:
       - "8080:8080"
+    # --parallel 1 is load-bearing: newer server builds default to FOUR slots
+    # sharing the one --ctx-size KV pool (server-cuda is a moving tag; the
+    # default changed under us at b9935). Two ~8k contextualization prompts
+    # cached on different slots then exhaust the pool mid-decode ("Context
+    # size has been exceeded"). One slot = the full window per request, plus
+    # stable prompt-cache reuse across a document's chunks (spec §9.4).
     command: >
       -m /models/${BASE_MODEL}
       --host 0.0.0.0 --port 8080
-      --jinja -ngl 99 --threads -1 --ctx-size 16384
+      --jinja -ngl 99 --threads -1 --ctx-size ${LLM_CONTEXT_TOKENS:-16384}
+      --parallel 1
       --temp 0.6 --min-p 0.0 --top-p 0.95 --top-k 20 --repeat-penalty 1.05
       -ot ".ffn_(up|down)_exps.=CPU"
       --no-webui

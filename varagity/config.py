@@ -86,6 +86,18 @@ class Settings(BaseSettings):
             unauthenticated in v1, but the OpenAI client requires a value).
         MAX_TOKENS: Generation cap per LLM response.
         LLM_TEMPERATURE: Sampling temperature for LLM responses.
+        LLM_CONTEXT_TOKENS: The served model's context window, in tokens —
+            must mirror the llama.cpp ``--ctx-size`` in
+            ``docker-compose.yml``. llama.cpp (context shift disabled, its
+            default) fails a request with a hard 500 once prompt + generated
+            tokens reach the window, so generation caps are clamped against
+            this value (:class:`varagity.models.llm.LLMClient`).
+        CONTEXTUALIZE_MAX_TOKENS: Generation cap for the per-chunk situating
+            blurbs (spec §9.4) — sized for a reasoning preamble plus a short
+            blurb, deliberately far below the chat-sized ``MAX_TOKENS``: an
+            8k reserve against a 16k window rejects any document over ~8k
+            tokens. A blurb that overruns the cap degrades to "no context"
+            via the empty-blurb path, never a failed ingest.
         CHAT_MODEL_TYPE: Model-registry type the chat surfaces (API + GUI)
             resolve their LLM with (``default`` | ``reasoning`` | ``tool``
             — the LLM aliases of :func:`varagity.models.registry.get_model`;
@@ -192,6 +204,8 @@ class Settings(BaseSettings):
     BASE_MODEL_API_KEY: str = "none"
     MAX_TOKENS: int = 8192
     LLM_TEMPERATURE: float = 0.6
+    LLM_CONTEXT_TOKENS: int = 16384
+    CONTEXTUALIZE_MAX_TOKENS: int = 2048
     CHAT_MODEL_TYPE: str = "default"
 
     POSTGRES_HOST: str = "postgres"
@@ -397,11 +411,24 @@ class Settings(BaseSettings):
 
         Raises:
             ValueError: If ``CHUNK_SIZE``, ``EMBEDDING_DIM``,
-                ``EMBEDDING_BATCH_SIZE``, ``MAX_TOKENS``, or ``TOP_K`` is not
-                positive, if ``CHUNK_OVERLAP`` is negative, or if
-                ``CHUNK_OVERLAP`` is not smaller than ``CHUNK_SIZE``.
+                ``EMBEDDING_BATCH_SIZE``, ``MAX_TOKENS``, ``TOP_K``,
+                ``LLM_CONTEXT_TOKENS``, or ``CONTEXTUALIZE_MAX_TOKENS`` is
+                not positive, if ``CHUNK_OVERLAP`` is negative, if
+                ``CHUNK_OVERLAP`` is not smaller than ``CHUNK_SIZE``, or if
+                ``MAX_TOKENS``/``CONTEXTUALIZE_MAX_TOKENS`` is not smaller
+                than ``LLM_CONTEXT_TOKENS`` (a generation cap that fills the
+                whole window leaves no room for any prompt).
         """
-        for name in ("CHUNK_SIZE", "EMBEDDING_DIM", "EMBEDDING_BATCH_SIZE", "MAX_TOKENS", "TOP_K"):
+        positives = (
+            "CHUNK_SIZE",
+            "EMBEDDING_DIM",
+            "EMBEDDING_BATCH_SIZE",
+            "MAX_TOKENS",
+            "TOP_K",
+            "LLM_CONTEXT_TOKENS",
+            "CONTEXTUALIZE_MAX_TOKENS",
+        )
+        for name in positives:
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive; got {getattr(self, name)}")
         if self.CHUNK_OVERLAP < 0:
@@ -411,6 +438,14 @@ class Settings(BaseSettings):
                 f"CHUNK_OVERLAP ({self.CHUNK_OVERLAP}) must be smaller than "
                 f"CHUNK_SIZE ({self.CHUNK_SIZE})"
             )
+        for name in ("MAX_TOKENS", "CONTEXTUALIZE_MAX_TOKENS"):
+            if getattr(self, name) >= self.LLM_CONTEXT_TOKENS:
+                raise ValueError(
+                    f"{name} ({getattr(self, name)}) must be smaller than "
+                    f"LLM_CONTEXT_TOKENS ({self.LLM_CONTEXT_TOKENS}) — a generation "
+                    "cap that fills the whole context window leaves no room for "
+                    "any prompt"
+                )
         return self
 
     @field_validator("RETRIEVAL_METHOD")

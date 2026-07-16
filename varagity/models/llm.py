@@ -26,8 +26,63 @@ from tenacity import (
 
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
+from varagity.tokens import count_tokens
 
 logger = logging.getLogger(__name__)
+
+# Headroom subtracted when fitting a generation cap into the context window:
+# the chat template's scaffolding tokens plus the cl100k approximation's
+# drift vs the served model's own tokenizer (~2% measured; plan decision #8).
+_CTX_HEADROOM_TOKENS = 512
+
+
+def _fit_max_tokens(messages: Sequence[ChatCompletionMessageParam], max_tokens: int) -> int:
+    """Clamp a generation cap so prompt + generation fits the context window.
+
+    llama.cpp with context shift disabled (its default) fails a request
+    mid-decode with a hard 500 ("Context size has been exceeded") once
+    prompt + generated tokens reach ``--ctx-size`` — it does not stop
+    gracefully at the boundary. Guarantee ``prompt + cap + headroom ≤
+    LLM_CONTEXT_TOKENS`` instead: a clamped generation stops with
+    ``finish_reason=length``, which callers already handle (an unclosed
+    ``<think>`` cleans to an empty response, a cut answer stays an answer).
+
+    Args:
+        messages: The chat messages about to be sent (string contents are
+            counted; the headroom constant covers template scaffolding).
+        max_tokens: The requested generation cap.
+
+    Returns:
+        The cap, reduced when needed to fit the window.
+
+    Raises:
+        ValueError: If the prompt alone (approximately) overflows the
+            window — no generation cap can make the request completable.
+    """
+    ctx = get_settings().LLM_CONTEXT_TOKENS
+    prompt_tokens = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            prompt_tokens += count_tokens(content)
+    available = ctx - prompt_tokens - _CTX_HEADROOM_TOKENS
+    if available <= 0:
+        raise ValueError(
+            f"prompt is ~{prompt_tokens} tokens — it cannot fit the model's "
+            f"{ctx}-token context window (LLM_CONTEXT_TOKENS) with headroom for "
+            "generation"
+        )
+    if max_tokens > available:
+        logger.warning(
+            "clamping max_tokens %d → %d: the prompt is ~%d tokens of the %d-token context window",
+            max_tokens,
+            available,
+            prompt_tokens,
+            ctx,
+        )
+        return available
+    return max_tokens
+
 
 # Transient failures worth retrying: connection/timeout trouble, 5xx, and 429.
 # 4xx like auth errors are permanent and surface immediately. (Same policy as
@@ -147,13 +202,18 @@ class LLMClient:
             returned no content).
 
         Raises:
-            ValueError: If ``verbose`` is invalid.
+            ValueError: If ``verbose`` is invalid, or the prompt alone
+                overflows ``LLM_CONTEXT_TOKENS``. (The cap is silently
+                clamped when *prompt + cap* would overflow — llama.cpp hard-
+                fails such requests instead of stopping at the boundary.)
             openai.APIError: If the request still fails after retries.
         """
         check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
         return self._create(
             messages,
-            max_tokens=self.max_tokens if max_tokens is None else max_tokens,
+            max_tokens=_fit_max_tokens(
+                messages, self.max_tokens if max_tokens is None else max_tokens
+            ),
             temperature=self.temperature if temperature is None else temperature,
         )
 
@@ -204,14 +264,18 @@ class LLMClient:
             (fakes standing in for this method must return one too).
 
         Raises:
-            ValueError: If ``verbose`` is invalid.
+            ValueError: If ``verbose`` is invalid, or the prompt alone
+                overflows ``LLM_CONTEXT_TOKENS`` (see :meth:`generate` — the
+                same clamp applies here).
             openai.APIError: If establishing the stream still fails after
                 retries, or the stream breaks mid-generation.
         """
         check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
         stream = self._create_stream(
             messages,
-            max_tokens=self.max_tokens if max_tokens is None else max_tokens,
+            max_tokens=_fit_max_tokens(
+                messages, self.max_tokens if max_tokens is None else max_tokens
+            ),
             temperature=self.temperature if temperature is None else temperature,
         )
         return _iter_stream_deltas(stream, on_usage)

@@ -16,7 +16,9 @@ import respx
 from openai.types import CompletionUsage
 from tenacity import wait_none
 
-from varagity.models.llm import LLMClient, clean_response
+from varagity.config import get_settings
+from varagity.models.llm import _CTX_HEADROOM_TOKENS, LLMClient, clean_response
+from varagity.tokens import count_tokens
 
 BASE_URL = "http://fake-llamacpp/v1"
 ENDPOINT = f"{BASE_URL}/chat/completions"
@@ -211,6 +213,63 @@ class TestVerbose:
         route = respx.post(ENDPOINT).mock(return_value=_completion("ok"))
         with pytest.raises(ValueError, match="verbose"):
             _client().generate([{"role": "user", "content": "q"}], verbose=7)
+        assert route.call_count == 0
+
+
+class TestContextWindowFit:
+    """The clamp: prompt + max_tokens must fit LLM_CONTEXT_TOKENS.
+
+    llama.cpp with context shift disabled (its default) hard-fails such
+    requests mid-decode instead of stopping at the boundary — the DinoBank
+    regression.
+    """
+
+    @respx.mock
+    def test_oversized_cap_is_clamped_to_fit_the_window(self) -> None:
+        route = respx.post(ENDPOINT).mock(return_value=_completion("ok"))
+        ctx = get_settings().LLM_CONTEXT_TOKENS
+        _client(max_tokens=ctx).generate([{"role": "user", "content": "q"}], verbose=0)
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["max_tokens"] == ctx - count_tokens("q") - _CTX_HEADROOM_TOKENS
+
+    @respx.mock
+    def test_stream_cap_is_clamped_too(self) -> None:
+        route = respx.post(ENDPOINT).mock(
+            return_value=_stream_response([_stream_chunk(content="x")])
+        )
+        ctx = get_settings().LLM_CONTEXT_TOKENS
+        list(_client(max_tokens=ctx).generate_stream([{"role": "user", "content": "q"}], verbose=0))
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["max_tokens"] == ctx - count_tokens("q") - _CTX_HEADROOM_TOKENS
+
+    @respx.mock
+    def test_within_window_cap_is_untouched(self) -> None:
+        route = respx.post(ENDPOINT).mock(return_value=_completion("ok"))
+        _client().generate([{"role": "user", "content": "q"}], verbose=0)
+        assert json.loads(route.calls[0].request.content)["max_tokens"] == 512
+
+    @respx.mock
+    def test_prompt_alone_over_the_window_raises_before_any_request(self) -> None:
+        route = respx.post(ENDPOINT).mock(return_value=_completion("ok"))
+        huge = "word " * (get_settings().LLM_CONTEXT_TOKENS + 100)
+        with pytest.raises(ValueError, match="context window"):
+            _client().generate([{"role": "user", "content": huge}], verbose=0)
+        assert route.call_count == 0
+
+    @respx.mock
+    def test_prompt_counts_every_message(self) -> None:
+        """System + user contents both count against the window."""
+        route = respx.post(ENDPOINT).mock(return_value=_completion("ok"))
+        ctx = get_settings().LLM_CONTEXT_TOKENS
+        half = "word " * (ctx // 2)
+        with pytest.raises(ValueError, match="context window"):
+            _client().generate(
+                [
+                    {"role": "system", "content": half},
+                    {"role": "user", "content": half},
+                ],
+                verbose=0,
+            )
         assert route.call_count == 0
 
 
