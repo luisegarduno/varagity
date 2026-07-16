@@ -6,8 +6,13 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 # Tesseract for the pluggable OCR fallback: both benchmark engines must be
 # available in-container (EasyOCR arrives as a pip dependency of docling).
+# libgl1: cv2's native module links libGL — rapidocr (a docling core dep)
+# ships non-headless opencv-python, which clobbers easyocr's headless build
+# in the shared cv2/ directory. Docling's TableFormer and EasyOCR both
+# `import cv2`, so without libGL every PDF conversion dies at pipeline init
+# (and docling masks the real error as "EasyOCR is not installed").
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng libgl1 \
  && rm -rf /var/lib/apt/lists/*
 
 # Setup a non-root user. uid/gid default to 1000 to match the host user —
