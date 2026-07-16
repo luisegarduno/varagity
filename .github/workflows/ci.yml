@@ -59,32 +59,38 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # No version input: pnpm/action-setup reads the "packageManager"
-      # pin (pnpm@10.x) from web/package.json.
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2.2.0
         with:
-          package_json_file: web/package.json
+          bun-version: 1.3.14
 
+      # setup-bun caches only the bun binary itself — cache the package
+      # download cache explicitly, keyed on the lockfile.
+      - name: Cache bun packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('web/bun.lock') }}
+
+      # Node stays the runtime: Vitest and next build execute under Node via
+      # shebang delegation, matching the Dockerfile run stage.
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Lint (eslint)
-        run: pnpm lint
+        run: bun run lint
 
       - name: Unit tests (Vitest, lib/ coverage floor)
-        run: pnpm test --coverage
+        run: bun run test --coverage
 
       # NEXT_PUBLIC_API_URL is inlined at build time (web/lib/api.ts falls
       # back to this same value when unset — pinned here for determinism).
       - name: Build (next build)
-        run: pnpm build
+        run: bun run build
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8000

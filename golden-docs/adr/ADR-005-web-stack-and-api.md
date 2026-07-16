@@ -1,6 +1,6 @@
 # ADR-005: The v2 web GUI + HTTP API stack
 
-**Status:** Accepted (2026-07-14)
+**Status:** Accepted (2026-07-14) · Amended (2026-07-15 — [below](#amendment-2026-07-15-v3-phase-1))
 
 One record for the cluster of stack decisions behind the v2 centerpiece —
 the browser chat surface and the HTTP API underneath it (spec_v2 §4, §14).
@@ -35,7 +35,7 @@ prescriptive).
 **Decision.** **Next.js (App Router) + TypeScript + Tailwind v4 + shadcn/ui
 on Base UI.** Tailwind v4 is CSS-first: design tokens live in an `@theme`
 block in `web/app/globals.css`; there is no `tailwind.config.ts`. Frontend
-types are **generated** from the API's OpenAPI schema (`pnpm gen:types` via
+types are **generated** from the API's OpenAPI schema (`bun run gen:types` via
 `openapi-typescript` → `web/lib/types.ts`, never hand-edited); the API even
 merges its SSE payload models into the schema (they're not route returns) so
 stream frames are typed too.
@@ -43,8 +43,9 @@ stream frames are typed too.
 **Consequences.** The wire contract can't drift — a schema change is a
 regenerate, not a hunt. The API is frontend-agnostic, so a Vite + React SPA
 remains the drop-in alternative (spec_v2 §14 #1); Radix stays one
-`shadcn init -b radix` away. `web/` runs its own toolchain (pnpm, Vitest,
-Playwright), disjoint from `uv`.
+`shadcn init -b radix` away. `web/` runs its own toolchain (bun for
+dependency management, Vitest, Playwright — Node as the runtime), disjoint
+from `uv`.
 
 ## 3. SSE over POST; evidence before the prose
 
@@ -140,3 +141,21 @@ loudly. Revisit Alembic if migrations grow branches or destructive changes.
   unhandled 500s stay browser-readable `{error: {code, message}}` envelopes.
 - **Auto-titling is fire-and-forget** — the first-question title LLM call
   runs after `done` is queued and can never block the stream.
+
+## Amendment (2026-07-15, v3 Phase 1)
+
+The JS **package manager** migrated pnpm@10.24.0 → **bun 1.3.14**
+(spec_v3 §7). The scope is dependency management only: **Node remains the
+runtime** — Next.js, Vitest, and Playwright all still execute under Node
+via their shebang scripts (no `--bun`, no `bun test`; Vitest and its four
+coverage floors are unchanged). The lockfile is now `web/bun.lock`; the
+`package.json` scripts are unchanged, so commands map mechanically
+(`pnpm <script>` → `bun run <script>`, `pnpm dlx`/`npx` → `bunx`).
+
+One polarity inversion is worth recording: pnpm's
+`ignoredBuiltDependencies` **blocklist** became bun's
+`trustedDependencies` **allowlist**. `sharp` sits on bun's default-trusted
+list — its postinstall now runs where pnpm blocked it — and
+`unrs-resolver` is explicitly allowlisted in `web/package.json`. This
+amendment is deliberately the only place in golden-docs that still says
+"pnpm".

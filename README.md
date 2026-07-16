@@ -193,21 +193,23 @@ uv run mkdocs serve                # the golden-docs site, live-reloading
 uv run uvicorn varagity.api.main:create_app --factory --port 8000   # API on the host
 ```
 
-Frontend (`web/`, uses [`pnpm`](https://pnpm.io)):
+Frontend (`web/`, uses [`bun`](https://bun.sh) as its package manager — Node
+stays the runtime for Next.js/Vitest/Playwright):
 
 ```bash
-pnpm dev                           # dev server on :3000 (against NEXT_PUBLIC_API_URL)
-pnpm test                          # Vitest unit tests (coverage-gated in CI)
-pnpm e2e                           # opt-in Playwright e2e — bring the stack up first
-pnpm lint && pnpm build
-pnpm gen:types                     # regenerate lib/types.ts from the API's OpenAPI schema
+bun install                        # install dependencies (bun.lock)
+bun run dev                        # dev server on :3000 (against NEXT_PUBLIC_API_URL)
+bun run test                       # Vitest unit tests (coverage-gated in CI)
+bun run e2e                        # opt-in Playwright e2e — bring the stack up first
+bun run lint && bun run build
+bun run gen:types                  # regenerate lib/types.ts from the API's OpenAPI schema
 ```
 
 `NEXT_PUBLIC_API_URL` is baked in at **build** time — after changing it, rerun
-`docker compose build web` (or restart `pnpm dev`).
+`docker compose build web` (or restart `bun run dev`).
 
 CI (GitHub Actions) runs two jobs on every push — **Python**: lint + format
 check, mypy, the unit suite under the 80% coverage floor (API included), and
-a strict docs build; **web**: pnpm lint, the Vitest suite under a coverage
-floor, and a production build. The integration/e2e suites and the Playwright
+a strict docs build; **web**: `bun run lint`, the Vitest suite under a
+coverage floor, and a production build. The integration/e2e suites and the Playwright
 browser tests stay local — they need Docker and the live stack.

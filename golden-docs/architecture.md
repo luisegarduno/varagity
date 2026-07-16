@@ -333,6 +333,6 @@ varagity/
 ├── cli/                  # argparse subcommands: ingest / chat / eval [ocr]
 └── debug/show.py         # v_<name>() rich renderers behind the verbose= convention
 
-web/                      # the Next.js GUI — own toolchain (pnpm, Vitest, Playwright); talks only to api
+web/                      # the Next.js GUI — own toolchain (bun, Vitest, Playwright); talks only to api
 observability/            # prometheus.yml + provisioned Grafana datasource/dashboards (mounted read-only)
 ```

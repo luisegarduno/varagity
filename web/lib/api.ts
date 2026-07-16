@@ -2,7 +2,7 @@
  * Typed client for the Varagity HTTP API (spec_v2 §4).
  *
  * Every wire shape is re-exported from the generated `lib/types.ts`
- * (`pnpm gen:types` against the live `/openapi.json`) — nothing here is
+ * (`bun run gen:types` against the live `/openapi.json`) — nothing here is
  * hand-maintained. `streamChat` speaks the POST-SSE chat protocol:
  * `fetch()` → `response.body` → `eventsource-parser`, because the native
  * `EventSource` is GET-only and cannot carry the JSON request body.

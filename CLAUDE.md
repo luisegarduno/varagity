@@ -24,7 +24,7 @@ Where things live:
   `golden-docs/openapi.json` snapshot (regenerate via `scripts/export_openapi.py` —
   a unit test fails on drift).
 - `thoughts/shared/plans/` — the vertically-sliced implementation plans with per-phase notes.
-- `web/` — the Next.js frontend (own toolchain: pnpm, Vitest; heed `web/AGENTS.md` — the
+- `web/` — the Next.js frontend (own toolchain: bun, Vitest; heed `web/AGENTS.md` — the
   Next.js version post-dates training data, read `node_modules/next/dist/docs/` first).
 - `docs/` — ⚠️ the **gitignored ingest corpus** (RAG input), *not* documentation.
 
@@ -89,12 +89,12 @@ uv run pre-commit run --all-files
 uv run mkdocs build --strict       # docs must build clean (CI-gated)
 uv run python scripts/export_openapi.py   # refresh golden-docs/openapi.json after API surface changes
 
-# web/ (frontend — pnpm, not uv)
-pnpm dev                           # dev server against NEXT_PUBLIC_API_URL
-pnpm test                          # Vitest unit tests — the suite that CI coverage-gates
-pnpm e2e                           # opt-in Playwright — needs the live stack on :3000/:8000
-pnpm lint && pnpm build
-pnpm gen:types                     # regenerate lib/types.ts from the API's OpenAPI schema
+# web/ (frontend — bun, not uv)
+bun run dev                        # dev server against NEXT_PUBLIC_API_URL
+bun run test                       # Vitest unit tests — the suite that CI coverage-gates
+bun run e2e                        # opt-in Playwright — needs the live stack on :3000/:8000
+bun run lint && bun run build
+bun run gen:types                  # regenerate lib/types.ts from the API's OpenAPI schema
 ```
 
 Host-mode runs against the compose services need localhost env overrides
@@ -116,7 +116,7 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
 - **API layer** (spec_v2 §4): async at the edge, sync flows underneath — FastAPI runs the
   flows in a threadpool; don't rewrite pipeline code to async. `api/schemas.py` is the wire
   contract; the SSE protocol is `retrieval → reasoning → token → done` (or `error`),
-  evidence before prose. Frontend types are generated (`pnpm gen:types`), never hand-edited;
+  evidence before prose. Frontend types are generated (`bun run gen:types`), never hand-edited;
   the `golden-docs/openapi.json` snapshot is drift-guarded — rerun
   `scripts/export_openapi.py` after surface changes (a unit test fails otherwise).
 - **Migrations**: ordered, idempotent SQL in `varagity/stores/migrations/NNN_*.sql`,
@@ -140,8 +140,8 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
 - **Testing layers**: unit (default, mocked HTTP via `respx`; API routes via
   `httpx.AsyncClient` + pytest-asyncio, SSE helpers in `tests/sse.py`), `-m integration`
   (testcontainers), `-m e2e` (fake embeddings/LLM + real containerized stores); web unit
-  tests via Vitest (`pnpm test`, runs in CI under a coverage floor); Playwright e2e is
-  opt-in (`pnpm --dir web e2e`, needs the live stack). CI = two jobs per push: Python
+  tests via Vitest (`bun run test`, runs in CI under a coverage floor); Playwright e2e is
+  opt-in (`bun --cwd web run e2e`, needs the live stack). CI = two jobs per push: Python
   (ruff, mypy, unit suite at the 80% floor, `mkdocs build --strict`) + web (lint,
   coverage-gated Vitest, build); integration/e2e/Playwright stay local. Shared container
   setup lives in `varagity/eval/containers.py`.
@@ -189,4 +189,5 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
 Python: `uv` for everything — `uv sync` (dependency groups: `dev`, `eval`),
 `uv run <cmd>`; add dependencies in `pyproject.toml`, then `uv sync`. Torch is pinned to
 CPU wheels via `[tool.uv.sources]` (OCR is CPU-only by design; saves ~3 GB).
-Frontend (`web/`): `pnpm` for everything — never `npm`/`yarn`.
+Frontend (`web/`): `bun` for everything (package manager only — Node stays the runtime) —
+never `npm`/`yarn`/`pnpm`.

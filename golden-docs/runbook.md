@@ -258,22 +258,33 @@ first (stopping `web` too keeps `:3000` free for the dev server,
   (rebuild) **and** that origin added to `API_CORS_ORIGINS` (API restart) —
   two knobs, both required.
 
-The dev loop skips the image entirely (`web/` is pnpm-only — never
+The dev loop skips the image entirely (`web/` is bun-only — never
 npm/yarn):
 
 ```bash
 cd web
-pnpm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 pnpm dev   # http://localhost:3000
+bun install
+NEXT_PUBLIC_API_URL=http://localhost:8000 bun run dev   # http://localhost:3000
 ```
 
 pointed at the compose `api` or a [host-run
 API](#host-vs-container-env-usage). Free the port first
 (`docker compose stop web`): the dev server must own `:3000`, which is also
-the only origin `API_CORS_ORIGINS` allows by default. `pnpm test` (Vitest
-unit), `pnpm lint`, `pnpm build`, and `pnpm gen:types` (regenerates
+the only origin `API_CORS_ORIGINS` allows by default. `bun run test` (Vitest
+unit), `bun run lint`, `bun run build`, and `bun run gen:types` (regenerates
 `lib/types.ts` from the running API's OpenAPI schema — generated, never
 hand-edited) round out the toolchain.
+
+**bun is the package manager, not the runtime.** Node executes everything —
+`next`, `vitest`, and `playwright` run under Node via their shebang scripts
+(`bun run <script>` merely launches them; no `--bun`, no `bun test`). The
+bun version pin lives in two places: the `web/Dockerfile` base stage
+(`oven/bun:1.3.14-alpine`) and `.github/workflows/ci.yml`
+(`bun-version: 1.3.14`) — bump both together. Installs are fast even cold:
+a fresh-cache `bun install --frozen-lockfile` measured ~3.2 s for 779
+packages (bun 1.3.14, 2026-07-15), versus tens of seconds under the
+previous package manager
+([ADR-005 amendment](adr/ADR-005-web-stack-and-api.md#amendment-2026-07-15-v3-phase-1)).
 
 ## The opt-in e2e harness
 
@@ -283,9 +294,13 @@ accessibility) that exercise the **real stack** — deliberately no
 
 ```bash
 docker compose up -d --wait
-pnpm --dir web e2e            # or: cd web && pnpm e2e
+bun --cwd web run e2e         # or: cd web && bun run e2e
 ```
 
+- **Browser binaries are an explicit step**: run
+  `bunx playwright install --with-deps` once per machine — no lifecycle
+  script installs them (playwright@1.61.1 ships no `scripts` field at all),
+  so this is a documented setup step, not an install side-effect.
 - Targets `http://localhost:3000` (which must reach the API on `:8000`);
   `PLAYWRIGHT_BASE_URL` overrides the base URL.
 - **Serial on purpose** (`fullyParallel: false`, `workers: 1`): the backend

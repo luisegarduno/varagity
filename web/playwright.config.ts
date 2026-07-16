@@ -4,8 +4,8 @@ import { defineConfig } from "@playwright/test";
  * Opt-in e2e harness (v2 Phase 9). Deliberately NO `webServer` block: these
  * specs exercise the real stack — the web container on :3000 talking to the
  * live API on :8000 with GPU services behind it — so bring it up first
- * (`docker compose up -d --wait`) and run `pnpm e2e` when you want the
- * full-flow + axe gates. Vitest (`pnpm test`) never picks these up: its
+ * (`docker compose up -d --wait`) and run `bun run e2e` when you want the
+ * full-flow + axe gates. Vitest (`bun run test`) never picks these up: its
  * include is scoped to lib/ + components/, and this config owns ./e2e.
  */
 export default defineConfig({

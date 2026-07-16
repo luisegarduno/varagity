@@ -127,7 +127,7 @@ because that setting gates `/metrics`' presence in the schema) and
 **drift-guarded** by `tests/unit/test_openapi_snapshot.py` — the unit suite
 fails whenever the app's live schema stops matching the checked-in copy.
 The frontend's `web/lib/types.ts` is generated from the same schema
-(`pnpm gen:types`), and the app factory merges the SSE payload models into
+(`bun run gen:types`), and the app factory merges the SSE payload models into
 `components/schemas` even though no route returns them directly — the
 schemas named in the tables above are all in the reference below. A running
 stack also serves the live interactive docs at `http://localhost:8000/docs`.

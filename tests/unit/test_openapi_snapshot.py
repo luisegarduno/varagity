@@ -1,7 +1,7 @@
 """Drift guard: ``golden-docs/openapi.json`` must match the live app's schema.
 
 The snapshot is what the docs site renders (``golden-docs/api.md``) and what
-``pnpm gen:types`` mirrors into ``web/lib/types.ts`` — a stale copy means the
+``bun run gen:types`` mirrors into ``web/lib/types.ts`` — a stale copy means the
 documented contract lies. ``METRICS_ENABLED`` is pinned because it gates the
 ``/metrics`` route's presence in the schema (the export script pins the same).
 """
