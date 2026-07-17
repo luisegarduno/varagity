@@ -1,14 +1,18 @@
-# Two parallel jobs on every push (spec §15.3 / plan Phase 10):
+# Two parallel jobs on every push (spec §15.3 / plan Phase 10), plus a
+# main-only publish:
 #   checks — Python gates: ruff lint/format, mypy, unit tests (coverage
 #            floor 80%), strict mkdocs build.
 #   web    — frontend gates: eslint, Vitest unit tests (lib/ coverage
 #            floor), production next build.
+#   pages  — publishes the site/ tree built by `checks` to GitHub Pages.
 # Integration, e2e, and Playwright suites stay local on demand — they need
 # Docker-heavy testcontainers and the live GPU stack.
 name: CI
 
 on:
   push:
+  # Lets the docs be re-published without an empty commit.
+  workflow_dispatch:
 
 jobs:
   checks:
@@ -49,6 +53,15 @@ jobs:
 
       - name: Docs (mkdocs build --strict)
         run: uv run mkdocs build --strict
+
+      # Hand the exact bytes that just passed --strict to the `pages` job
+      # instead of rebuilding them there. Only main deploys, so skip the
+      # upload on every other branch.
+      - name: Upload docs artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
 
   web:
     runs-on: ubuntu-latest
@@ -94,3 +107,29 @@ jobs:
         run: bun run build
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8000
+
+  # Publishing through the Actions pipeline — rather than a branch source — is
+  # what keeps Pages from running Jekyll over the repo root and serving
+  # README.md as the index. The artifact is served verbatim, so the underscore
+  # directories Material emits survive and no .nojekyll is needed.
+  pages:
+    needs: checks
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write # create the Pages deployment
+      id-token: write # OIDC token deploy-pages trades for it
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # Job-scoped on purpose: ci.yml runs on every branch, and a workflow-level
+    # group would serialize all of CI behind one lane. Deploys queue rather
+    # than cancel, so a superseded run still finishes cleanly.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

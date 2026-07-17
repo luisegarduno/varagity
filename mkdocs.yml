@@ -1,5 +1,9 @@
 site_name: Varagity
 site_description: Self-hosted, GPU-accelerated RAG with Contextual Retrieval
+# Project Pages serve from the repo subpath, not the domain root. Page-to-page
+# links are relative and work without this, but sitemap.xml is emitted empty
+# and canonical <link>s are omitted until site_url is set.
+site_url: https://luisegarduno.github.io/varagity/
 repo_url: https://github.com/luisegarduno/varagity
 repo_name: luisegarduno/varagity
 
