@@ -58,7 +58,10 @@ function HighlightedPage({
         <div
           key={index}
           aria-hidden
-          className="absolute rounded-[1px] bg-primary/25 mix-blend-multiply dark:bg-primary/30 dark:mix-blend-screen"
+          // The backdrop here is the rendered page, which is white paper in
+          // either theme — so the blend mode must not track the app theme
+          // (`screen` over white is always white).
+          className="absolute rounded-[1px] bg-primary/25 mix-blend-multiply dark:bg-primary/30"
           style={rect}
         />
       ))}
