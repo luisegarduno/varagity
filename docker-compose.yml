@@ -137,6 +137,11 @@ services:
       - prefect:/root/.prefect
     environment:
       PREFECT_SERVER_ANALYTICS_ENABLED: false
+      # Unset, the image defaults the UI's browser-side API calls to an
+      # absolute http://127.0.0.1:4200/api regardless of --host — breaks for
+      # any browser not on the docker host itself. Relative path = same-origin,
+      # works from localhost, the LAN IP, or anywhere else the port is reachable.
+      PREFECT_UI_API_URL: /api
     healthcheck:
       # The base image ships no curl/wget — probe with the stdlib, as the
       # official Prefect compose example does (research §2.6).
