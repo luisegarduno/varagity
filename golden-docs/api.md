@@ -34,7 +34,8 @@ The code vocabulary, as built:
 | `unknown_setting` / `invalid_settings` | 422 | `PATCH /api/settings` — unknown name / value failing the `Settings` validators (linked settings validate as a merged whole). |
 | `no_file_stored` | 422 | `POST /api/documents` when every file in the batch was rejected. |
 | `conversation_not_found` | 404 | `POST /api/chat` (pre-stream) and the conversation routes. |
-| `document_not_found` | 404 | `DELETE /api/documents/{doc_id}` only — the bulk `POST /api/documents/delete` reports unknown ids in `not_found` rather than failing the batch. |
+| `document_not_found` | 404 | `DELETE /api/documents/{doc_id}` and the two `…/preview/*` routes — the bulk `POST /api/documents/delete` reports unknown ids in `not_found` rather than failing the batch. |
+| `preview_disabled`, `unsupported_type`, `file_missing`, `file_changed`, `conversion_unavailable`, `conversion_failed`, `page_out_of_range` | 404 | `GET /api/documents/{doc_id}/preview/page/{page}` only — an `<img>` can't read a JSON envelope, so the page route turns each degrade reason into a 404 code. The locate route reports the same conditions inside a **200** envelope instead ([below](#the-preview-pair-degradable-by-design)). |
 | `ingest_already_running` | 409 | `POST /api/ingest` while a run is in flight (one run at a time). |
 | `<service>_unreachable` | 503 | Dependency preflights and per-request store construction: `postgres_unreachable`, `es_unreachable`, `llamacpp_unreachable`, `infinity_unreachable`. |
 | `docs_path_not_writable` | 500 | `POST /api/documents` when `DOCS_PATH` rejects writes (the container-UID gotcha — see the runbook). |
@@ -122,6 +123,25 @@ One `progress` frame per stage transition — except `contextualize`, the
 ingest's long pole (one LLM blurb per chunk), which additionally ticks
 per-chunk via `current`/`total`, so the browser's progress bar moves at the
 same granularity as the terminal's.
+
+## The preview pair — degradable by design
+
+The evidence panel's page previews
+([ADR-010](adr/ADR-010-document-page-preview.md)) ride two routes with an
+asymmetric error convention. `POST /api/documents/{doc_id}/preview/locate`
+answers **200 for every degradable condition** — `available:false` plus a
+machine `reason` (`preview_disabled` | `unsupported_type` | `file_missing` |
+`file_changed` | `conversion_unavailable` | `conversion_failed` |
+`no_match`) — reserving 404 for an unknown `doc_id`; the GUI maps any
+`available:false` to its full-text fallback, so a missing LibreOffice or an
+edited-on-disk file is a per-document degrade, never a failed request.
+`GET /api/documents/{doc_id}/preview/page/{page}` serves the rendered PNG
+with `Cache-Control: public, max-age=31536000, immutable` — sound because
+`doc_id` is content-hashed **and** the route re-verifies the on-disk
+`content_hash` before rendering (a drifted file 404s `file_changed` rather
+than serving a lying image). Clients only request pages a successful locate
+named, so this route's 404s are the honest edge signal, carrying the degrade
+reason as the error code.
 
 ## Keeping this page honest
 

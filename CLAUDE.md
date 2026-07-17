@@ -194,6 +194,10 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
   Ingestion dashboard.
 - The stale-corpus flag is cleared only by a **completed API-driven** `reingest=true` run —
   not by CLI `ingest --reingest`, not by patching the setting back.
+- Preview endpoints degrade per-document (`available:false` + `reason`; the page GET turns
+  the reason into a 404 code), never 500 — host-mode runs without LibreOffice lose only
+  PPTX previews (`conversion_unavailable`). `PREVIEW_*` settings are env-only (not in the
+  settings drawer); `preview_enabled` is read-only in `GET /api/config`.
 - `golden-docs/openapi.json` must be regenerated (`uv run python scripts/export_openapi.py`)
   whenever the API surface changes — a unit test fails otherwise.
 

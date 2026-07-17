@@ -14,3 +14,4 @@ conversation that produced it. Format: Context → Decision → Consequences.
 | [ADR-007](ADR-007-observability-stack.md) | In-app Prometheus metrics + provisioned Grafana (exporters optional) | Accepted |
 | [ADR-008](ADR-008-chunking-default.md) | `recursive_character` stays the chunking default (benchmark-decided) | Accepted |
 | [ADR-009](ADR-009-modality-expansion.md) | Office/web modalities via a generalized Docling core (images/audio deferred) | Accepted |
+| [ADR-010](ADR-010-document-page-preview.md) | Evidence-panel page previews via on-demand server-side locate + render | Accepted |

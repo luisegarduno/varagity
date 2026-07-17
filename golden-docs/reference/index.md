@@ -24,6 +24,9 @@ One page per package:
 - [Orchestration](pipeline.md) — the Prefect flows
 - [HTTP API](api.md) — the FastAPI service: SSE chat, conversations,
   settings, documents/corpus, ingest, health
+- [Page preview](preview.md) — evidence-panel page previews: locate
+  (trigram scoring + pdfium rects), render, source resolution, PPTX
+  conversion
 - [Observability](observability.md) — the Prometheus metric catalog and its
   recording helpers
 - [Evaluation](eval.md) — golden set, metrics, OCR benchmark, testcontainers

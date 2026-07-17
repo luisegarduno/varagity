@@ -97,6 +97,7 @@ nav:
       - ADR-007 Observability stack: adr/ADR-007-observability-stack.md
       - ADR-008 Chunking-strategy default: adr/ADR-008-chunking-default.md
       - ADR-009 Document modality expansion: adr/ADR-009-modality-expansion.md
+      - ADR-010 Document page preview: adr/ADR-010-document-page-preview.md
   - API reference:
       - reference/index.md
       - Configuration & logging: reference/config.md
@@ -109,6 +110,7 @@ nav:
       - Generation: reference/generation.md
       - Orchestration: reference/pipeline.md
       - HTTP API: reference/api.md
+      - Page preview: reference/preview.md
       - Observability: reference/observability.md
       - Evaluation: reference/eval.md
       - CLI & debug: reference/cli.md

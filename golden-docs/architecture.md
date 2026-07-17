@@ -105,6 +105,16 @@ schema, never hand-edited), and the chat SSE protocol is
 evidence always arrives before prose. Task graphs and streaming details are
 in [Pipelines](pipelines.md).
 
+The api service also owns the evidence panel's **page previews**
+([ADR-010](adr/ADR-010-document-page-preview.md)): for chunks from digital
+PDFs and PPTX decks, `varagity/preview/` locates the one source page
+containing the chunk at *preview time* (word-trigram page scoring + pdfium
+text-search highlight rects — no ingest-time provenance, no reingest) and
+serves it as an immutably-cacheable PNG, with PPTX decks converted once per
+container lifetime by headless LibreOffice inside the api image. Every
+failure mode degrades to the GUI's full-text view via an
+`available:false` + `reason` envelope — the path never 500s per document.
+
 ## Why Contextual Retrieval
 
 A chunk embedded in isolation loses its parent document's context ("the company
@@ -319,6 +329,8 @@ varagity/
 │   ├── app_settings_store.py   # persisted runtime overrides + the _corpus_stale flag
 │   └── migrate.py, migrations/ # idempotent NNN_*.sql runner (runs on API startup)
 ├── retrieval/            # semantic.py, bm25.py (+ hydrate), hybrid.py, reranked.py
+├── preview/              # evidence-panel page previews (ADR-010): normalize, locate
+│                         #   (pdfium, one global lock), render, source gate, pptx→pdf
 ├── generation/           # answer.py — context prompt + grounded generation + QueryState
 ├── pipeline/             # Prefect flows: ingest, query, query-stream, eval (thin @task adapters)
 ├── observability/        # metrics.py — the Prometheus collector catalog (spec_v2 §6.2)

@@ -495,6 +495,37 @@ flowchart TB
   0-chunk `documents` row, a warning, and a summary count — never a silent
   drop.
 
+## Page previews (evidence panel)
+
+Chunks from **digital PDFs and PPTX decks** offer "Show preview" in the
+evidence panel — the source page rendered server-side with the chunk's text
+highlighted ([ADR-010](adr/ADR-010-document-page-preview.md)). Operational
+facts:
+
+- **Degrades per document, never 500s**: the locate route answers
+  `available:false` plus a machine `reason`, and the GUI falls back to the
+  full-text view with a muted reason line. `preview_disabled` |
+  `unsupported_type` | `file_missing` | `file_changed` |
+  `conversion_unavailable` | `conversion_failed` | `no_match` is the full
+  vocabulary.
+- **`file_changed` means exactly that**: the file on disk no longer matches
+  the ingested `content_hash` (edited without reingesting). The preview
+  refuses to render bytes that didn't produce the chunk — reingest to clear.
+- **Host-mode API runs lose only PPTX previews**: without LibreOffice on the
+  host `PATH`, decks answer `conversion_unavailable` (expected degrade);
+  PDF previews are unaffected. In-container, `soffice` ships in the api image.
+- **The PPTX conversion cache is container-ephemeral**
+  (`/tmp/varagity-preview/` inside `api`): a restart re-pays one `soffice`
+  run per deck (~0.5–2 s warm, up to ~12 s on the very first cold call);
+  `doc_id` is content-hashed, so a cache hit can never be stale.
+- **CJK decks render substituted glyph boxes** — the image ships
+  metric-compatible Latin fonts only (`fonts-noto-cjk` at ~300 MB is
+  deliberately omitted for English corpora).
+- **Knobs are env-only** (`PREVIEW_ENABLED`, `PREVIEW_RENDER_WIDTH`,
+  `PREVIEW_MIN_COVERAGE`, `PREVIEW_CONVERT_TIMEOUT_S`) — not in the settings
+  drawer. `PREVIEW_ENABLED=false` is the kill switch: the API answers
+  `preview_disabled` and every chunk shows full text.
+
 ## Elasticsearch notes
 
 - **`yellow` is healthy** on this single-node cluster; only `red` is a
@@ -649,6 +680,9 @@ context):
 | Browser on another machine gets CORS errors | That origin must be in `API_CORS_ORIGINS` *and* baked into `NEXT_PUBLIC_API_URL` ([above](#web-app-dev-vs-prod)) |
 | `POST /api/ingest` answers 409 | One run at a time — watch `GET /api/ingest/status`, retry once it's terminal |
 | First PDF ingest very slow | One-time Docling/EasyOCR model downloads ([above](#first-run-model-downloads)) |
+| Evidence panel says "preview unavailable — showing text" | Reason-dependent degrade — `file_changed`: file edited since ingest, reingest to clear; `conversion_unavailable`: host-mode API without LibreOffice, pptx-only and expected ([above](#page-previews-evidence-panel)) |
+| First PPTX preview slow after an `api` restart | The conversion cache is container-ephemeral — one `soffice` run per deck re-pays it ([above](#page-previews-evidence-panel)) |
+| PPTX preview renders □□ glyph boxes | CJK fonts deliberately omitted from the api image ([above](#page-previews-evidence-panel)) |
 | Flow runs missing from the Prefect UI (host run) | `PREFECT_API_URL` not set for the process — pass the localhost override |
 | Prefect flow-run panels read 0 with the exporter up | The exporter only reports runs started within `OFFSET_MINUTES` (compose sets 1440; the image default of 3 reads 0 between runs) — check the container's env ([above](#the-optional-exporter-profiles)) |
 | Exporter gone after a plain `docker compose up -d`/`down` | Profiles are not sticky — set `COMPOSE_PROFILES` in `.env` ([above](#the-optional-exporter-profiles)) |
