@@ -590,12 +590,16 @@ export interface components {
          *             question only (``semantic`` | ``bm25`` | ``hybrid`` |
          *             ``reranked``).
          *         top_k: Number of chunks retrieved for this question only.
+         *         chat_engine: Registry name of the chat engine for this question
+         *             only (``simple`` | ``condense_context`` — spec_v3 §4.2).
          */
         ChatOverrides: {
             /** Retrieval Method */
             retrieval_method?: string | null;
             /** Top K */
             top_k?: number | null;
+            /** Chat Engine */
+            chat_engine?: string | null;
         };
         /**
          * ChatRequest
@@ -972,6 +976,12 @@ export interface components {
          *         retrieval_method: Retrieval method of an assistant turn.
          *         latency_ms: Per-stage timings of an assistant turn.
          *         reasoning: Captured ``<think>`` stream, if any.
+         *         condensed_query: The standalone search query that drove an
+         *             assistant turn's retrieval (spec_v3 §8 — snapshot semantics,
+         *             like the sources: it explains a historical answer). ``None``
+         *             when the search used the user's words verbatim.
+         *         chat_engine: Registry name of the chat engine that produced an
+         *             assistant turn (``None`` for user turns and pre-v3 history).
          *         sources: The turn's snapshotted evidence, rank order.
          */
         MessageOut: {
@@ -994,6 +1004,10 @@ export interface components {
             } | null;
             /** Reasoning */
             reasoning?: string | null;
+            /** Condensed Query */
+            condensed_query?: string | null;
+            /** Chat Engine */
+            chat_engine?: string | null;
             /**
              * Sources
              * @default []
@@ -1397,6 +1411,12 @@ export interface components {
          *         top_k: Chunks requested from the retriever.
          *         reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrowed
          *             the list; ``None`` otherwise.
+         *         condensed_query: The standalone search query the chat engine
+         *             rewrote this turn into (spec_v3 §4.7) — retrieval metadata,
+         *             like ``method``: it names what was actually searched.
+         *             ``None`` whenever the search used the user's words verbatim
+         *             (the ``simple`` engine, a first turn, the kill switch, or the
+         *             condense fallback).
          */
         RetrievalEvent: {
             /** Chunks */
@@ -1410,6 +1430,11 @@ export interface components {
              * @default null
              */
             reranked_to: number | null;
+            /**
+             * Condensed Query
+             * @default null
+             */
+            condensed_query: string | null;
         };
         /**
          * RetrievalTrace

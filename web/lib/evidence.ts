@@ -72,6 +72,12 @@ export interface Evidence {
   key: string;
   /** The question that produced the answer (drives term highlighting). */
   query: string | null;
+  /**
+   * The standalone search query the chat engine rewrote the turn into
+   * (spec_v3 §4.7) — the "Searched for: …" line. `null` whenever the
+   * search used the user's words verbatim.
+   */
+  condensedQuery: string | null;
   /** The evidence rows, best first. */
   chunks: EvidenceChunk[];
   /** Retrieval method that produced them. */
@@ -188,6 +194,7 @@ export function evidenceFromRetrieval(
   return {
     key: options.key ?? LIVE_EVIDENCE_KEY,
     query: options.query ?? null,
+    condensedQuery: event.condensed_query,
     method: event.method,
     topK: event.top_k,
     rerankedTo: event.reranked_to,
@@ -231,6 +238,7 @@ export function evidenceFromMessage(
   return {
     key: message.message_id,
     query,
+    condensedQuery: message.condensed_query ?? null,
     method: message.retrieval_method ?? null,
     topK: null,
     rerankedTo: null,
@@ -302,6 +310,7 @@ export function assistantMessageFromTurn(
     retrieval_method: retrieval?.method ?? null,
     latency_ms: done.usage.latency_ms,
     reasoning: reasoning || null,
+    condensed_query: retrieval?.condensed_query ?? null,
     sources: retrieval ? sourcesFromRetrieval(retrieval) : [],
   };
 }

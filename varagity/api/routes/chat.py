@@ -18,7 +18,7 @@ closes the LLM stream, freeing the GPU (spec_v2 §4.3 cancellation).
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -50,7 +50,7 @@ from varagity.api.streaming import (
     retrieval_event,
     stats_event,
 )
-from varagity.chat.base import ChatEngine, Turn
+from varagity.chat.base import ChatEngine, PreparedQuery, Turn
 from varagity.config import get_settings
 from varagity.models.llm import GenerationTimings, LLMClient
 from varagity.models.stream import Kind
@@ -75,10 +75,6 @@ _STATS_WARMUP_TOKENS = 8
 # the deltas the user actually came for. 250 ms reads as live.
 _STATS_MIN_INTERVAL_S = 0.25
 
-# Prior turns loaded for the chat engine (three user/assistant pairs). A
-# literal until v3 Phase 5 lands CONDENSE_HISTORY_TURNS and passes it here.
-_HISTORY_TURNS = 6
-
 
 @dataclass
 class ChatPlan:
@@ -95,7 +91,10 @@ class ChatPlan:
         top_k: Chunks to retrieve (override or settings default).
         reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrows
             the list; ``None`` otherwise.
-        engine: The resolved chat engine (``settings.CHAT_ENGINE``).
+        engine: The resolved chat engine (override or
+            ``settings.CHAT_ENGINE``).
+        engine_name: Its registry name (recorded on the turn, like
+            ``method``).
         history: The conversation's recent turns, oldest first (empty for
             a fresh conversation) — the engine's condense input.
         llm: The chat client.
@@ -109,9 +108,69 @@ class ChatPlan:
     top_k: int
     reranked_to: int | None
     engine: ChatEngine
+    engine_name: str
     history: list[Turn]
     llm: LLMClient
     store_factory: Callable[[], ConversationStore]
+
+
+class RecordingEngine:
+    """Per-request engine wrapper that records the prepare outcome.
+
+    The SSE ``retrieval`` event carries ``condensed_query`` (spec_v3
+    §4.7), but the flow's ``on_retrieved`` callback only delivers chunks
+    and the flow state only returns after the stream ends — too late. The
+    condense stage runs strictly before retrieval in the same worker
+    thread, so a delegating wrapper observes the
+    :class:`~varagity.chat.base.PreparedQuery` exactly when the retrieval
+    callback needs it, with no flow-signature change. Per-request by
+    construction: registry engines are shared singletons and must not
+    carry request state.
+    """
+
+    def __init__(self, inner: ChatEngine) -> None:
+        """Wrap one resolved engine for one request.
+
+        Args:
+            inner: The registry engine that does the actual preparing.
+        """
+        self._inner = inner
+        self.prepared: PreparedQuery | None = None
+
+    def prepare(
+        self,
+        query: str,
+        *,
+        history: Sequence[Turn],
+        llm: LLMClient | None,
+        verbose: int,
+    ) -> PreparedQuery:
+        """Delegate to the wrapped engine, keeping its outcome readable.
+
+        Args:
+            query: The user's question, verbatim.
+            history: Prior turns, oldest first.
+            llm: Chat client for engines that condense.
+            verbose: Validated console verbosity.
+
+        Returns:
+            The wrapped engine's split, unchanged.
+        """
+        self.prepared = self._inner.prepare(query, history=history, llm=llm, verbose=verbose)
+        return self.prepared
+
+    @property
+    def condensed_query(self) -> str | None:
+        """The rewritten search query, or ``None`` when none was used.
+
+        Returns:
+            ``search_query`` when the engine condensed this turn; ``None``
+            before the condense stage ran and whenever the search used the
+            user's words verbatim.
+        """
+        if self.prepared is None or not self.prepared.condensed:
+            return None
+        return self.prepared.search_query
 
 
 async def prepare_chat(
@@ -127,10 +186,11 @@ async def prepare_chat(
     """Validate the request and resolve everything the stream will need.
 
     Checks run cheapest-first: body shape (FastAPI, 422) → retrieval-method
-    resolution (422) → chat-engine resolution (settings-driven, validated
-    at config load) → dependency reachability (503, *before* the stream
-    opens) → conversation existence (404), whose store round-trip doubles
-    as the history load for the chat engine.
+    resolution (422) → chat-engine resolution (override or settings, 422)
+    → dependency reachability (503, *before* the stream opens) →
+    conversation existence (404), whose store round-trip doubles as the
+    history load for the chat engine (bounded by
+    ``CONDENSE_HISTORY_TURNS``).
 
     Args:
         payload: The request body (FastAPI shares the parse with the route).
@@ -145,8 +205,9 @@ async def prepare_chat(
         The assembled plan.
 
     Raises:
-        HTTPException: ``422 unknown_retrieval_method`` for an override
-            naming no registered method; ``503 <service>_unreachable`` for a
+        HTTPException: ``422 unknown_retrieval_method`` /
+            ``422 unknown_chat_engine`` for an override naming no
+            registered implementation; ``503 <service>_unreachable`` for a
             down dependency; ``404 conversation_not_found`` for an unknown
             ``conversation_id``.
     """
@@ -160,21 +221,29 @@ async def prepare_chat(
             status_code=422,
             detail={"code": "unknown_retrieval_method", "message": str(error)},
         ) from error
-    # No 422 mapping here: CHAT_ENGINE is server config (validator-gated),
-    # not client input — a KeyError would be a config bug worth a 500.
-    engine = resolve_engine(settings.CHAT_ENGINE)
+    engine_name = overrides.chat_engine or settings.CHAT_ENGINE
+    try:
+        engine = resolve_engine(engine_name)
+    except KeyError as error:
+        # Reachable only through the override: the settings value is
+        # validator-gated to registered names at config load.
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "unknown_chat_engine", "message": str(error)},
+        ) from error
 
     await services_preflight()
 
     history: list[Turn] = []
     if payload.conversation_id is not None:
         conversation_id = payload.conversation_id
+        history_turns = settings.CONDENSE_HISTORY_TURNS
 
         def _load_history() -> list[tuple[str, str]] | None:
             with store_factory() as store:
                 if not store.conversation_exists(conversation_id):
                     return None
-                return store.recent_turns(conversation_id, limit=_HISTORY_TURNS)
+                return store.recent_turns(conversation_id, limit=history_turns)
 
         turns = await run_in_threadpool(_load_history)
         if turns is None:
@@ -194,6 +263,7 @@ async def prepare_chat(
         top_k=overrides.top_k or settings.TOP_K,
         reranked_to=settings.RERANK_TOP_N if method == "reranked" else None,
         engine=engine,
+        engine_name=engine_name,
         history=history,
         llm=llm,
         store_factory=store_factory,
@@ -250,6 +320,10 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
     bridge = EventBridge()
     started = time.monotonic()
     timings: dict[str, int] = {}
+    # Observes the condense outcome for the retrieval event: the condense
+    # stage runs before retrieval in the flow's worker thread, so the
+    # recorder is filled by the time _on_retrieved fires.
+    engine = RecordingEngine(plan.engine)
 
     def _elapsed_ms() -> int:
         return int((time.monotonic() - started) * 1000)
@@ -263,6 +337,7 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
                     method=plan.method,
                     top_k=plan.top_k,
                     reranked_to=plan.reranked_to,
+                    condensed_query=engine.condensed_query,
                 )
             )
         )
@@ -294,7 +369,7 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
             return query_stream_flow(
                 plan.payload.query,
                 history=plan.history,
-                engine=plan.engine,
+                engine=engine,
                 retriever=plan.retriever,
                 llm=plan.llm,
                 k=plan.top_k,
@@ -319,6 +394,8 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
 
         timings["generation"] = _elapsed_ms() - timings.get("retrieval", 0)
 
+        prepared = state["prepared"]
+
         def _persist() -> tuple[str, str]:
             with plan.store_factory() as store:
                 conversation_id = plan.payload.conversation_id
@@ -332,6 +409,11 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
                     retrieval_method=plan.method,
                     latency_ms=dict(timings),
                     reasoning=state["reasoning"] or None,
+                    # NULL = searched verbatim; the engine NAME is recorded
+                    # even then, so a degraded condense_context turn (kill
+                    # switch, fallback) stays attributable — spec_v3 §8.
+                    condensed_query=(prepared.search_query if prepared.condensed else None),
+                    chat_engine=plan.engine_name,
                     sources=state["retrieved"],
                 )
                 return conversation_id, message_id

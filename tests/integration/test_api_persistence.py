@@ -19,7 +19,12 @@ import pytest
 from prefect.testing.utilities import prefect_test_harness
 
 from tests.sse import parse_sse
-from tests.unit.test_api_chat import FakeRetriever, StreamingFakeLLM
+from tests.unit.test_api_chat import (
+    CONDENSED_QUERY,
+    CondensingFakeLLM,
+    FakeRetriever,
+    StreamingFakeLLM,
+)
 from varagity.eval.containers import ephemeral_postgres
 from varagity.stores.conversation_store import DEFAULT_TITLE, ConversationStore
 from varagity.stores.migrate import MIGRATIONS_PATH, run_migrations
@@ -121,9 +126,16 @@ class TestMigrationRunner:
             _drop_migrated_state(conn)
             assert run_migrations(conn, v2_dir) == ALL_MIGRATIONS[:2]
             assert "condensed_query" not in _message_columns(conn)  # truly v2
-            with ConversationStore(pg_conninfo) as store:
-                conversation_id = store.create_conversation().conversation_id
-                store.append_message(conversation_id, "user", "pre-migration turn")
+            # Planted with raw SQL, as v2 code wrote it: today's store
+            # speaks the v3 schema (it names condensed_query/chat_engine in
+            # its INSERT) and rightly cannot write into a pre-003 volume.
+            conn.execute(
+                "INSERT INTO conversations (conversation_id, title) VALUES ('c-v2', 'Existing')"
+            )
+            conn.execute(
+                "INSERT INTO messages (message_id, conversation_id, role, content) "
+                "VALUES ('m-v2', 'c-v2', 'user', 'pre-migration turn')"
+            )
 
             assert run_migrations(conn) == ALL_MIGRATIONS[2:]  # exactly 003/004
             v2_shape = _message_columns(conn)
@@ -173,17 +185,25 @@ class TestConversationStoreRoundTrip:
                 retrieval_method="hybrid",
                 latency_ms={"retrieval": 120, "generation": 900, "total": 1020},
                 reasoning="let me see",
+                condensed_query="what is the kelp corridor?",
+                chat_engine="condense_context",
                 sources=[make_chunk(0), make_chunk(1)],
             )
 
             detail = store.get_conversation(created.conversation_id)
             assert detail is not None
             assert [m.role for m in detail.messages] == ["user", "assistant"]
+            # The user turn carries no engine provenance — NULLs round-trip.
+            assert detail.messages[0].condensed_query is None
+            assert detail.messages[0].chat_engine is None
             assistant = detail.messages[1]
             assert assistant.message_id == message_id
             assert assistant.retrieval_method == "hybrid"
             assert assistant.latency_ms == {"retrieval": 120, "generation": 900, "total": 1020}
             assert assistant.reasoning == "let me see"
+            # The v3 §8 snapshot columns round-trip (migrations 003/004).
+            assert assistant.condensed_query == "what is the kelp corridor?"
+            assert assistant.chat_engine == "condense_context"
             assert [s.rank for s in assistant.sources] == [1, 2]
             snapshot = assistant.sources[0].trace
             assert snapshot["content"] == "content 0"
@@ -288,6 +308,9 @@ class TestChatStreamPersistsToPostgres:
             POSTGRES_DB=str(params["dbname"]),
             POSTGRES_USER=str(params["user"]),
             POSTGRES_PASSWORD=str(params["password"]),
+            CONDENSE_ENABLED="true",
+            CONDENSE_HISTORY_TURNS="6",
+            CONDENSE_MAX_CHARS="512",
         )
 
         from varagity.api.deps import (
@@ -325,9 +348,42 @@ class TestChatStreamPersistsToPostgres:
             assert roles == ["user", "assistant"]
             assert detail["messages"][1]["content"] == done["answer"]
             assert detail["messages"][1]["sources"][0]["trace"]["content"] == "content 0"
+            assert detail["messages"][1]["condensed_query"] is None  # simple: verbatim
+            assert detail["messages"][1]["chat_engine"] == "simple"
+
+            # Turn 2: a condensed follow-up in the same conversation — the
+            # spec_v3 §8 wire round-trip: engine rewrite → real columns →
+            # REST transcript (the history the engine read is turn 1's,
+            # loaded from the real recent_turns).
+            app.dependency_overrides[get_llm] = lambda: CondensingFakeLLM()
+            async with client.stream(
+                "POST",
+                "/api/chat",
+                json={
+                    "query": "how long is it?",
+                    "conversation_id": done["conversation_id"],
+                    "overrides": {"chat_engine": "condense_context"},
+                },
+            ) as response:
+                assert response.status_code == 200
+                body = "".join([chunk async for chunk in response.aiter_text()])
+            follow_up = parse_sse(body)
+            assert follow_up[0][1]["condensed_query"] == CONDENSED_QUERY
+
+            detail = (await client.get(f"/api/conversations/{done['conversation_id']}")).json()
+            assert [m["role"] for m in detail["messages"]] == [
+                "user",
+                "assistant",
+                "user",
+                "assistant",
+            ]
+            condensed_turn = detail["messages"][3]
+            assert condensed_turn["condensed_query"] == CONDENSED_QUERY
+            assert condensed_turn["chat_engine"] == "condense_context"
 
         # And it survives a fresh connection (nothing lived only in memory).
         with ConversationStore(migrated_conninfo) as store:
             fresh = store.get_conversation(done["conversation_id"])
             assert fresh is not None
-            assert len(fresh.messages) == 2
+            assert len(fresh.messages) == 4
+            assert fresh.messages[3].condensed_query == CONDENSED_QUERY

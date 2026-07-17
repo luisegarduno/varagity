@@ -76,6 +76,7 @@ def chat_harness(monkeypatch: pytest.MonkeyPatch, settings_env) -> dict:  # type
         "llm": FakeLLM("<think>checking…</think>Lantern powers Aurora."),
         "inputs": [":quit"],
         "summary": IngestSummary(discovered=2, ingested=2, chunks=7),
+        "histories": [],
     }
 
     def fake_ingest(verbose: int) -> IngestSummary:
@@ -89,7 +90,11 @@ def chat_harness(monkeypatch: pytest.MonkeyPatch, settings_env) -> dict:  # type
         return harness["inputs"].pop(0)
 
     def fake_query_flow(query: str, **kwargs: object) -> object:
-        # The flow's plain twin: same parameters, no Prefect engine.
+        # The flow's plain twin: same parameters, no Prefect engine. The
+        # chat-engine stage is the tracked flows' concern — the plain path
+        # never condenses — so the loop's history is recorded and dropped.
+        harness["histories"].append(list(kwargs.pop("history", ())))  # type: ignore[call-overload]
+        kwargs.pop("engine", None)
         return answer_query(query, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(cli_app, "ingest_flow", lambda verbose: fake_ingest(verbose))
@@ -196,6 +201,18 @@ class TestChatCommand:
         assert "using ONLY the CONTEXT" in chat_harness["llm"].prompts[0]
         assert "Lantern powers Aurora." in out
         assert "<think>" not in out
+
+    def test_history_accumulates_across_turns_oldest_first(self, chat_harness: dict) -> None:
+        """spec_v3 §4.8: the loop's in-memory history feeds each next turn."""
+        chat_harness["inputs"] = ["first?", "second?", ":quit"]
+        with console.capture():
+            assert cli_app.run(["-v", "0"]) == 0
+        first, second = chat_harness["histories"]
+        assert first == []  # a fresh session starts history-less
+        assert [(turn.role, turn.content) for turn in second] == [
+            ("user", "first?"),
+            ("assistant", "Lantern powers Aurora."),  # the think-stripped answer
+        ]
 
     def test_quit_exits_cleanly_without_querying(self, chat_harness: dict) -> None:
         chat_harness["inputs"] = [":quit"]

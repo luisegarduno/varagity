@@ -22,6 +22,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 
+from varagity.chat.base import Turn
 from varagity.config import get_settings
 from varagity.debug.show import console, trace_badges
 from varagity.ingest.loader import IngestSummary
@@ -162,6 +163,11 @@ def _run_chat(verbose: int) -> int:
     A failed file during startup ingestion is logged and counted but does not
     block the loop — questions run against whatever the stores hold.
 
+    Turns accumulate into an in-memory history the chat engine reads when
+    preparing each search query (spec_v3 §4.8) — session-scoped by design:
+    it lives in this function, dies with ``:quit``, and is never persisted
+    (conversation persistence stays an API concern).
+
     Args:
         verbose: Effective console verbosity.
 
@@ -185,6 +191,7 @@ def _run_chat(verbose: int) -> int:
         f"\nAsk a question ([bold]{QUIT_COMMAND}[/] to exit) — "
         f"retrieval: [bold]{settings.RETRIEVAL_METHOD}[/], top-{settings.TOP_K}\n"
     )
+    history: list[Turn] = []
     while True:
         try:
             query = Prompt.ask("[bold cyan]varagity[/]", console=console)
@@ -199,6 +206,7 @@ def _run_chat(verbose: int) -> int:
             return 0
         state = query_flow(
             query,
+            history=history,
             retriever=retriever,
             llm=llm,
             k=settings.TOP_K,
@@ -206,6 +214,8 @@ def _run_chat(verbose: int) -> int:
             on_retrieved=_show_matches,
         )
         console.print(Panel(Markdown(state["answer"]), title="answer", border_style="green"))
+        history.append(Turn(role="user", content=query))
+        history.append(Turn(role="assistant", content=state["answer"]))
 
 
 def _run_eval(verbose: int) -> int:

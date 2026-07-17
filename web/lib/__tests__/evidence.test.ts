@@ -69,6 +69,7 @@ const retrieval: RetrievalEvent = {
   method: "reranked",
   top_k: 10,
   reranked_to: 5,
+  condensed_query: null,
 };
 
 const done: DoneEvent = {
@@ -210,6 +211,48 @@ describe("sourcesFromRetrieval / evidenceFromMessage", () => {
       page: null,
       trace: null,
     });
+  });
+});
+
+describe("condensedQuery threading (spec_v3 §4.7)", () => {
+  const condensed: RetrievalEvent = {
+    ...retrieval,
+    condensed_query: "kelp corridor length between Bruma and Cinza",
+  };
+
+  it("maps the live event's rewrite, and null when searched verbatim", () => {
+    expect(evidenceFromRetrieval(condensed).condensedQuery).toBe(
+      "kelp corridor length between Bruma and Cinza",
+    );
+    expect(evidenceFromRetrieval(retrieval).condensedQuery).toBeNull();
+  });
+
+  it("folds the rewrite into the turn's message so reloads render the same", () => {
+    const message = assistantMessageFromTurn(done, condensed, "");
+    expect(message.condensed_query).toBe(
+      "kelp corridor length between Bruma and Cinza",
+    );
+    expect(evidenceFromMessage(message, null)?.condensedQuery).toBe(
+      "kelp corridor length between Bruma and Cinza",
+    );
+    // Verbatim searches stay null through the same fold.
+    expect(
+      evidenceFromMessage(assistantMessageFromTurn(done, retrieval, ""), null)
+        ?.condensedQuery,
+    ).toBeNull();
+  });
+
+  it("treats persisted pre-v3 messages (no field at all) as verbatim", () => {
+    const legacy: ChatMessage = {
+      message_id: "a3",
+      role: "assistant",
+      content: "answer",
+      created_at: "2026-07-12T00:00:00Z",
+      sources: [
+        { rank: 1, chunk_id: "a398491c7441925f::0", trace: { content: "c" } },
+      ],
+    };
+    expect(evidenceFromMessage(legacy, null)?.condensedQuery).toBeNull();
   });
 });
 

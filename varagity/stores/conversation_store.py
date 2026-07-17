@@ -50,7 +50,8 @@ ORDER BY c.updated_at DESC
 """
 
 _SELECT_MESSAGES_SQL = """
-SELECT message_id, role, content, created_at, retrieval_method, latency_ms, reasoning
+SELECT message_id, role, content, created_at, retrieval_method, latency_ms, reasoning,
+       condensed_query, chat_engine
 FROM messages
 WHERE conversation_id = %s
 ORDER BY created_at, message_id
@@ -124,6 +125,11 @@ class MessageRecord(BaseModel):
         latency_ms: Per-stage timings of an assistant turn (``None`` for
             user turns).
         reasoning: Captured ``<think>`` stream, if any.
+        condensed_query: The standalone search query that drove an
+            assistant turn's retrieval (spec_v3 §8; ``None`` = the search
+            used the user's words verbatim).
+        chat_engine: Registry name of the chat engine that produced an
+            assistant turn (``None`` for user turns and pre-v3 rows).
         sources: The turn's snapshotted evidence, rank order.
     """
 
@@ -134,6 +140,8 @@ class MessageRecord(BaseModel):
     retrieval_method: str | None = None
     latency_ms: dict[str, Any] | None = None
     reasoning: str | None = None
+    condensed_query: str | None = None
+    chat_engine: str | None = None
     sources: list[StoredSource] = []
 
 
@@ -318,6 +326,8 @@ class ConversationStore:
                 retrieval_method=row[4],
                 latency_ms=row[5],
                 reasoning=row[6],
+                condensed_query=row[7],
+                chat_engine=row[8],
                 sources=sources_by_message.get(row[0], []),
             )
             for row in self._conn.execute(_SELECT_MESSAGES_SQL, (conversation_id,))
@@ -380,6 +390,8 @@ class ConversationStore:
         retrieval_method: str | None = None,
         latency_ms: dict[str, Any] | None = None,
         reasoning: str | None = None,
+        condensed_query: str | None = None,
+        chat_engine: str | None = None,
         sources: Sequence[RetrievedChunk] = (),
     ) -> str:
         """Persist one turn, snapshotting an assistant turn's evidence.
@@ -395,6 +407,11 @@ class ConversationStore:
             retrieval_method: Retrieval method used (assistant turns).
             latency_ms: Per-stage timings (assistant turns).
             reasoning: Captured ``<think>`` stream, if any.
+            condensed_query: The standalone search query that drove the
+                turn's retrieval (assistant turns; ``None`` = the user's
+                words were searched verbatim — spec_v3 §8).
+            chat_engine: Registry name of the chat engine that produced
+                the turn (assistant turns).
             sources: The answer's retrieved chunks, best first; each is
                 snapshotted via the spec_v2 §9.1 trace blob.
 
@@ -409,7 +426,8 @@ class ConversationStore:
         with self._conn.transaction():
             self._conn.execute(
                 "INSERT INTO messages (message_id, conversation_id, role, content, "
-                "retrieval_method, latency_ms, reasoning) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                "retrieval_method, latency_ms, reasoning, condensed_query, chat_engine) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     message_id,
                     conversation_id,
@@ -418,6 +436,8 @@ class ConversationStore:
                     retrieval_method,
                     None if latency_ms is None else Json(latency_ms),
                     reasoning,
+                    condensed_query,
+                    chat_engine,
                 ),
             )
             for rank, chunk in enumerate(sources, start=1):

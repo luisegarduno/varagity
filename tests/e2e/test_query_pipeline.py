@@ -24,6 +24,8 @@ import pytest
 from elasticsearch import Elasticsearch
 from prefect.testing.utilities import prefect_test_harness
 
+from varagity.chat import get_chat_engine
+from varagity.chat.base import Turn
 from varagity.eval.containers import ephemeral_elasticsearch, ephemeral_postgres
 from varagity.generation.answer import format_context
 from varagity.pipeline import ingest_flow, query_flow
@@ -548,6 +550,132 @@ def test_every_chunking_strategy_answers_a_planted_fact(
                 f"{strategy} missed the planted kelp-corridor chunk"
             )
             assert state["answer"] == SCRIPTED_ANSWER
+
+
+class CondensingAndAnsweringLLM:
+    """One fake for both LLM stages, dispatched on the prompt's shape.
+
+    The flow hands a single client to the condense task and the answer
+    task (exactly the API's composition), so the fake plays whichever
+    role the prompt asks for — recording each, and wrapping the condense
+    reply in a ``<think>`` stage to prove stripping end-to-end.
+    """
+
+    def __init__(self, standalone: str, answer: str) -> None:
+        self.standalone = standalone
+        self.answer = answer
+        self.condense_prompts: list[str] = []
+        self.answer_prompts: list[str] = []
+
+    def generate(
+        self,
+        messages: Sequence[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        verbose: int | None = None,
+    ) -> str:
+        prompt = messages[0]["content"]
+        if "STANDALONE QUERY:" in prompt:
+            self.condense_prompts.append(prompt)
+            return f"<think>they mean the kelp corridor</think>{self.standalone}"
+        self.answer_prompts.append(prompt)
+        return self.answer
+
+
+FOLLOW_UP = "How long is it?"
+
+
+def test_pronoun_follow_up_discriminates_condense_from_simple(
+    pinned_settings: None,
+    settings_env: Callable[..., None],
+    pg_conninfo: str,
+    bm25_store: ElasticsearchBM25,
+) -> None:
+    """★ The v3 Phase 5 milestone: the chat remembers (spec_v3 §4).
+
+    Turn 2 is a pronoun follow-up whose words alone name nothing: under
+    ``simple`` it retrieves the wrong chunks, under ``condense_context``
+    the history-resolved rewrite retrieves the planted kelp-corridor fact
+    — while the answer prompt still carries the user's own words. This
+    asymmetry is the feature's entire reason for existing.
+    """
+    settings_env(
+        CONDENSE_ENABLED="true",
+        CONDENSE_MODEL_TYPE="default",
+        CONDENSE_HISTORY_TURNS="6",
+        CONDENSE_MAX_TOKENS="128",
+        CONDENSE_MAX_CHARS="512",
+    )
+    embeddings = FakeEmbeddings()
+
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("TRUNCATE documents CASCADE")
+
+    history = [
+        Turn("user", QUESTION),
+        Turn("assistant", SCRIPTED_ANSWER),
+    ]
+
+    with ContextualVectorDB(pg_conninfo) as store:
+        ingest_flow(
+            str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
+        )
+        retriever = HybridRetriever(store=store, bm25=bm25_store, embeddings=embeddings)
+
+        # Under simple, the pronoun query is searched verbatim — and the
+        # planted chunk is nowhere in the top-k: the turn 2 words alone
+        # cannot find it.
+        simple_llm = CondensingAndAnsweringLLM(QUESTION, "I don't know.")
+        state = query_flow(
+            FOLLOW_UP,
+            history=history,
+            engine=get_chat_engine("simple"),
+            retriever=retriever,
+            llm=simple_llm,  # type: ignore[arg-type]
+            k=3,
+            verbose=0,
+        )
+        assert state["prepared"].condensed is False
+        assert simple_llm.condense_prompts == []  # simple never calls the condenser
+        assert embeddings.query_calls[-1] == FOLLOW_UP  # searched verbatim
+        assert all(PLANTED_FACT not in chunk.content for chunk in state["retrieved"]), (
+            "the fixture stopped discriminating: the bare pronoun query found the fact"
+        )
+
+        # Under condense_context, the same turn condenses against history
+        # and the rewrite finds the planted fact — ranked first.
+        condense_llm = CondensingAndAnsweringLLM(QUESTION, SCRIPTED_ANSWER)
+        state = query_flow(
+            FOLLOW_UP,
+            history=history,
+            engine=get_chat_engine("condense_context"),
+            retriever=retriever,
+            llm=condense_llm,  # type: ignore[arg-type]
+            k=3,
+            verbose=0,
+        )
+
+    assert state["prepared"].condensed is True
+    assert state["prepared"].search_query == QUESTION  # think-stripped rewrite
+    assert state["prepared"].original_query == FOLLOW_UP
+    assert state["prepared"].condense_latency_s is not None
+
+    # The condenser saw the turn-1 exchange, and its rewrite — not the
+    # pronoun — drove the query embedding and retrieval.
+    assert len(condense_llm.condense_prompts) == 1
+    assert QUESTION in condense_llm.condense_prompts[0]
+    assert SCRIPTED_ANSWER in condense_llm.condense_prompts[0]
+    assert embeddings.query_calls[-1] == QUESTION
+    assert any(PLANTED_FACT in chunk.content for chunk in state["retrieved"])
+    assert "kelp corridor" in state["retrieved"][0].content
+
+    # The two-string split, end to end: the answer prompt keeps the
+    # user's own words, never the rewrite.
+    assert len(condense_llm.answer_prompts) == 1
+    assert f"QUESTION: {FOLLOW_UP}" in condense_llm.answer_prompts[0]
+    assert f"QUESTION: {QUESTION}" not in condense_llm.answer_prompts[0]
+    assert state["answer"] == SCRIPTED_ANSWER
 
 
 def test_all_three_retrieval_methods_answer(

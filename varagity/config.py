@@ -120,10 +120,28 @@ class Settings(BaseSettings):
             servers post-v2.
         CHAT_ENGINE: Registry name of the chat engine preparing each turn's
             retrieval query (spec_v3 §4.2; see ``varagity.chat``). ``simple``
-            is today's stateless behavior — the retriever searches with the
-            user's words, verbatim; v3 Phase 5 registers
-            ``condense_context``, which rewrites follow-ups into standalone
-            search queries against the conversation history.
+            searches with the user's words, verbatim (the stateless v2
+            behavior); ``condense_context`` rewrites follow-ups into
+            standalone search queries against the conversation history.
+        CONDENSE_ENABLED: Kill switch for the condense stage, orthogonal to
+            engine selection (spec_v3 §4.6 — the ``RERANK_ENABLED``
+            pattern): with ``CHAT_ENGINE=condense_context`` and this off,
+            the engine degrades to ``simple`` behavior (the identity split)
+            and logs it.
+        CONDENSE_MODEL_TYPE: Model-registry type the condense stage
+            resolves its LLM with when the caller injects none (``default``
+            | ``reasoning`` | ``tool`` — mirrors ``CHAT_MODEL_TYPE``). All
+            three are one llama.cpp server today; the knob is the seam for
+            pointing condensing at a smaller model without a code change.
+        CONDENSE_HISTORY_TURNS: Maximum prior messages loaded for and fed
+            to the condenser (6 = three user/assistant pairs). ``0``
+            disables history — every turn then takes the no-history path
+            and never condenses.
+        CONDENSE_MAX_TOKENS: Generation cap for the condense call — a
+            standalone search query is a sentence, not an essay.
+        CONDENSE_MAX_CHARS: Length ceiling on the cleaned condense output;
+            anything longer means the condenser misbehaved, and the raw
+            query is searched instead (the spec_v3 §4.6 fallback).
         POSTGRES_HOST: PostgreSQL host (service name in-container).
         POSTGRES_PORT: PostgreSQL port.
         POSTGRES_DB: PostgreSQL database name.
@@ -232,6 +250,11 @@ class Settings(BaseSettings):
     CONTEXTUALIZE_MAX_TOKENS: int = 2048
     CHAT_MODEL_TYPE: str = "default"
     CHAT_ENGINE: str = "simple"
+    CONDENSE_ENABLED: bool = True
+    CONDENSE_MODEL_TYPE: str = "default"
+    CONDENSE_HISTORY_TURNS: int = 6
+    CONDENSE_MAX_TOKENS: int = 128
+    CONDENSE_MAX_CHARS: int = 512
 
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
@@ -627,8 +650,8 @@ class Settings(BaseSettings):
         importing the engine registry here would be circular —
         ``varagity/chat/`` reads this module through its model clients. The
         tuple is regression-tested to equal
-        ``varagity.chat.CHAT_ENGINE_REGISTRY`` and grows in lockstep with it
-        (v3 Phase 5 adds ``condense_context``).
+        ``varagity.chat.CHAT_ENGINE_REGISTRY`` and grows in lockstep with
+        it.
 
         Args:
             value: The configured ``CHAT_ENGINE`` value.
@@ -639,10 +662,42 @@ class Settings(BaseSettings):
         Raises:
             ValueError: If ``value`` is not a registered engine name.
         """
-        allowed = ("simple",)
+        allowed = ("simple", "condense_context")
         if value not in allowed:
             raise ValueError(f"CHAT_ENGINE must be one of {allowed}; got {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def _validate_condense(self) -> "Settings":
+        """Reject condense-stage parameters outside their domains (spec_v3 §4.6).
+
+        ``CONDENSE_MODEL_TYPE``'s vocabulary is hard-coded for the same
+        circular-import reason as :meth:`_validate_chat_model_type` — the
+        model registry's clients read this module.
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If ``CONDENSE_HISTORY_TURNS`` is negative, if
+                ``CONDENSE_MAX_TOKENS`` or ``CONDENSE_MAX_CHARS`` is not
+                positive, or if ``CONDENSE_MODEL_TYPE`` is not ``default``,
+                ``reasoning``, or ``tool``.
+        """
+        if self.CONDENSE_HISTORY_TURNS < 0:
+            raise ValueError(
+                f"CONDENSE_HISTORY_TURNS must be non-negative (0 disables history); "
+                f"got {self.CONDENSE_HISTORY_TURNS}"
+            )
+        for name in ("CONDENSE_MAX_TOKENS", "CONDENSE_MAX_CHARS"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive; got {getattr(self, name)}")
+        allowed = ("default", "reasoning", "tool")
+        if self.CONDENSE_MODEL_TYPE not in allowed:
+            raise ValueError(
+                f"CONDENSE_MODEL_TYPE must be one of {allowed}; got {self.CONDENSE_MODEL_TYPE!r}"
+            )
+        return self
 
     @field_validator("LLM_TEMPERATURE")
     @classmethod

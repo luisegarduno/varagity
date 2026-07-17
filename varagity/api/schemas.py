@@ -55,12 +55,15 @@ class ChatOverrides(BaseModel):
             question only (``semantic`` | ``bm25`` | ``hybrid`` |
             ``reranked``).
         top_k: Number of chunks retrieved for this question only.
+        chat_engine: Registry name of the chat engine for this question
+            only (``simple`` | ``condense_context`` — spec_v3 §4.2).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     retrieval_method: str | None = None
     top_k: int | None = Field(default=None, ge=1)
+    chat_engine: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -92,12 +95,19 @@ class RetrievalEvent(BaseModel):
         top_k: Chunks requested from the retriever.
         reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrowed
             the list; ``None`` otherwise.
+        condensed_query: The standalone search query the chat engine
+            rewrote this turn into (spec_v3 §4.7) — retrieval metadata,
+            like ``method``: it names what was actually searched.
+            ``None`` whenever the search used the user's words verbatim
+            (the ``simple`` engine, a first turn, the kill switch, or the
+            condense fallback).
     """
 
     chunks: list[RetrievedChunk]
     method: str
     top_k: int
     reranked_to: int | None = None
+    condensed_query: str | None = None
 
 
 class DeltaEvent(BaseModel):
@@ -242,6 +252,12 @@ class MessageOut(BaseModel):
         retrieval_method: Retrieval method of an assistant turn.
         latency_ms: Per-stage timings of an assistant turn.
         reasoning: Captured ``<think>`` stream, if any.
+        condensed_query: The standalone search query that drove an
+            assistant turn's retrieval (spec_v3 §8 — snapshot semantics,
+            like the sources: it explains a historical answer). ``None``
+            when the search used the user's words verbatim.
+        chat_engine: Registry name of the chat engine that produced an
+            assistant turn (``None`` for user turns and pre-v3 history).
         sources: The turn's snapshotted evidence, rank order.
     """
 
@@ -252,6 +268,8 @@ class MessageOut(BaseModel):
     retrieval_method: str | None = None
     latency_ms: dict[str, Any] | None = None
     reasoning: str | None = None
+    condensed_query: str | None = None
+    chat_engine: str | None = None
     sources: list[MessageSourceOut] = []
 
 

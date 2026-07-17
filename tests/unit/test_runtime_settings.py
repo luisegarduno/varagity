@@ -69,6 +69,24 @@ class TestCatalog:
         assert choices["RERANK_BASE_METHOD"] == ["semantic", "bm25", "hybrid"]
         assert choices["CHAT_MODEL_TYPE"] == ["default", "reasoning", "tool"]
         assert "easyocr" in choices["OCR_ENGINE"]
+        assert choices["CHAT_ENGINE"] == ["condense_context", "simple"]
+        assert choices["CONDENSE_MODEL_TYPE"] == ["default", "reasoning", "tool"]
+
+    def test_condense_knobs_are_overridable_but_never_reingest_affecting(self) -> None:
+        """spec_v3 §9: the condense knobs change query-time behavior only.
+
+        A chat-engine change must never demand a corpus re-ingest.
+        """
+        condense_knobs = {
+            "CHAT_ENGINE",
+            "CONDENSE_ENABLED",
+            "CONDENSE_MODEL_TYPE",
+            "CONDENSE_HISTORY_TURNS",
+            "CONDENSE_MAX_TOKENS",
+            "CONDENSE_MAX_CHARS",
+        }
+        assert condense_knobs <= set(OVERRIDABLE)
+        assert condense_knobs.isdisjoint(REINGEST_AFFECTING)
 
 
 class TestToEnvValue:

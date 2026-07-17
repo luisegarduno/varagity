@@ -2,10 +2,12 @@
 
 Each chat-engine module defines one implementation decorated with
 ``@register("name")``; callers resolve the configured engine with
-``get_chat_engine(settings.CHAT_ENGINE)``. Registered: ``simple`` (v3 —
-today's stateless behavior, verbatim); adding an engine later means one new
-file plus its import line — no caller edits, exactly as the retrieval
-registry's ``reranked`` addition proved.
+``get_chat_engine(settings.CHAT_ENGINE)``. Registered: ``simple`` (the
+stateless v2 behavior, verbatim) and ``condense_context`` (spec_v3 §4.5 —
+follow-ups rewritten into standalone search queries against the
+conversation history); adding an engine later means one new file plus its
+import line — no caller edits, exactly as the retrieval registry's
+``reranked`` addition proved.
 
 An engine decides **what string the retriever searches with**, given the
 turn and its conversation history. It is deliberately not a

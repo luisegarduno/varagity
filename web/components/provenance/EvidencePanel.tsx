@@ -118,7 +118,12 @@ function hasFooterStats(evidence: Evidence | null): evidence is Evidence {
   );
 }
 
-/** The answer-level meta line: method badge, top_k → reranked-to, count. */
+/**
+ * The answer-level meta: method badge, top_k → reranked-to, count — plus,
+ * when the chat engine rewrote the turn, the "Searched for: …" line
+ * (spec_v3 §4.7). Same "how this answer was built" promise: if retrieval
+ * ran on something other than what was typed, the reader gets to see it.
+ */
 function EvidenceMeta({ evidence }: { evidence: Evidence }) {
   const counts: string[] = [];
   if (evidence.topK !== null) {
@@ -132,14 +137,24 @@ function EvidenceMeta({ evidence }: { evidence: Evidence }) {
     `${evidence.chunks.length} chunk${evidence.chunks.length === 1 ? "" : "s"}`,
   );
   return (
-    <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-      {evidence.method && (
-        <Badge variant="accent" className="font-mono">
-          {evidence.method}
-        </Badge>
+    <>
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        {evidence.method && (
+          <Badge variant="accent" className="font-mono">
+            {evidence.method}
+          </Badge>
+        )}
+        <span className="font-mono tabular-nums">{counts.join(" · ")}</span>
+      </p>
+      {evidence.condensedQuery !== null && (
+        <p className="text-xs text-muted-foreground">
+          Searched for:{" "}
+          <span className="text-foreground/80 italic">
+            {evidence.condensedQuery}
+          </span>
+        </p>
       )}
-      <span className="font-mono tabular-nums">{counts.join(" · ")}</span>
-    </p>
+    </>
   );
 }
 

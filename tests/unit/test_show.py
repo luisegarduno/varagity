@@ -11,6 +11,7 @@ from varagity.debug.show import (
     console,
     trace_badges,
     v_chunk,
+    v_condensed,
     v_discover,
     v_retrieve,
 )
@@ -216,3 +217,32 @@ class TestVRetrieve:
     def test_invalid_level_raises(self) -> None:
         with pytest.raises(ValueError, match="verbose"):
             v_retrieve(self._chunks(), verbose=3)
+
+
+class TestVCondensed:
+    """The condensed-search-query line (spec_v3 §4.7, the v_<name> convention)."""
+
+    def test_level_0_renders_nothing(self) -> None:
+        with console.capture() as capture:
+            v_condensed("how long is it?", "kelp corridor length", verbose=0)
+        assert capture.get() == ""
+
+    def test_level_1_shows_the_condensed_query(self) -> None:
+        with console.capture() as capture:
+            v_condensed("how long is it?", "kelp corridor length", verbose=1)
+        out = capture.get()
+        assert "Searching with" in out
+        assert "kelp corridor length" in out
+        assert "how long is it?" not in out  # the original is level 2
+
+    def test_level_2_pairs_the_rewrite_with_the_original(self) -> None:
+        with console.capture() as capture:
+            v_condensed("how long is it?", "kelp corridor length", verbose=2)
+        out = capture.get()
+        assert "condensed search query" in out
+        assert "kelp corridor length" in out
+        assert "asked: how long is it?" in out
+
+    def test_invalid_level_raises(self) -> None:
+        with pytest.raises(ValueError, match="verbose"):
+            v_condensed("q", "c", verbose=7)

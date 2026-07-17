@@ -8,6 +8,7 @@ const retrieval: RetrievalEvent = {
   method: "reranked",
   top_k: 10,
   reranked_to: 5,
+  condensed_query: null,
 };
 
 const done: DoneEvent = {

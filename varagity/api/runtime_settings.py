@@ -97,11 +97,22 @@ def _llm_model_types() -> list[str]:
     """List the chat-capable model-registry aliases.
 
     Returns:
-        The ``CHAT_MODEL_TYPE`` vocabulary.
+        The ``CHAT_MODEL_TYPE`` / ``CONDENSE_MODEL_TYPE`` vocabulary.
     """
     from varagity.models.registry import LLM_MODEL_TYPES
 
     return list(LLM_MODEL_TYPES)
+
+
+def _chat_engine_names() -> list[str]:
+    """List the registered chat engines (lazy registry import).
+
+    Returns:
+        Sorted registry names.
+    """
+    from varagity.chat import CHAT_ENGINE_REGISTRY
+
+    return sorted(CHAT_ENGINE_REGISTRY)
 
 
 # The GUI-overridable settings (spec §4.7 groups; the Display group is
@@ -122,6 +133,15 @@ OVERRIDABLE: dict[str, OverridableSetting] = {
     "LLM_TEMPERATURE": OverridableSetting("generation"),
     "MAX_TOKENS": OverridableSetting("generation"),
     "CHAT_MODEL_TYPE": OverridableSetting("generation", choices=_llm_model_types),
+    # The chat engine and its condense knobs change query-time behavior
+    # only — none are reingest_affecting (spec_v3 §9): flagging the corpus
+    # stale for an engine toggle would demand a pointless full re-ingest.
+    "CHAT_ENGINE": OverridableSetting("generation", choices=_chat_engine_names),
+    "CONDENSE_ENABLED": OverridableSetting("generation"),
+    "CONDENSE_MODEL_TYPE": OverridableSetting("generation", choices=_llm_model_types),
+    "CONDENSE_HISTORY_TURNS": OverridableSetting("generation"),
+    "CONDENSE_MAX_TOKENS": OverridableSetting("generation"),
+    "CONDENSE_MAX_CHARS": OverridableSetting("generation"),
     "CHUNKING_STRATEGY": OverridableSetting(
         "ingestion", reingest_affecting=True, choices=_chunker_names
     ),

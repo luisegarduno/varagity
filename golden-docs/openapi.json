@@ -34,8 +34,19 @@
       },
       "ChatOverrides": {
         "additionalProperties": false,
-        "description": "Per-request overrides of query-time settings (spec_v2 \u00a74.2).\n\nPhase 2 honors the two knobs the thin client needs; the persisted\nruntime-override layer (spec_v2 \u00a74.7) lands with its GUI in Phase 8.\nUnknown fields are rejected so a typo'd override fails loudly instead\nof silently running with defaults.\n\nAttributes:\n    retrieval_method: Registry name of the retrieval method for this\n        question only (``semantic`` | ``bm25`` | ``hybrid`` |\n        ``reranked``).\n    top_k: Number of chunks retrieved for this question only.",
+        "description": "Per-request overrides of query-time settings (spec_v2 \u00a74.2).\n\nPhase 2 honors the two knobs the thin client needs; the persisted\nruntime-override layer (spec_v2 \u00a74.7) lands with its GUI in Phase 8.\nUnknown fields are rejected so a typo'd override fails loudly instead\nof silently running with defaults.\n\nAttributes:\n    retrieval_method: Registry name of the retrieval method for this\n        question only (``semantic`` | ``bm25`` | ``hybrid`` |\n        ``reranked``).\n    top_k: Number of chunks retrieved for this question only.\n    chat_engine: Registry name of the chat engine for this question\n        only (``simple`` | ``condense_context`` \u2014 spec_v3 \u00a74.2).",
         "properties": {
+          "chat_engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chat Engine"
+          },
           "retrieval_method": {
             "anyOf": [
               {
@@ -772,8 +783,30 @@
         "type": "object"
       },
       "MessageOut": {
-        "description": "One persisted message in a transcript.\n\nAttributes:\n    message_id: The app-generated id.\n    role: ``\"user\"`` or ``\"assistant\"``.\n    content: The question or the generated answer.\n    created_at: Persistence timestamp.\n    retrieval_method: Retrieval method of an assistant turn.\n    latency_ms: Per-stage timings of an assistant turn.\n    reasoning: Captured ``<think>`` stream, if any.\n    sources: The turn's snapshotted evidence, rank order.",
+        "description": "One persisted message in a transcript.\n\nAttributes:\n    message_id: The app-generated id.\n    role: ``\"user\"`` or ``\"assistant\"``.\n    content: The question or the generated answer.\n    created_at: Persistence timestamp.\n    retrieval_method: Retrieval method of an assistant turn.\n    latency_ms: Per-stage timings of an assistant turn.\n    reasoning: Captured ``<think>`` stream, if any.\n    condensed_query: The standalone search query that drove an\n        assistant turn's retrieval (spec_v3 \u00a78 \u2014 snapshot semantics,\n        like the sources: it explains a historical answer). ``None``\n        when the search used the user's words verbatim.\n    chat_engine: Registry name of the chat engine that produced an\n        assistant turn (``None`` for user turns and pre-v3 history).\n    sources: The turn's snapshotted evidence, rank order.",
         "properties": {
+          "chat_engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chat Engine"
+          },
+          "condensed_query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Condensed Query"
+          },
           "content": {
             "title": "Content",
             "type": "string"
@@ -1009,7 +1042,7 @@
         "type": "object"
       },
       "RetrievalEvent": {
-        "description": "Payload of the SSE ``retrieval`` event \u2014 the provenance panel's data.\n\nEmitted once retrieval (+rerank) completes, **before** any answer token\n(spec_v2 \u00a74.3): the browser gets the evidence before the prose.\n\nAttributes:\n    chunks: The retrieved chunks, best first, each carrying its full\n        metadata record and (when the method fills it) the\n        :class:`~varagity.stores.records.RetrievalTrace`.\n    method: The retrieval method that produced them.\n    top_k: Chunks requested from the retriever.\n    reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrowed\n        the list; ``None`` otherwise.",
+        "description": "Payload of the SSE ``retrieval`` event \u2014 the provenance panel's data.\n\nEmitted once retrieval (+rerank) completes, **before** any answer token\n(spec_v2 \u00a74.3): the browser gets the evidence before the prose.\n\nAttributes:\n    chunks: The retrieved chunks, best first, each carrying its full\n        metadata record and (when the method fills it) the\n        :class:`~varagity.stores.records.RetrievalTrace`.\n    method: The retrieval method that produced them.\n    top_k: Chunks requested from the retriever.\n    reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrowed\n        the list; ``None`` otherwise.\n    condensed_query: The standalone search query the chat engine\n        rewrote this turn into (spec_v3 \u00a74.7) \u2014 retrieval metadata,\n        like ``method``: it names what was actually searched.\n        ``None`` whenever the search used the user's words verbatim\n        (the ``simple`` engine, a first turn, the kill switch, or the\n        condense fallback).",
         "properties": {
           "chunks": {
             "items": {
@@ -1017,6 +1050,18 @@
             },
             "title": "Chunks",
             "type": "array"
+          },
+          "condensed_query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Condensed Query"
           },
           "method": {
             "title": "Method",

@@ -61,10 +61,11 @@ def make_chunk(index: int) -> RetrievedChunk:
 
 
 class FakeRetriever:
-    """Two scripted chunks; records the ks it was asked for."""
+    """Two scripted chunks; records the ks and queries it was asked for."""
 
     def __init__(self) -> None:
         self.requested_ks: list[int] = []
+        self.queries: list[str] = []
 
     def encode_query(self, query: str, verbose: int | None = None) -> list[float] | None:
         return None
@@ -78,6 +79,7 @@ class FakeRetriever:
         query_vector: list[float] | None = None,
     ) -> list[RetrievedChunk]:
         self.requested_ks.append(k)
+        self.queries.append(query)
         return [make_chunk(0), make_chunk(1)]
 
 
@@ -136,6 +138,18 @@ class BrokenStreamLLM(StreamingFakeLLM):
             raise RuntimeError("llm fell over mid-stream")
 
         return gen()
+
+
+# What the condensing fake rewrites the follow-up into (think-wrapped on
+# the wire to prove clean_response runs before anything downstream).
+CONDENSED_QUERY = "how long is the kelp corridor"
+
+
+class CondensingFakeLLM(StreamingFakeLLM):
+    """generate() plays the condenser; the streamed answer is unchanged."""
+
+    def generate(self, messages: Sequence[dict[str, str]], **kwargs: Any) -> str:
+        return f"<think>resolving the pronoun</think>{CONDENSED_QUERY}"
 
 
 class FakeConversationStore:
@@ -245,6 +259,7 @@ async def test_retrieval_event_carries_chunks_and_traces(app: FastAPI) -> None:
     assert data["method"] == "hybrid"  # settings default
     assert data["top_k"] == 10
     assert data["reranked_to"] is None
+    assert data["condensed_query"] is None  # simple searches verbatim
     assert len(data["chunks"]) == 2
     first = data["chunks"][0]
     assert first["content"] == "content 0"
@@ -326,6 +341,8 @@ async def test_turn_persisted_user_then_assistant(
     assistant = store_state["messages"][1]
     assert assistant["retrieval_method"] == "hybrid"
     assert assistant["reasoning"] == "let me see"
+    assert assistant["condensed_query"] is None  # searched verbatim
+    assert assistant["chat_engine"] == "simple"  # the engine is still recorded
     assert len(assistant["sources"]) == 2
 
 
@@ -394,3 +411,94 @@ async def test_midstream_failure_emits_error_event(
     assert events[-1][1]["code"] == "pipeline_error"
     assert "RuntimeError" in events[-1][1]["message"]
     assert store_state["messages"] == []  # nothing persisted without done
+
+
+@pytest.fixture
+def condense_settings(settings_env: Callable[..., None]) -> None:
+    """Pin the condense knobs so the machine's .env can't leak in."""
+    settings_env(
+        CONDENSE_ENABLED="true",
+        CONDENSE_MODEL_TYPE="default",
+        CONDENSE_HISTORY_TURNS="6",
+        CONDENSE_MAX_TOKENS="128",
+        CONDENSE_MAX_CHARS="512",
+    )
+
+
+async def test_condense_rewrite_reaches_event_retriever_and_persistence(
+    app: FastAPI, store_state: dict[str, Any], condense_settings: None
+) -> None:
+    """★ The spec_v3 §4.7 wire, end to end at the route.
+
+    With history and the condense_context override, the retrieval event
+    carries the think-stripped rewrite, the retriever searches with it,
+    and the persisted turn snapshots rewrite + engine.
+    """
+    app.dependency_overrides[get_llm] = lambda: CondensingFakeLLM()
+    store_state["conversations"]["known"] = "Existing"
+    store_state["messages"] = [
+        {"conversation_id": "known", "role": "user", "content": "q0"},
+        {"conversation_id": "known", "role": "assistant", "content": "a0"},
+    ]
+    _, _, body = await post_chat(
+        app,
+        {
+            "query": "how long is it?",
+            "conversation_id": "known",
+            "overrides": {"chat_engine": "condense_context"},
+        },
+    )
+    events = parse_sse(body)
+    names = [name for name, _ in events]
+    # Evidence before prose survives the extra pre-retrieval stage.
+    assert names[0] == "retrieval"
+    assert names.index("retrieval") < names.index("token")
+    assert names[-1] == "done"
+
+    retrieval = events[0][1]
+    assert retrieval["condensed_query"] == CONDENSED_QUERY  # think-stripped
+    assert app.state.fake_retriever.queries == [CONDENSED_QUERY]
+
+    assistant = store_state["messages"][-1]
+    assert assistant["role"] == "assistant"
+    assert assistant["condensed_query"] == CONDENSED_QUERY
+    assert assistant["chat_engine"] == "condense_context"
+
+
+async def test_condense_context_first_turn_searches_verbatim(
+    app: FastAPI, store_state: dict[str, Any], condense_settings: None
+) -> None:
+    """No conversation ⇒ no history ⇒ no condense call, null on the wire."""
+    app.dependency_overrides[get_llm] = lambda: CondensingFakeLLM()
+    _, _, body = await post_chat(
+        app, {"query": "how long is it?", "overrides": {"chat_engine": "condense_context"}}
+    )
+    retrieval = parse_sse(body)[0][1]
+    assert retrieval["condensed_query"] is None
+    assert app.state.fake_retriever.queries == ["how long is it?"]
+    assert store_state["messages"][-1]["condensed_query"] is None
+    assert store_state["messages"][-1]["chat_engine"] == "condense_context"
+
+
+async def test_unknown_chat_engine_override_422(app: FastAPI) -> None:
+    status, _, body = await post_chat(app, {"query": "q", "overrides": {"chat_engine": "made_up"}})
+    import json
+
+    assert status == 422
+    assert json.loads(body)["error"]["code"] == "unknown_chat_engine"
+
+
+async def test_typoed_override_field_422(app: FastAPI) -> None:
+    """ChatOverrides is extra="forbid" — a misspelled knob fails loudly."""
+    status, _, _ = await post_chat(app, {"query": "q", "overrides": {"chat_enginee": "simple"}})
+    assert status == 422
+
+
+async def test_history_limit_reads_condense_history_turns(
+    app: FastAPI, store_state: dict[str, Any], settings_env: Callable[..., None]
+) -> None:
+    """The v3 Phase 4 literal is gone: the load bound is the setting."""
+    settings_env(CONDENSE_HISTORY_TURNS="2")
+    store_state["conversations"]["known"] = "Existing"
+    await post_chat(app, {"query": "q", "conversation_id": "known"})
+    assert store_state["recent_turns_calls"] == [("known", 2)]

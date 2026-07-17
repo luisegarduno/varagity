@@ -30,6 +30,11 @@ SETTINGS_ENV_VARS = (
     "CONTEXTUALIZE_MAX_TOKENS",
     "CHAT_MODEL_TYPE",
     "CHAT_ENGINE",
+    "CONDENSE_ENABLED",
+    "CONDENSE_MODEL_TYPE",
+    "CONDENSE_HISTORY_TURNS",
+    "CONDENSE_MAX_TOKENS",
+    "CONDENSE_MAX_CHARS",
     "POSTGRES_HOST",
     "POSTGRES_PORT",
     "POSTGRES_DB",
@@ -198,14 +203,15 @@ class TestChatEngineValidation:
     def test_default_is_simple(self) -> None:
         assert Settings(_env_file=None).CHAT_ENGINE == "simple"
 
-    @pytest.mark.parametrize("bad", ["condense_context", "SIMPLE", "", "made_up"])
-    def test_unknown_engine_fails_fast(self, bad: str) -> None:
-        """Unregistered names rejected at config load, not at first query.
+    def test_condense_context_is_accepted(self) -> None:
+        assert (
+            Settings(_env_file=None, CHAT_ENGINE="condense_context").CHAT_ENGINE
+            == "condense_context"
+        )
 
-        ``condense_context`` joins the vocabulary the day v3 Phase 5
-        registers it — accepting it earlier would pass validation and then
-        ``KeyError`` at runtime.
-        """
+    @pytest.mark.parametrize("bad", ["SIMPLE", "", "made_up", "condense"])
+    def test_unknown_engine_fails_fast(self, bad: str) -> None:
+        """Unregistered names rejected at config load, not at first query."""
         with pytest.raises(ValidationError, match="CHAT_ENGINE"):
             Settings(_env_file=None, CHAT_ENGINE=bad)
 
@@ -220,7 +226,45 @@ class TestChatEngineValidation:
 
         for name in sorted(CHAT_ENGINE_REGISTRY):
             assert name == Settings(_env_file=None, CHAT_ENGINE=name).CHAT_ENGINE
-        assert len(CHAT_ENGINE_REGISTRY) == 1  # v3 Phase 5 adds condense_context
+        assert len(CHAT_ENGINE_REGISTRY) == 2  # simple + condense_context
+
+
+class TestCondenseValidation:
+    """The condense-stage knobs (spec_v3 §4.6) and their domains."""
+
+    def test_defaults_are_valid_and_enabled(self) -> None:
+        settings = Settings(_env_file=None)
+        assert settings.CONDENSE_ENABLED is True
+        assert settings.CONDENSE_MODEL_TYPE == "default"
+        assert settings.CONDENSE_HISTORY_TURNS == 6
+        assert settings.CONDENSE_MAX_TOKENS == 128
+        assert settings.CONDENSE_MAX_CHARS == 512
+
+    def test_zero_history_turns_is_valid(self) -> None:
+        """0 is 'history off', not a config bug — every turn then skips condensing."""
+        assert Settings(_env_file=None, CONDENSE_HISTORY_TURNS=0).CONDENSE_HISTORY_TURNS == 0
+
+    def test_negative_history_turns_fails_fast(self) -> None:
+        with pytest.raises(ValidationError, match="CONDENSE_HISTORY_TURNS"):
+            Settings(_env_file=None, CONDENSE_HISTORY_TURNS=-1)
+
+    @pytest.mark.parametrize("name", ["CONDENSE_MAX_TOKENS", "CONDENSE_MAX_CHARS"])
+    @pytest.mark.parametrize("bad", [0, -5])
+    def test_nonpositive_caps_fail_fast(self, name: str, bad: int) -> None:
+        with pytest.raises(ValidationError, match=name):
+            Settings(_env_file=None, **{name: bad})
+
+    @pytest.mark.parametrize("bad", ["embedding", "rerank", "DEFAULT", "", "chat"])
+    def test_non_llm_condense_model_types_fail_fast(self, bad: str) -> None:
+        with pytest.raises(ValidationError, match="CONDENSE_MODEL_TYPE"):
+            Settings(_env_file=None, CONDENSE_MODEL_TYPE=bad)
+
+    def test_condense_model_vocabulary_matches_the_registry_aliases(self) -> None:
+        """Hard-coded for the same circular-import reason as CHAT_MODEL_TYPE."""
+        from varagity.models.registry import LLM_MODEL_TYPES
+
+        for alias in LLM_MODEL_TYPES:
+            assert alias == Settings(_env_file=None, CONDENSE_MODEL_TYPE=alias).CONDENSE_MODEL_TYPE
 
 
 class TestRerankValidation:

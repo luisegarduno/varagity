@@ -147,6 +147,39 @@ def v_retrieve(chunks: "Sequence[RetrievedChunk]", verbose: int) -> None:
             )
 
 
+def v_condensed(original: str, condensed: str, verbose: int) -> None:
+    """Render the condensed search query (for ``CondenseContextEngine.prepare``).
+
+    The terminal counterpart of the evidence panel's "Searched for: …" line
+    (spec_v3 §4.7): whenever retrieval ran on something other than the
+    user's words, the rewrite is shown rather than silently applied.
+
+    Args:
+        original: The user's question, verbatim (shown at level 2).
+        condensed: The standalone search query the condenser produced.
+        verbose: 0 = nothing; 1 = the condensed query; 2 = a panel pairing
+            it with the original wording it replaced.
+
+    Raises:
+        ValueError: If ``verbose`` is invalid.
+    """
+    check_verbose(verbose)
+    if verbose == 0:
+        return
+    if verbose == 1:
+        console.print(Text.assemble(("Searching with ", "bold"), (condensed, "italic")))
+        return
+    console.print(
+        Panel(
+            Text(condensed, style="italic"),
+            title="condensed search query",
+            subtitle=f"asked: {original}",
+            subtitle_align="left",
+            style="dim",
+        )
+    )
+
+
 def v_situate_context(chunk_text: str, context: str, verbose: int) -> None:
     """Render one situating blurb (for :func:`~varagity.context.contextual.situate_context`).
 

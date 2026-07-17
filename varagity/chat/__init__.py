@@ -6,6 +6,7 @@ Adding an engine later means adding the module and its import line here —
 no caller edits, exactly as the retrieval registry's additions proved.
 """
 
+from varagity.chat import condense as _condense  # noqa: F401  (self-registration import)
 from varagity.chat import simple as _simple  # noqa: F401  (self-registration import)
 from varagity.chat.base import (
     CHAT_ENGINE_REGISTRY,
