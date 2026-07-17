@@ -31,6 +31,9 @@ export type ConfigResponse = Schemas["ConfigResponse"];
 export type SettingOut = Schemas["SettingOut"];
 export type SettingsResponse = Schemas["SettingsResponse"];
 export type DocumentOut = Schemas["DocumentOut"];
+export type PreviewRect = Schemas["PreviewRect"];
+export type PreviewLocateRequest = Schemas["PreviewLocateRequest"];
+export type PreviewLocateResponse = Schemas["PreviewLocateResponse"];
 export type UploadResponse = Schemas["UploadResponse"];
 export type UploadedFile = Schemas["UploadedFileOut"];
 export type DocumentDeleteResponse = Schemas["DocumentDeleteResponse"];
@@ -187,6 +190,31 @@ export function deleteDocuments(
     method: "POST",
     body: JSON.stringify({ doc_ids: docIds }),
   });
+}
+
+/**
+ * Locate a chunk's text in its source document for the page preview
+ * (ADR-010). Every degradable condition (file changed, format
+ * unsupported, no text match, …) comes back `200 available:false` with a
+ * `reason` — only an unknown `doc_id` rejects.
+ */
+export function locatePreview(
+  docId: string,
+  text: string,
+): Promise<PreviewLocateResponse> {
+  return request(
+    `/api/documents/${encodeURIComponent(docId)}/preview/locate`,
+    { method: "POST", body: JSON.stringify({ text }) },
+  );
+}
+
+/**
+ * URL of one rendered page image — a plain `<img src>`. The response is
+ * `Cache-Control: immutable` (sound: `doc_id` is content-hashed), so the
+ * browser is the cache layer and no query machinery is involved.
+ */
+export function previewPageUrl(docId: string, page: number): string {
+  return `${API_URL}/api/documents/${encodeURIComponent(docId)}/preview/page/${page}`;
 }
 
 /** Trigger a background ingest run; 409s while one is in flight. */

@@ -388,6 +388,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{doc_id}/preview/locate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Locate Preview
+         * @description Find the source page containing a chunk's text, with highlight rects.
+         *
+         *     The evidence panel's locate step (ADR-010): resolve the document to an
+         *     openable PDF (containment + content-hash verified; PPTX via the cached
+         *     conversion), score its pages by word coverage, and return the best page
+         *     plus normalized highlight rectangles. Every degradable condition — kill
+         *     switch, unsupported format, missing/edited file, unavailable converter,
+         *     no textual match — answers ``200 available:false`` with its reason; the
+         *     GUI falls back to the full-text view.
+         *
+         *     Args:
+         *         doc_id: The chunk's parent document.
+         *         payload: The chunk text to locate.
+         *         store: The per-request vector store.
+         *
+         *     Returns:
+         *         The located page, rects, and coverage — or the degrade reason.
+         *
+         *     Raises:
+         *         HTTPException: ``404 document_not_found`` for an unknown id (the
+         *             one non-degradable condition: there is nothing to fall back
+         *             *to* — the GUI shows full text without asking again).
+         */
+        post: operations["locate_preview_api_documents__doc_id__preview_locate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{doc_id}/preview/page/{page}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview Page
+         * @description Serve one rendered page of a source document as a PNG.
+         *
+         *     The image half of the preview pair (ADR-010), immutable-cacheable:
+         *     ``doc_id`` is content-hashed and the resolution step re-verifies the
+         *     on-disk ``content_hash`` before rendering, so a drifted file 404s
+         *     (``file_changed``) rather than serving a lying image. Degradable
+         *     reasons are 404 codes here — an ``<img>`` can't read a JSON envelope,
+         *     and the client only requests pages a successful locate named.
+         *
+         *     Args:
+         *         doc_id: The document to render.
+         *         page: 1-based page number (a locate response's ``page``).
+         *         store: The per-request vector store.
+         *
+         *     Returns:
+         *         The PNG at ``PREVIEW_RENDER_WIDTH`` pixels wide, marked
+         *         ``Cache-Control: public, max-age=31536000, immutable``.
+         *
+         *     Raises:
+         *         HTTPException: ``404 document_not_found`` for an unknown id; ``404``
+         *             with the degrade reason as its code (``preview_disabled`` |
+         *             ``unsupported_type`` | ``file_missing`` | ``file_changed`` |
+         *             ``conversion_unavailable`` | ``conversion_failed``) when the
+         *             document can't resolve; ``404 page_out_of_range`` beyond the
+         *             last page.
+         */
+        get: operations["preview_page_api_documents__doc_id__preview_page__page__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/ingest": {
         parameters: {
             query?: never;
@@ -547,6 +632,9 @@ export interface components {
          *             the dropzone validates against it client-side.
          *         allowed_extensions: Effective ingestable extensions
          *             (``ALLOWED_EXTENSIONS``, normalized with leading dots), sorted.
+         *         preview_enabled: Whether the page-preview endpoints are on
+         *             (``PREVIEW_ENABLED``, read-only here — the knob is env-only) —
+         *             off, the GUI skips preview eligibility entirely.
          */
         ConfigResponse: {
             /** Retrievers */
@@ -567,6 +655,8 @@ export interface components {
             upload_max_mb: number;
             /** Allowed Extensions */
             allowed_extensions: string[];
+            /** Preview Enabled */
+            preview_enabled: boolean;
         };
         /**
          * ConversationCreateRequest
@@ -700,6 +790,7 @@ export interface components {
          *         file_name: Base name of the source file.
          *         source: Absolute file path recorded at ingest time.
          *         file_type: File extension without the dot (``pdf``, ``docx``, …).
+         *         content_hash: sha256 of the source file's bytes at ingest time.
          *         n_chunks: Chunks ingested (``0`` = no extractable text).
          *         ingested_at: When the document (last) landed in the stores.
          *         extraction_mix: Chunk count per extraction method (``text`` /
@@ -714,6 +805,8 @@ export interface components {
             source: string;
             /** File Type */
             file_type: string;
+            /** Content Hash */
+            content_hash: string;
             /** N Chunks */
             n_chunks: number;
             /**
@@ -930,6 +1023,79 @@ export interface components {
             min?: number | null;
             /** Max */
             max?: number | null;
+        };
+        /**
+         * PreviewLocateRequest
+         * @description Body of ``POST /api/documents/{doc_id}/preview/locate`` (ADR-010).
+         *
+         *     Attributes:
+         *         text: The chunk content to locate — both wire shapes (the live
+         *             ``retrieval`` event and persisted ``message_sources`` snapshots)
+         *             already deliver it to the client, so history previews work
+         *             without any migration.
+         */
+        PreviewLocateRequest: {
+            /** Text */
+            text: string;
+        };
+        /**
+         * PreviewLocateResponse
+         * @description Where a chunk's text lives in its source document (ADR-010).
+         *
+         *     ``available=False`` + ``reason`` covers every degradable condition
+         *     (``preview_disabled`` | ``unsupported_type`` | ``file_missing`` |
+         *     ``file_changed`` | ``conversion_unavailable`` | ``conversion_failed`` |
+         *     ``no_match``) — the GUI falls back to the full-text view on any of
+         *     them, never a dead panel.
+         *
+         *     Attributes:
+         *         available: Whether a page was located (the fields below are set).
+         *         reason: The degradable condition when ``available`` is false.
+         *         page: Best-matching page, 1-based.
+         *         page_count: Total pages in the document (also set on ``no_match``).
+         *         rects: Highlight rectangles for the chunk's text on that page.
+         *         coverage: The winning page's containment score in ``[0, 1]`` (also
+         *             set on ``no_match`` — the score that stayed below the floor).
+         */
+        PreviewLocateResponse: {
+            /** Available */
+            available: boolean;
+            /** Reason */
+            reason?: string | null;
+            /** Page */
+            page?: number | null;
+            /** Page Count */
+            page_count?: number | null;
+            /**
+             * Rects
+             * @default []
+             */
+            rects: components["schemas"]["PreviewRect"][];
+            /** Coverage */
+            coverage?: number | null;
+        };
+        /**
+         * PreviewRect
+         * @description One highlight rectangle, normalized to the page (``[0, 1]``, top-left origin).
+         *
+         *     Y-flipped from PDF coordinates server-side, so the client positions
+         *     overlay divs with bare percentages and no coordinate math.
+         *
+         *     Attributes:
+         *         x0: Left edge.
+         *         y0: Top edge.
+         *         x1: Right edge (``> x0``).
+         *         y1: Bottom edge (``> y0``).
+         */
+        PreviewRect: {
+            /** X0 */
+            x0: number;
+            /** Y0 */
+            y0: number;
+            /** X1 */
+            x1: number;
+            /** Y1 */
+            y1: number;
         };
         /**
          * ServiceHealth
@@ -1772,6 +1938,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DocumentBulkDeleteResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    locate_preview_api_documents__doc_id__preview_locate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                doc_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewLocateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewLocateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_page_api_documents__doc_id__preview_page__page__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                doc_id: string;
+                page: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

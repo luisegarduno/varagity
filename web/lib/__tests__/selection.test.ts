@@ -15,6 +15,7 @@ function makeDocument(docId: string, chunks = 3): DocumentOut {
     file_name: `${docId}.md`,
     source: `/docs/${docId}.md`,
     file_type: "md",
+    content_hash: `hash-${docId}`,
     n_chunks: chunks,
     ingested_at: "2026-07-16T00:00:00Z",
     extraction_mix: { text: chunks },

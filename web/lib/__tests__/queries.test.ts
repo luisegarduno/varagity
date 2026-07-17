@@ -6,6 +6,7 @@ import {
   conversationQuery,
   conversationsQuery,
   documentsQuery,
+  previewQuery,
   queryKeys,
   settingsQuery,
 } from "@/lib/queries";
@@ -19,10 +20,23 @@ describe("query keys", () => {
     expect(configQuery().queryKey).toEqual(queryKeys.config);
     expect(settingsQuery().queryKey).toEqual(queryKeys.settings);
     expect(documentsQuery().queryKey).toEqual(queryKeys.documents);
+    expect(previewQuery("d0", "d0::3", "text").queryKey).toEqual(
+      queryKeys.preview("d0", "d0::3"),
+    );
   });
 
   it("keeps one conversation's key distinct from another's", () => {
     expect(queryKeys.conversation("a")).not.toEqual(queryKeys.conversation("b"));
+  });
+
+  it("keys previews per chunk, not per locate text", () => {
+    // The chunk id embeds the content-hashed doc id, so it fully names the
+    // result; hanging the (up to 20 kB) chunk text off the key would only
+    // bloat every cache lookup.
+    expect(queryKeys.preview("d0", "d0::3")).toEqual(["preview", "d0", "d0::3"]);
+    expect(queryKeys.preview("d0", "d0::3")).not.toEqual(
+      queryKeys.preview("d0", "d0::4"),
+    );
   });
 
   it("keeps the conversation list disjoint from a transcript", () => {
@@ -46,5 +60,13 @@ describe("query keys", () => {
 describe("configQuery", () => {
   it("never re-asks, since capabilities are fixed for the API's lifetime", () => {
     expect(configQuery().staleTime).toBe(Infinity);
+  });
+});
+
+describe("previewQuery", () => {
+  it("never goes stale — doc_id is content-hashed, so a located page is final", () => {
+    const query = previewQuery("a398491c7441925f", "a398491c7441925f::0", "x");
+    expect(query.staleTime).toBe(Infinity);
+    expect(query.retry).toBe(1);
   });
 });

@@ -8,6 +8,7 @@ import type {
 } from "@/lib/api";
 import {
   assistantMessageFromTurn,
+  docIdFromChunkId,
   evidenceFromMessage,
   evidenceFromRetrieval,
   formatTokensPerSecond,
@@ -16,9 +17,11 @@ import {
   usageFromDone,
 } from "@/lib/evidence";
 
+// Realistic 16-hex doc ids: the persisted path re-derives `docId` from the
+// `{doc_id}::{index}` chunk id, so the round-trip test needs parseable ones.
 const chunkA: RetrievedChunk = {
-  chunk_id: "doc1::0",
-  doc_id: "doc1",
+  chunk_id: "a398491c7441925f::0",
+  doc_id: "a398491c7441925f",
   original_index: 0,
   content: "Kelp corridors shelter juvenile fish.",
   context: "From a survey of the Aurora coast.",
@@ -45,8 +48,8 @@ const chunkA: RetrievedChunk = {
 };
 
 const chunkB: RetrievedChunk = {
-  chunk_id: "doc2::4",
-  doc_id: "doc2",
+  chunk_id: "174928b2d662c122::4",
+  doc_id: "174928b2d662c122",
   original_index: 9,
   content: "Scanned page content.",
   context: null,
@@ -99,7 +102,8 @@ describe("evidenceFromRetrieval", () => {
 
     const [first, second] = evidence.chunks;
     expect(first).toMatchObject({
-      key: "doc1::0",
+      key: "a398491c7441925f::0",
+      docId: "a398491c7441925f",
       rank: 1,
       score: 0.9973,
       fileName: "kelp_corridor.md",
@@ -109,7 +113,8 @@ describe("evidenceFromRetrieval", () => {
     });
     expect(first.trace?.rerank_delta).toBe(1);
     expect(second).toMatchObject({
-      key: "doc2::4",
+      key: "174928b2d662c122::4",
+      docId: "174928b2d662c122",
       rank: 2,
       page: 7,
       extraction: "ocr_fallback",
@@ -131,7 +136,7 @@ describe("sourcesFromRetrieval / evidenceFromMessage", () => {
     expect(message.sources).toHaveLength(2);
     expect(message.sources[0]).toMatchObject({
       rank: 1,
-      chunk_id: "doc1::0",
+      chunk_id: "a398491c7441925f::0",
     });
     expect(message.sources[0].trace).toMatchObject({
       score: 0.9973,
@@ -140,10 +145,13 @@ describe("sourcesFromRetrieval / evidenceFromMessage", () => {
       extraction: "text",
     });
 
-    // The persisted view renders the same chunks as the live view did.
+    // The persisted view renders the same chunks as the live view did —
+    // including `docId`, which the snapshot path re-derives from `chunk_id`
+    // (snapshots never stored `doc_id`; history previews ride on this).
     const persisted = evidenceFromMessage(message, "kelp corridor");
     const live = evidenceFromRetrieval(retrieval, { query: "kelp corridor" });
     expect(persisted?.chunks).toEqual(live.chunks);
+    expect(persisted?.chunks[0].docId).toBe("a398491c7441925f");
     expect(persisted?.method).toBe("reranked");
     expect(persisted?.latencyMs).toEqual(done.usage.latency_ms);
     expect(persisted?.query).toBe("kelp corridor");
@@ -195,12 +203,26 @@ describe("sourcesFromRetrieval / evidenceFromMessage", () => {
     const evidence = evidenceFromMessage(message, null);
     expect(evidence?.chunks[0]).toMatchObject({
       key: "doc9::1",
+      docId: null,
       rank: 1,
       score: null,
       content: "",
       page: null,
       trace: null,
     });
+  });
+});
+
+describe("docIdFromChunkId", () => {
+  it("extracts the 16-hex doc id prefix", () => {
+    expect(docIdFromChunkId("a398491c7441925f::7")).toBe("a398491c7441925f");
+  });
+
+  it("rejects prefixes that are not a content-hash doc id", () => {
+    expect(docIdFromChunkId("doc9::1")).toBeNull(); // not hex-16
+    expect(docIdFromChunkId("A398491C7441925F::7")).toBeNull(); // wrong case
+    expect(docIdFromChunkId("a398491c7441925f00::1")).toBeNull(); // too long
+    expect(docIdFromChunkId("")).toBeNull();
   });
 });
 

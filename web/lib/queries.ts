@@ -22,6 +22,7 @@ import {
   getSettings,
   listConversations,
   listDocuments,
+  locatePreview,
 } from "@/lib/api";
 
 /**
@@ -36,6 +37,9 @@ export const queryKeys = {
   config: ["config"] as const,
   settings: ["settings"] as const,
   documents: ["documents"] as const,
+  /** One chunk's located page preview (keyed by chunk, not its text). */
+  preview: (docId: string, chunkKey: string) =>
+    ["preview", docId, chunkKey] as const,
 };
 
 /** The conversation list, most recently updated first (the sidebar, ⌘K). */
@@ -79,5 +83,20 @@ export function documentsQuery() {
   return queryOptions({
     queryKey: queryKeys.documents,
     queryFn: () => listDocuments(),
+  });
+}
+
+/**
+ * Where one chunk's text lives in its source document (ADR-010). The
+ * preview component mounts on first expand — mounting is the fetch
+ * trigger — and `doc_id` is content-hashed, so a located page can never
+ * go stale: cache it for the life of the tab and re-expand instantly.
+ */
+export function previewQuery(docId: string, chunkKey: string, text: string) {
+  return queryOptions({
+    queryKey: queryKeys.preview(docId, chunkKey),
+    queryFn: () => locatePreview(docId, text),
+    staleTime: Infinity,
+    retry: 1,
   });
 }

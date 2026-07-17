@@ -19,6 +19,13 @@ import type {
 export interface EvidenceChunk {
   /** Unique key within one answer's evidence (the chunk id). */
   key: string;
+  /**
+   * Parent document id — from the live event's `doc_id`, or parsed out of
+   * `chunk_id` (which embeds `{doc_id}::{chunk_index}`) for persisted
+   * snapshots, so all existing history resolves one without a migration.
+   * Gates the page-preview affordance; `null` when unparseable.
+   */
+  docId: string | null;
   /** Final 1-based rank in the answer's evidence. */
   rank: number;
   /** Final score (cross-encoder relevance when reranked, else fused/arm). */
@@ -88,6 +95,19 @@ function asString(value: unknown): string | null {
 
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Recover the parent `doc_id` from a `{doc_id}::{chunk_index}` chunk id.
+ *
+ * Persisted `message_sources` rows never stored `doc_id`, but every
+ * `chunk_id` embeds it (`varagity/stores/records.py`), so history gains
+ * preview eligibility retroactively. The 16-hex guard rejects anything
+ * that isn't a content-hash prefix rather than guessing.
+ */
+export function docIdFromChunkId(chunkId: string): string | null {
+  const [id] = chunkId.split("::");
+  return /^[0-9a-f]{16}$/.test(id) ? id : null;
 }
 
 /** Coerce a JSONB timing dict into a numeric record (drops non-numbers). */
@@ -175,6 +195,7 @@ export function evidenceFromRetrieval(
     usage: options.usage ?? null,
     chunks: event.chunks.map((chunk, index) => ({
       key: chunk.chunk_id,
+      docId: chunk.doc_id,
       rank: index + 1,
       score: chunk.score,
       content: chunk.content,
@@ -219,6 +240,7 @@ export function evidenceFromMessage(
       const snapshot = row.trace;
       return {
         key: row.chunk_id,
+        docId: docIdFromChunkId(row.chunk_id),
         rank: row.rank,
         score: asNumber(snapshot.score),
         content: asString(snapshot.content) ?? "",

@@ -1,8 +1,10 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { ChevronRightIcon, ScanTextIcon } from "lucide-react";
 import { useState } from "react";
 
+import { PagePreview } from "@/components/provenance/PagePreview";
 import { RankBadges } from "@/components/provenance/RankBadges";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,6 +15,8 @@ import {
 } from "@/components/ui/collapsible";
 import type { EvidenceChunk } from "@/lib/evidence";
 import { highlightTerms } from "@/lib/highlight";
+import { previewEligible } from "@/lib/preview";
+import { configQuery } from "@/lib/queries";
 import { formatScore } from "@/lib/trace";
 import { cn } from "@/lib/utils";
 
@@ -21,7 +25,12 @@ export function chunkCardId(chunkKey: string): string {
   return `evidence-${chunkKey}`;
 }
 
-function HighlightedText({
+/**
+ * Chunk text with the query's terms marked (the base layer styles the
+ * bare `mark`). Exported for {@link PagePreview}'s full-text fallback, so
+ * a degraded preview renders byte-identically to an ineligible chunk.
+ */
+export function HighlightedText({
   text,
   query,
 }: {
@@ -60,7 +69,12 @@ export function ChunkCard({
   style?: React.CSSProperties;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const { data: config = null } = useQuery(configQuery());
   const ocr = chunk.extraction === "ocr_fallback";
+  // Belt and braces with the server's kill switch: while config is still
+  // in flight the chunk stays optimistic — a disabled server would answer
+  // the locate with `preview_disabled` and the panel falls back to text.
+  const preview = previewEligible(chunk) && config?.preview_enabled !== false;
 
   return (
     <article
@@ -141,12 +155,23 @@ export function ChunkCard({
             aria-hidden
             className="motion-safe:transition-transform group-aria-expanded/button:rotate-90"
           />
-          {expanded ? "Hide full text" : "Show full text"}
+          {preview
+            ? expanded
+              ? "Hide preview"
+              : "Show preview"
+            : expanded
+              ? "Hide full text"
+              : "Show full text"}
         </CollapsibleTrigger>
         <CollapsiblePanel>
-          <p className="mt-1 rounded-md bg-muted/50 p-2 text-xs leading-relaxed whitespace-pre-wrap">
-            <HighlightedText text={chunk.content} query={query} />
-          </p>
+          {preview ? (
+            // Mounts on expand (closed panels unmount), driving the locate.
+            <PagePreview chunk={chunk} query={query} />
+          ) : (
+            <p className="mt-1 rounded-md bg-muted/50 p-2 text-xs leading-relaxed whitespace-pre-wrap">
+              <HighlightedText text={chunk.content} query={query} />
+            </p>
+          )}
         </CollapsiblePanel>
       </Collapsible>
     </article>
