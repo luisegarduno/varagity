@@ -17,6 +17,13 @@ next ingest can't resurrect the document. ``POST /api/documents/delete``
 is the same operation over a set (the corpus table's multi-select): the
 same ordering applied set-wise, in one round trip per store instead of one
 per document.
+
+The ``…/preview/locate`` + ``…/preview/page/{page}`` pair (ADR-010) backs
+the evidence panel's page preview: locate scores the source document's
+pages for a chunk's text and returns highlight rects; the page route
+serves the rendered PNG. Both degrade per-document (``available:false`` /
+a 404 with the reason as its code) rather than 500 — the GUI falls back
+to the full-text view.
 """
 
 import contextlib
@@ -27,8 +34,9 @@ import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 
+import pypdfium2 as pdfium
 from elastic_transport import TransportError
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Response, UploadFile
 
 from varagity.api.deps import get_bm25_store, get_vector_store
 from varagity.api.schemas import (
@@ -36,10 +44,14 @@ from varagity.api.schemas import (
     DocumentBulkDeleteResponse,
     DocumentDeleteResponse,
     DocumentOut,
+    PreviewLocateRequest,
+    PreviewLocateResponse,
+    PreviewRect,
     UploadedFileOut,
     UploadResponse,
 )
 from varagity.config import get_settings
+from varagity.preview import locate, render_page_png, resolve_preview_source
 from varagity.stores.bm25_store import ElasticsearchBM25
 from varagity.stores.records import DocumentInfo
 from varagity.stores.vector_store import ContextualVectorDB
@@ -573,3 +585,139 @@ def delete_documents(
         f"; {len(not_found)} unknown id(s)" if not_found else "",
     )
     return DocumentBulkDeleteResponse(deleted=deleted, not_found=not_found)
+
+
+def _get_document_or_404(store: ContextualVectorDB, doc_id: str) -> DocumentInfo:
+    """Fetch one document row or raise the structured 404.
+
+    Args:
+        store: The per-request vector store.
+        doc_id: The document's stable id.
+
+    Returns:
+        The document's stored metadata.
+
+    Raises:
+        HTTPException: ``404 document_not_found`` for an unknown id.
+    """
+    info = store.get_document(doc_id)
+    if info is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "document_not_found", "message": f"No document with id {doc_id!r}"},
+        )
+    return info
+
+
+@router.post("/api/documents/{doc_id}/preview/locate")
+def locate_preview(
+    doc_id: str, payload: PreviewLocateRequest, store: VectorStoreDep
+) -> PreviewLocateResponse:
+    """Find the source page containing a chunk's text, with highlight rects.
+
+    The evidence panel's locate step (ADR-010): resolve the document to an
+    openable PDF (containment + content-hash verified; PPTX via the cached
+    conversion), score its pages by word coverage, and return the best page
+    plus normalized highlight rectangles. Every degradable condition — kill
+    switch, unsupported format, missing/edited file, unavailable converter,
+    no textual match — answers ``200 available:false`` with its reason; the
+    GUI falls back to the full-text view.
+
+    Args:
+        doc_id: The chunk's parent document.
+        payload: The chunk text to locate.
+        store: The per-request vector store.
+
+    Returns:
+        The located page, rects, and coverage — or the degrade reason.
+
+    Raises:
+        HTTPException: ``404 document_not_found`` for an unknown id (the
+            one non-degradable condition: there is nothing to fall back
+            *to* — the GUI shows full text without asking again).
+    """
+    info = _get_document_or_404(store, doc_id)
+    settings = get_settings()
+    resolved = resolve_preview_source(info, settings)
+    if resolved.pdf_path is None:
+        return PreviewLocateResponse(available=False, reason=resolved.reason)
+    try:
+        result = locate(resolved.pdf_path, payload.text, min_coverage=settings.PREVIEW_MIN_COVERAGE)
+    except pdfium.PdfiumError as error:
+        # A corrupt/unopenable file must degrade, not 500 (the converted
+        # artifact is covered too — hence the conversion-flavored reason).
+        logger.warning("preview locate could not open %s (%s): %s", doc_id, info.source, error)
+        return PreviewLocateResponse(available=False, reason="conversion_failed")
+    if result.page is None:
+        return PreviewLocateResponse(
+            available=False,
+            reason="no_match",
+            page_count=result.page_count,
+            coverage=result.coverage,
+        )
+    return PreviewLocateResponse(
+        available=True,
+        page=result.page,
+        page_count=result.page_count,
+        rects=[PreviewRect(x0=x0, y0=y0, x1=x1, y1=y1) for x0, y0, x1, y1 in result.rects],
+        coverage=result.coverage,
+    )
+
+
+@router.get("/api/documents/{doc_id}/preview/page/{page}")
+def preview_page(doc_id: str, page: int, store: VectorStoreDep) -> Response:
+    """Serve one rendered page of a source document as a PNG.
+
+    The image half of the preview pair (ADR-010), immutable-cacheable:
+    ``doc_id`` is content-hashed and the resolution step re-verifies the
+    on-disk ``content_hash`` before rendering, so a drifted file 404s
+    (``file_changed``) rather than serving a lying image. Degradable
+    reasons are 404 codes here — an ``<img>`` can't read a JSON envelope,
+    and the client only requests pages a successful locate named.
+
+    Args:
+        doc_id: The document to render.
+        page: 1-based page number (a locate response's ``page``).
+        store: The per-request vector store.
+
+    Returns:
+        The PNG at ``PREVIEW_RENDER_WIDTH`` pixels wide, marked
+        ``Cache-Control: public, max-age=31536000, immutable``.
+
+    Raises:
+        HTTPException: ``404 document_not_found`` for an unknown id; ``404``
+            with the degrade reason as its code (``preview_disabled`` |
+            ``unsupported_type`` | ``file_missing`` | ``file_changed`` |
+            ``conversion_unavailable`` | ``conversion_failed``) when the
+            document can't resolve; ``404 page_out_of_range`` beyond the
+            last page.
+    """
+    info = _get_document_or_404(store, doc_id)
+    settings = get_settings()
+    resolved = resolve_preview_source(info, settings)
+    if resolved.pdf_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": str(resolved.reason),
+                "message": f"no previewable rendition of {doc_id!r} ({resolved.reason})",
+            },
+        )
+    try:
+        png = render_page_png(resolved.pdf_path, page, width=settings.PREVIEW_RENDER_WIDTH)
+    except IndexError as error:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "page_out_of_range", "message": str(error)},
+        ) from error
+    except pdfium.PdfiumError as error:
+        logger.warning("preview render could not open %s (%s): %s", doc_id, info.source, error)
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "conversion_failed", "message": f"could not render {doc_id!r}"},
+        ) from error
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )

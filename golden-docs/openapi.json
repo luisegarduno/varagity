@@ -100,7 +100,7 @@
         "type": "object"
       },
       "ConfigResponse": {
-        "description": "Response of ``GET /api/config`` \u2014 static capabilities (spec_v2 \u00a74.2).\n\nThe GUI builds its settings controls from this, so a newly registered\nimplementation (one file + one import) appears in the UI automatically.\n\nAttributes:\n    retrievers: Registered retrieval method names.\n    chunkers: Registered chunking strategy names.\n    ocr_engines: Available OCR engine names.\n    model_types: Valid ``get_model`` types.\n    llm_model_types: The chat-capable subset of ``model_types`` \u2014 the\n        ``CHAT_MODEL_TYPE`` vocabulary the composer quick-toggle offers.\n    ranges: Valid ranges for the numeric query-time knobs, keyed by\n        setting name (lowercase).\n    upload_max_mb: Effective per-file upload cap (``UPLOAD_MAX_MB``) \u2014\n        the dropzone validates against it client-side.\n    allowed_extensions: Effective ingestable extensions\n        (``ALLOWED_EXTENSIONS``, normalized with leading dots), sorted.",
+        "description": "Response of ``GET /api/config`` \u2014 static capabilities (spec_v2 \u00a74.2).\n\nThe GUI builds its settings controls from this, so a newly registered\nimplementation (one file + one import) appears in the UI automatically.\n\nAttributes:\n    retrievers: Registered retrieval method names.\n    chunkers: Registered chunking strategy names.\n    ocr_engines: Available OCR engine names.\n    model_types: Valid ``get_model`` types.\n    llm_model_types: The chat-capable subset of ``model_types`` \u2014 the\n        ``CHAT_MODEL_TYPE`` vocabulary the composer quick-toggle offers.\n    ranges: Valid ranges for the numeric query-time knobs, keyed by\n        setting name (lowercase).\n    upload_max_mb: Effective per-file upload cap (``UPLOAD_MAX_MB``) \u2014\n        the dropzone validates against it client-side.\n    allowed_extensions: Effective ingestable extensions\n        (``ALLOWED_EXTENSIONS``, normalized with leading dots), sorted.\n    preview_enabled: Whether the page-preview endpoints are on\n        (``PREVIEW_ENABLED``, read-only here \u2014 the knob is env-only) \u2014\n        off, the GUI skips preview eligibility entirely.",
         "properties": {
           "allowed_extensions": {
             "items": {
@@ -137,6 +137,10 @@
             "title": "Ocr Engines",
             "type": "array"
           },
+          "preview_enabled": {
+            "title": "Preview Enabled",
+            "type": "boolean"
+          },
           "ranges": {
             "additionalProperties": {
               "$ref": "#/components/schemas/NumericRange"
@@ -164,7 +168,8 @@
           "llm_model_types",
           "ranges",
           "upload_max_mb",
-          "allowed_extensions"
+          "allowed_extensions",
+          "preview_enabled"
         ],
         "title": "ConfigResponse",
         "type": "object"
@@ -347,8 +352,12 @@
         "type": "object"
       },
       "DocumentOut": {
-        "description": "One corpus document in the ``GET /api/documents`` list (spec_v2 \u00a74.2).\n\nAttributes:\n    doc_id: The document's stable id.\n    file_name: Base name of the source file.\n    source: Absolute file path recorded at ingest time.\n    file_type: File extension without the dot (``pdf``, ``docx``, \u2026).\n    n_chunks: Chunks ingested (``0`` = no extractable text).\n    ingested_at: When the document (last) landed in the stores.\n    extraction_mix: Chunk count per extraction method (``text`` /\n        ``ocr_fallback``).",
+        "description": "One corpus document in the ``GET /api/documents`` list (spec_v2 \u00a74.2).\n\nAttributes:\n    doc_id: The document's stable id.\n    file_name: Base name of the source file.\n    source: Absolute file path recorded at ingest time.\n    file_type: File extension without the dot (``pdf``, ``docx``, \u2026).\n    content_hash: sha256 of the source file's bytes at ingest time.\n    n_chunks: Chunks ingested (``0`` = no extractable text).\n    ingested_at: When the document (last) landed in the stores.\n    extraction_mix: Chunk count per extraction method (``text`` /\n        ``ocr_fallback``).",
         "properties": {
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
           "doc_id": {
             "title": "Doc Id",
             "type": "string"
@@ -387,6 +396,7 @@
           "file_name",
           "source",
           "file_type",
+          "content_hash",
           "n_chunks",
           "ingested_at",
           "extraction_mix"
@@ -874,6 +884,117 @@
           }
         },
         "title": "NumericRange",
+        "type": "object"
+      },
+      "PreviewLocateRequest": {
+        "description": "Body of ``POST /api/documents/{doc_id}/preview/locate`` (ADR-010).\n\nAttributes:\n    text: The chunk content to locate \u2014 both wire shapes (the live\n        ``retrieval`` event and persisted ``message_sources`` snapshots)\n        already deliver it to the client, so history previews work\n        without any migration.",
+        "properties": {
+          "text": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "PreviewLocateRequest",
+        "type": "object"
+      },
+      "PreviewLocateResponse": {
+        "description": "Where a chunk's text lives in its source document (ADR-010).\n\n``available=False`` + ``reason`` covers every degradable condition\n(``preview_disabled`` | ``unsupported_type`` | ``file_missing`` |\n``file_changed`` | ``conversion_unavailable`` | ``conversion_failed`` |\n``no_match``) \u2014 the GUI falls back to the full-text view on any of\nthem, never a dead panel.\n\nAttributes:\n    available: Whether a page was located (the fields below are set).\n    reason: The degradable condition when ``available`` is false.\n    page: Best-matching page, 1-based.\n    page_count: Total pages in the document (also set on ``no_match``).\n    rects: Highlight rectangles for the chunk's text on that page.\n    coverage: The winning page's containment score in ``[0, 1]`` (also\n        set on ``no_match`` \u2014 the score that stayed below the floor).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "page_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Count"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "rects": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PreviewRect"
+            },
+            "title": "Rects",
+            "type": "array"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "PreviewLocateResponse",
+        "type": "object"
+      },
+      "PreviewRect": {
+        "description": "One highlight rectangle, normalized to the page (``[0, 1]``, top-left origin).\n\nY-flipped from PDF coordinates server-side, so the client positions\noverlay divs with bare percentages and no coordinate math.\n\nAttributes:\n    x0: Left edge.\n    y0: Top edge.\n    x1: Right edge (``> x0``).\n    y1: Bottom edge (``> y0``).",
+        "properties": {
+          "x0": {
+            "title": "X0",
+            "type": "number"
+          },
+          "x1": {
+            "title": "X1",
+            "type": "number"
+          },
+          "y0": {
+            "title": "Y0",
+            "type": "number"
+          },
+          "y1": {
+            "title": "Y1",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x0",
+          "y0",
+          "x1",
+          "y1"
+        ],
+        "title": "PreviewRect",
         "type": "object"
       },
       "RetrievalEvent": {
@@ -1816,6 +1937,109 @@
           }
         },
         "summary": "Delete Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{doc_id}/preview/locate": {
+      "post": {
+        "description": "Find the source page containing a chunk's text, with highlight rects.\n\nThe evidence panel's locate step (ADR-010): resolve the document to an\nopenable PDF (containment + content-hash verified; PPTX via the cached\nconversion), score its pages by word coverage, and return the best page\nplus normalized highlight rectangles. Every degradable condition \u2014 kill\nswitch, unsupported format, missing/edited file, unavailable converter,\nno textual match \u2014 answers ``200 available:false`` with its reason; the\nGUI falls back to the full-text view.\n\nArgs:\n    doc_id: The chunk's parent document.\n    payload: The chunk text to locate.\n    store: The per-request vector store.\n\nReturns:\n    The located page, rects, and coverage \u2014 or the degrade reason.\n\nRaises:\n    HTTPException: ``404 document_not_found`` for an unknown id (the\n        one non-degradable condition: there is nothing to fall back\n        *to* \u2014 the GUI shows full text without asking again).",
+        "operationId": "locate_preview_api_documents__doc_id__preview_locate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewLocateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewLocateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Locate Preview",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{doc_id}/preview/page/{page}": {
+      "get": {
+        "description": "Serve one rendered page of a source document as a PNG.\n\nThe image half of the preview pair (ADR-010), immutable-cacheable:\n``doc_id`` is content-hashed and the resolution step re-verifies the\non-disk ``content_hash`` before rendering, so a drifted file 404s\n(``file_changed``) rather than serving a lying image. Degradable\nreasons are 404 codes here \u2014 an ``<img>`` can't read a JSON envelope,\nand the client only requests pages a successful locate named.\n\nArgs:\n    doc_id: The document to render.\n    page: 1-based page number (a locate response's ``page``).\n    store: The per-request vector store.\n\nReturns:\n    The PNG at ``PREVIEW_RENDER_WIDTH`` pixels wide, marked\n    ``Cache-Control: public, max-age=31536000, immutable``.\n\nRaises:\n    HTTPException: ``404 document_not_found`` for an unknown id; ``404``\n        with the degrade reason as its code (``preview_disabled`` |\n        ``unsupported_type`` | ``file_missing`` | ``file_changed`` |\n        ``conversion_unavailable`` | ``conversion_failed``) when the\n        document can't resolve; ``404 page_out_of_range`` beyond the\n        last page.",
+        "operationId": "preview_page_api_documents__doc_id__preview_page__page__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "page",
+            "required": true,
+            "schema": {
+              "title": "Page",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Page",
         "tags": [
           "documents"
         ]

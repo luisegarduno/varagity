@@ -74,4 +74,5 @@ def config() -> ConfigResponse:
         ranges=_RANGES,
         upload_max_mb=settings.UPLOAD_MAX_MB,
         allowed_extensions=sorted(settings.allowed_extension_set),
+        preview_enabled=settings.PREVIEW_ENABLED,
     )

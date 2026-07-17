@@ -84,7 +84,7 @@ ORDER BY chunk_index
 # FILTER keeps 0-chunk documents (no extractable text) in the list with an
 # empty mix instead of a {null: 0} artifact.
 _LIST_DOCUMENTS_SQL = """
-SELECT d.doc_id, d.source, d.file_type, d.n_chunks, d.ingested_at,
+SELECT d.doc_id, d.source, d.file_type, d.content_hash, d.n_chunks, d.ingested_at,
        COALESCE(
            jsonb_object_agg(e.extraction, e.cnt) FILTER (WHERE e.extraction IS NOT NULL),
            '{}'::jsonb
@@ -95,8 +95,28 @@ LEFT JOIN (
     FROM chunks
     GROUP BY doc_id, COALESCE(metadata->>'extraction', 'text')
 ) e USING (doc_id)
-GROUP BY d.doc_id, d.source, d.file_type, d.n_chunks, d.ingested_at
+GROUP BY d.doc_id, d.source, d.file_type, d.content_hash, d.n_chunks, d.ingested_at
 ORDER BY d.ingested_at DESC, d.source
+"""
+
+# One document by id, same shape as the list (ADR-010): the preview routes
+# resolve doc_id → source/content_hash per request and must not pay a
+# full-corpus list to do it.
+_GET_DOCUMENT_SQL = """
+SELECT d.doc_id, d.source, d.file_type, d.content_hash, d.n_chunks, d.ingested_at,
+       COALESCE(
+           jsonb_object_agg(e.extraction, e.cnt) FILTER (WHERE e.extraction IS NOT NULL),
+           '{}'::jsonb
+       ) AS extraction_mix
+FROM documents d
+LEFT JOIN (
+    SELECT doc_id, COALESCE(metadata->>'extraction', 'text') AS extraction, count(*) AS cnt
+    FROM chunks
+    WHERE doc_id = %(doc_id)s
+    GROUP BY doc_id, COALESCE(metadata->>'extraction', 'text')
+) e USING (doc_id)
+WHERE d.doc_id = %(doc_id)s
+GROUP BY d.doc_id, d.source, d.file_type, d.content_hash, d.n_chunks, d.ingested_at
 """
 
 # The corpus gauges (spec_v3 §6.1a): store state, not process history, so
@@ -287,17 +307,24 @@ class ContextualVectorDB:
             included, with an empty mix).
         """
         rows = self._conn.execute(_LIST_DOCUMENTS_SQL).fetchall()
-        return [
-            DocumentInfo(
-                doc_id=doc_id,
-                source=source,
-                file_type=file_type,
-                n_chunks=n_chunks,
-                ingested_at=ingested_at,
-                extraction_mix={name: int(count) for name, count in mix.items()},
-            )
-            for doc_id, source, file_type, n_chunks, ingested_at, mix in rows
-        ]
+        return [_row_to_document(row) for row in rows]
+
+    def get_document(self, doc_id: str) -> DocumentInfo | None:
+        """Fetch one ingested document by id.
+
+        Backs the preview routes (ADR-010): resolving ``doc_id`` →
+        ``source``/``content_hash`` happens once per locate/render request,
+        so it gets a single-row lookup instead of a full-corpus list.
+
+        Args:
+            doc_id: The document's stable id.
+
+        Returns:
+            The document row with its extraction mix, or ``None`` when the
+            id is unknown.
+        """
+        row = self._conn.execute(_GET_DOCUMENT_SQL, {"doc_id": doc_id}).fetchone()
+        return None if row is None else _row_to_document(row)
 
     def delete_document(self, doc_id: str) -> int:
         """Delete a document row and, via FK cascade, all its chunks.
@@ -517,6 +544,28 @@ class ContextualVectorDB:
             chunk = _row_to_retrieved((*row, 0.0))
             found[(chunk.doc_id, chunk.original_index)] = chunk
         return found
+
+
+def _row_to_document(row: tuple[Any, ...]) -> DocumentInfo:
+    """Map a documents-table result row onto :class:`DocumentInfo`.
+
+    Args:
+        row: ``(doc_id, source, file_type, content_hash, n_chunks,
+            ingested_at, extraction_mix)`` as selected by the document SQL.
+
+    Returns:
+        The typed document record.
+    """
+    doc_id, source, file_type, content_hash, n_chunks, ingested_at, mix = row
+    return DocumentInfo(
+        doc_id=doc_id,
+        source=source,
+        file_type=file_type,
+        content_hash=content_hash,
+        n_chunks=n_chunks,
+        ingested_at=ingested_at,
+        extraction_mix={name: int(count) for name, count in mix.items()},
+    )
 
 
 def _row_to_retrieved(row: tuple[Any, ...]) -> RetrievedChunk:

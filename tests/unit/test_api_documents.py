@@ -37,6 +37,9 @@ class FakeVectorStore:
     def list_documents(self) -> list[DocumentInfo]:
         return list(self.documents)
 
+    def get_document(self, doc_id: str) -> DocumentInfo | None:
+        return next((info for info in self.documents if info.doc_id == doc_id), None)
+
     def delete_document(self, doc_id: str) -> int:
         return self.delete_documents([doc_id])
 
@@ -72,11 +75,14 @@ class FakeBM25:
         return 3 * len(doc_ids)
 
 
-def make_info(doc_id: str, source: str, n_chunks: int = 4) -> DocumentInfo:
+def make_info(
+    doc_id: str, source: str, n_chunks: int = 4, content_hash: str = "0" * 64
+) -> DocumentInfo:
     return DocumentInfo(
         doc_id=doc_id,
         source=source,
         file_type=Path(source).suffix.lstrip("."),
+        content_hash=content_hash,
         n_chunks=n_chunks,
         ingested_at=datetime(2026, 7, 13, tzinfo=UTC),
         extraction_mix={"text": n_chunks - 1, "ocr_fallback": 1} if n_chunks else {},

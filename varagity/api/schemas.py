@@ -333,6 +333,9 @@ class ConfigResponse(BaseModel):
             the dropzone validates against it client-side.
         allowed_extensions: Effective ingestable extensions
             (``ALLOWED_EXTENSIONS``, normalized with leading dots), sorted.
+        preview_enabled: Whether the page-preview endpoints are on
+            (``PREVIEW_ENABLED``, read-only here — the knob is env-only) —
+            off, the GUI skips preview eligibility entirely.
     """
 
     retrievers: list[str]
@@ -343,6 +346,7 @@ class ConfigResponse(BaseModel):
     ranges: dict[str, NumericRange]
     upload_max_mb: int
     allowed_extensions: list[str]
+    preview_enabled: bool
 
 
 class SettingOut(BaseModel):
@@ -405,6 +409,7 @@ class DocumentOut(BaseModel):
         file_name: Base name of the source file.
         source: Absolute file path recorded at ingest time.
         file_type: File extension without the dot (``pdf``, ``docx``, …).
+        content_hash: sha256 of the source file's bytes at ingest time.
         n_chunks: Chunks ingested (``0`` = no extractable text).
         ingested_at: When the document (last) landed in the stores.
         extraction_mix: Chunk count per extraction method (``text`` /
@@ -415,9 +420,69 @@ class DocumentOut(BaseModel):
     file_name: str
     source: str
     file_type: str
+    content_hash: str
     n_chunks: int
     ingested_at: datetime
     extraction_mix: dict[str, int]
+
+
+class PreviewRect(BaseModel):
+    """One highlight rectangle, normalized to the page (``[0, 1]``, top-left origin).
+
+    Y-flipped from PDF coordinates server-side, so the client positions
+    overlay divs with bare percentages and no coordinate math.
+
+    Attributes:
+        x0: Left edge.
+        y0: Top edge.
+        x1: Right edge (``> x0``).
+        y1: Bottom edge (``> y0``).
+    """
+
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+class PreviewLocateRequest(BaseModel):
+    """Body of ``POST /api/documents/{doc_id}/preview/locate`` (ADR-010).
+
+    Attributes:
+        text: The chunk content to locate — both wire shapes (the live
+            ``retrieval`` event and persisted ``message_sources`` snapshots)
+            already deliver it to the client, so history previews work
+            without any migration.
+    """
+
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class PreviewLocateResponse(BaseModel):
+    """Where a chunk's text lives in its source document (ADR-010).
+
+    ``available=False`` + ``reason`` covers every degradable condition
+    (``preview_disabled`` | ``unsupported_type`` | ``file_missing`` |
+    ``file_changed`` | ``conversion_unavailable`` | ``conversion_failed`` |
+    ``no_match``) — the GUI falls back to the full-text view on any of
+    them, never a dead panel.
+
+    Attributes:
+        available: Whether a page was located (the fields below are set).
+        reason: The degradable condition when ``available`` is false.
+        page: Best-matching page, 1-based.
+        page_count: Total pages in the document (also set on ``no_match``).
+        rects: Highlight rectangles for the chunk's text on that page.
+        coverage: The winning page's containment score in ``[0, 1]`` (also
+            set on ``no_match`` — the score that stayed below the floor).
+    """
+
+    available: bool
+    reason: str | None = None
+    page: int | None = None
+    page_count: int | None = None
+    rects: list[PreviewRect] = []
+    coverage: float | None = None
 
 
 class UploadedFileOut(BaseModel):

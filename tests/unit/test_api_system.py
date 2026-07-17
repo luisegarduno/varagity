@@ -56,6 +56,14 @@ class TestConfig:
         assert data["upload_max_mb"] == 7
         assert data["allowed_extensions"] == [".md", ".txt"]  # normalized + sorted
 
+    async def test_preview_flag_mirrors_the_kill_switch(
+        self, app: FastAPI, settings_env: Any
+    ) -> None:
+        """The read-only PREVIEW_ENABLED surface (ADR-010; the knob is env-only)."""
+        assert (await get(app, "/api/config")).json()["preview_enabled"] is True
+        settings_env(PREVIEW_ENABLED="false")
+        assert (await get(app, "/api/config")).json()["preview_enabled"] is False
+
 
 class TestHealth:
     async def test_reports_every_service_with_probe_outcomes(

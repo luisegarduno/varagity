@@ -54,6 +54,19 @@ class Settings(BaseSettings):
         OCR_LANGUAGES: Comma-separated ISO 639-1 language codes for OCR,
             primary language first (mapped per engine, e.g. ``en`` →
             Tesseract's ``eng``).
+        PREVIEW_ENABLED: Kill switch for the evidence-panel page preview
+            (ADR-010) — the ``RERANK_ENABLED`` pattern: off, the preview
+            routes degrade (``available:false, reason:"preview_disabled"``)
+            and the GUI falls back to the full-text view. Env-only by
+            design (not runtime-overridable).
+        PREVIEW_RENDER_WIDTH: Rendered page-image width in pixels for
+            ``GET /api/documents/{doc_id}/preview/page/{page}`` (512–4096;
+            height follows the page's aspect ratio).
+        PREVIEW_MIN_COVERAGE: Word-trigram coverage floor in ``[0.0, 1.0]``
+            below which a preview locate reports ``no_match`` instead of
+            guessing a page.
+        PREVIEW_CONVERT_TIMEOUT_S: Timeout in seconds for one LibreOffice
+            PPTX→PDF conversion (the preview path's only subprocess).
         CHUNKING_STRATEGY: Registry name of the chunking strategy
             (``recursive_character`` | ``token_based`` | ``markdown_aware``
             | ``docling_hybrid`` | ``semantic`` — see ``varagity.chunking``;
@@ -186,6 +199,11 @@ class Settings(BaseSettings):
     PDF_OCR_FORCE_FULL_PAGE: bool = False
     OCR_ENGINE: str = "easyocr"  # benchmark-decided default (ADR-004)
     OCR_LANGUAGES: str = "en"
+
+    PREVIEW_ENABLED: bool = True
+    PREVIEW_RENDER_WIDTH: int = 1536
+    PREVIEW_MIN_COVERAGE: float = 0.3
+    PREVIEW_CONVERT_TIMEOUT_S: int = 120
 
     CHUNKING_STRATEGY: str = "recursive_character"
     CHUNK_SIZE: int = 400  # characters, not tokens (spec §9.3)
@@ -381,6 +399,33 @@ class Settings(BaseSettings):
             raise ValueError(
                 "PDF_OCR_TEXTLESS_PAGE_RATIO must be between 0.0 and 1.0; "
                 f"got {self.PDF_OCR_TEXTLESS_PAGE_RATIO}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_preview(self) -> "Settings":
+        """Reject page-preview parameters outside their domains (ADR-010).
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If ``PREVIEW_RENDER_WIDTH`` is outside 512–4096,
+                ``PREVIEW_MIN_COVERAGE`` is outside ``[0.0, 1.0]``, or
+                ``PREVIEW_CONVERT_TIMEOUT_S`` is not positive.
+        """
+        if not 512 <= self.PREVIEW_RENDER_WIDTH <= 4096:
+            raise ValueError(
+                "PREVIEW_RENDER_WIDTH must be between 512 and 4096 pixels; "
+                f"got {self.PREVIEW_RENDER_WIDTH}"
+            )
+        if not 0.0 <= self.PREVIEW_MIN_COVERAGE <= 1.0:
+            raise ValueError(
+                f"PREVIEW_MIN_COVERAGE must be between 0.0 and 1.0; got {self.PREVIEW_MIN_COVERAGE}"
+            )
+        if self.PREVIEW_CONVERT_TIMEOUT_S <= 0:
+            raise ValueError(
+                f"PREVIEW_CONVERT_TIMEOUT_S must be positive; got {self.PREVIEW_CONVERT_TIMEOUT_S}"
             )
         return self
 

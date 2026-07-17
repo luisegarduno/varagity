@@ -36,6 +36,10 @@ SETTINGS_ENV_VARS = (
     "POSTGRES_PASSWORD",
     "ELASTICSEARCH_URL",
     "BM25_INDEX_NAME",
+    "PREVIEW_ENABLED",
+    "PREVIEW_RENDER_WIDTH",
+    "PREVIEW_MIN_COVERAGE",
+    "PREVIEW_CONVERT_TIMEOUT_S",
     "RETRIEVAL_METHOD",
     "TOP_K",
     "SEMANTIC_WEIGHT",
@@ -102,6 +106,10 @@ def test_defaults_load() -> None:
     assert settings.RERANK_TOP_N == 5
     assert settings.RERANK_BASE_METHOD == "hybrid"
     assert settings.RERANK_CANDIDATES == 40
+    assert settings.PREVIEW_ENABLED is True  # page preview on by default (ADR-010)
+    assert settings.PREVIEW_RENDER_WIDTH == 1536
+    assert settings.PREVIEW_MIN_COVERAGE == 0.3
+    assert settings.PREVIEW_CONVERT_TIMEOUT_S == 120
 
 
 class TestAllowedExtensionSet:
@@ -281,6 +289,32 @@ class TestLLMTemperatureValidation:
     def test_out_of_range_fails_fast(self, temperature: float) -> None:
         with pytest.raises(ValidationError, match="LLM_TEMPERATURE"):
             Settings(_env_file=None, LLM_TEMPERATURE=temperature)
+
+
+class TestPreviewValidation:
+    @pytest.mark.parametrize("width", [512, 1536, 4096])
+    def test_render_width_range_accepted(self, width: int) -> None:
+        assert width == Settings(_env_file=None, PREVIEW_RENDER_WIDTH=width).PREVIEW_RENDER_WIDTH
+
+    @pytest.mark.parametrize("width", [0, 511, 4097])
+    def test_render_width_out_of_range_fails_fast(self, width: int) -> None:
+        with pytest.raises(ValidationError, match="PREVIEW_RENDER_WIDTH"):
+            Settings(_env_file=None, PREVIEW_RENDER_WIDTH=width)
+
+    @pytest.mark.parametrize("coverage", [0.0, 0.3, 1.0])
+    def test_min_coverage_range_accepted(self, coverage: float) -> None:
+        settings = Settings(_env_file=None, PREVIEW_MIN_COVERAGE=coverage)
+        assert coverage == settings.PREVIEW_MIN_COVERAGE
+
+    @pytest.mark.parametrize("coverage", [-0.1, 1.1])
+    def test_min_coverage_out_of_range_fails_fast(self, coverage: float) -> None:
+        with pytest.raises(ValidationError, match="PREVIEW_MIN_COVERAGE"):
+            Settings(_env_file=None, PREVIEW_MIN_COVERAGE=coverage)
+
+    @pytest.mark.parametrize("timeout", [0, -5])
+    def test_nonpositive_convert_timeout_fails_fast(self, timeout: int) -> None:
+        with pytest.raises(ValidationError, match="PREVIEW_CONVERT_TIMEOUT_S"):
+            Settings(_env_file=None, PREVIEW_CONVERT_TIMEOUT_S=timeout)
 
 
 class TestContextualize:

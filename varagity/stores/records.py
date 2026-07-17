@@ -255,6 +255,10 @@ class DocumentInfo(BaseModel):
         doc_id: The document's stable id.
         source: Absolute file path recorded at ingest time.
         file_type: File extension without the dot (``pdf``, ``docx``, …).
+        content_hash: sha256 of the source file's bytes at ingest time —
+            the preview path re-hashes the on-disk file against it, so an
+            edited-but-not-reingested document degrades honestly
+            (``file_changed``) instead of previewing the wrong bytes.
         n_chunks: Chunks ingested (``0`` = no extractable text).
         ingested_at: When the document (last) landed in the stores.
         extraction_mix: Chunk count per extraction method (``text`` /
@@ -264,6 +268,7 @@ class DocumentInfo(BaseModel):
     doc_id: str
     source: str
     file_type: str
+    content_hash: str
     n_chunks: int
     ingested_at: datetime
     extraction_mix: dict[str, int]
