@@ -419,7 +419,9 @@ Notes:
   `DELETE /api/documents/{doc_id}` closes that gap per document: ES delete
   first, then the pg cascade (the marker is deleted last, so a failed ES
   delete leaves the document visible and retryable), with opt-in source-file
-  removal (`?remove_file=true`, honored only for paths inside `DOCS_PATH`).
+  removal (`?remove_file=true`, honored only for paths inside `DOCS_PATH`;
+  folders the unlink empties are pruned too, so deleting a folder upload's
+  documents leaves no empty shells in the corpus directory).
   `POST /api/documents/delete` is the same operation over a set (the corpus
   table's multi-select): one `terms` `delete_by_query` and one
   `DELETE … WHERE doc_id = ANY(…)`, so the ordering — and therefore the
@@ -427,6 +429,12 @@ Notes:
   per document. Ids with no `documents` row come back in `not_found`
   instead of failing the batch, so a selection racing a concurrent delete
   still removes what remains.
+- `GET /api/documents` reports each document's `relative_path` under
+  `DOCS_PATH` (`null` for sources living elsewhere), and the GUI folds the
+  corpus table back into the folders a folder upload created — collapsible
+  rows whose checkbox and delete act on every descendant, so "delete a
+  directory" is the same bulk delete over that folder's `doc_id`s, not a
+  second delete path.
 
 The write ordering that makes the `documents` row a reliable idempotency
 marker — sparse store first, transactional store last:
