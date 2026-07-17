@@ -1,0 +1,115 @@
+/* Varagity brand layer for Material.
+ *
+ * Mirrors the web GUI's design tokens (web/app/globals.css + layout.tsx):
+ * one accent pair — hue 278 / chroma 0.14, "refined indigo" — drives every
+ * colored token, Geist carries body text (theme.font), and Instrument Serif
+ * is the editorial display face for headings. Hex values below are the
+ * oklch() tokens converted to sRGB (Material's palette vars predate oklch).
+ *
+ * The palette entries in mkdocs.yml declare `primary: custom` /
+ * `accent: custom`, which defers all color values to this file.
+ */
+
+/* ---- Light scheme ------------------------------------------------------ */
+
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #5156af;        /* oklch(0.495 0.14 278) = web --primary */
+  --md-primary-fg-color--light: #747bd9; /* oklch(0.62  0.14 278) */
+  --md-primary-fg-color--dark: #3e3f97;  /* oklch(0.42  0.14 278) */
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
+
+  --md-accent-fg-color: #6b71e3;         /* oklch(0.60 0.17 278) — hover/focus */
+  --md-accent-fg-color--transparent: rgba(107, 113, 227, 0.1);
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: rgba(255, 255, 255, 0.7);
+}
+
+/* ---- Dark scheme ------------------------------------------------------- */
+
+[data-md-color-scheme="slate"] {
+  /* Slate derives every surface from this hue — same tinted-dark trick the
+   * web GUI plays with its oklch(l c var(--accent-hue)) backgrounds. */
+  --md-hue: 278;
+
+  /* Dark tinted header (≈ web --card dark) instead of a saturated banner;
+   * the indigo moves into links and interactive accents where it reads. */
+  --md-primary-fg-color: #15161f;        /* oklch(0.205 0.018 278) */
+  --md-primary-fg-color--light: #2a2c3d; /* oklch(0.30  0.03  278) */
+  --md-primary-fg-color--dark: #101018;
+  --md-primary-bg-color: #eceefc;
+  --md-primary-bg-color--light: rgba(236, 238, 252, 0.7);
+
+  --md-accent-fg-color: #969fff;         /* oklch(0.74 0.15 278) */
+  --md-accent-fg-color--transparent: rgba(150, 159, 255, 0.1);
+  --md-accent-bg-color: #15161f;
+  --md-accent-bg-color--light: rgba(21, 22, 31, 0.7);
+
+  --md-typeset-a-color: #8c95ee;         /* oklch(0.70 0.13 278) */
+}
+
+/* Text selection matches the web GUI's --selection token. */
+::selection {
+  background: rgba(107, 113, 227, 0.25);
+}
+
+/* ---- Editorial display headings ---------------------------------------- */
+
+/* Instrument Serif is the web GUI's wordmark/panel-heading face: display
+ * weights only, so it stays on h1/h2 and the header wordmark — h3 and below
+ * remain Geist, and code spans inside headings keep Geist Mono. */
+.md-header__topic,
+.md-typeset h1,
+.md-typeset h2 {
+  font-family: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  font-weight: 400;
+}
+
+.md-header__topic {
+  font-size: 1rem;
+  letter-spacing: 0.01em;
+}
+
+.md-typeset h1 {
+  color: var(--md-default-fg-color); /* full contrast, not the muted default */
+  font-size: 2.6em;
+  line-height: 1.15;
+}
+
+.md-typeset h2 {
+  font-size: 1.9em;
+  line-height: 1.2;
+}
+
+/* ---- Landing-page cards ------------------------------------------------ */
+
+.md-typeset .grid.cards > ul > li {
+  border-radius: 0.55rem;
+  transition: border-color 125ms, box-shadow 125ms, transform 125ms;
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-accent-fg-color);
+  box-shadow: 0 0.45rem 1.1rem -0.4rem rgba(81, 86, 175, 0.5);
+  transform: translateY(-0.12rem);
+}
+
+/* Card icons take the brand color (link color in slate, where the primary
+ * variable is the dark header surface). */
+.md-typeset .grid.cards .twemoji.lg {
+  color: var(--md-primary-fg-color);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .grid.cards .twemoji.lg {
+  color: var(--md-typeset-a-color);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset .grid.cards > ul > li {
+    transition: none;
+  }
+
+  .md-typeset .grid.cards > ul > li:hover {
+    transform: none;
+  }
+}

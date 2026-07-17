@@ -20,17 +20,46 @@ validation:
 
 theme:
   name: material
+  icon:
+    logo: material/layers-search
+    repo: fontawesome/brands/github
+  favicon: assets/favicon.svg
+  # The web GUI's type system (web/app/layout.tsx): Geist for text, Geist Mono
+  # for code (Instrument Serif display headings come via extra_css). The
+  # privacy plugin localizes the Google Fonts downloads at build time.
+  font:
+    text: Geist
+    code: Geist Mono
+  # `custom` defers the color values to css/varagity.css, which carries the
+  # web GUI's accent pair (hue 278 / chroma 0.14 — see web/app/globals.css).
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
+  features:
+    - navigation.tabs # top-level nav as header tabs
+    - navigation.indexes # adr/index.md + reference/index.md become section landing pages
+    - navigation.instant # XHR page swaps (requires site_url, which is set above)
+    - navigation.instant.progress
+    - navigation.tracking # URL follows the active heading
+    - navigation.top # back-to-top button on long pages (runbook, api)
+    - navigation.footer # prev/next links
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link # api.md media-type tabs switch in unison
 
 # Setting markdown_extensions replaces the MkDocs defaults (toc, tables,
 # fenced_code) — they must be re-listed alongside our additions.
@@ -39,6 +68,14 @@ markdown_extensions:
   - toc:
       permalink: true
   - tables
+  # attr_list + md_in_html power the Material grid cards on the landing page;
+  # pymdownx.emoji renders :material-*: icon shortcodes as inline SVG from the
+  # theme's bundled icon sets — resolved at build time, no external requests.
+  - attr_list
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   # pymdownx.superfences supersedes the stdlib `fenced_code` (it renders the
   # same ```lang blocks) and adds the `mermaid` custom fence. Material bundles
   # Mermaid.js and re-themes diagrams on the light/slate palette toggle when it
@@ -56,6 +93,11 @@ markdown_extensions:
 
 plugins:
   - search
+  # Downloads every external asset the pages reference (the Google Fonts
+  # stylesheets + woff2 files from theme.font and extra_css) and rewrites the
+  # output to self-hosted copies — the built site keeps working offline.
+  # Needs network at build time; downloads are cached in .cache/ (gitignored).
+  - privacy
   - mkdocstrings:
       handlers:
         python:
@@ -75,9 +117,21 @@ plugins:
 # neoteroi-oad.css carries the OpenAPI-render selectors (method badges,
 # operation separators, slate-palette overrides); neoteroi.css is the
 # upstream compiled bundle, which predates the OAD stylesheet.
+# The Google Fonts URL (Instrument Serif, the web GUI's display face) is the
+# one external entry — the privacy plugin localizes it into the built site.
+# varagity.css is the brand layer (custom palette values, display headings,
+# card polish) and must load last so it wins the cascade.
 extra_css:
   - css/neoteroi.css
   - css/neoteroi-oad.css
+  - "https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap"
+  - css/varagity.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/luisegarduno/varagity
+      name: Varagity on GitHub
 
 nav:
   - Home: index.md
