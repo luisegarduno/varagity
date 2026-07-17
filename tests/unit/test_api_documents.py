@@ -5,7 +5,7 @@ write path; list/delete fake the two store dependencies (the both-stores
 delete against real containers lives in the integration suite).
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,34 +22,54 @@ from varagity.stores.records import DocumentInfo
 
 
 class FakeVectorStore:
-    """In-memory documents-table double."""
+    """In-memory documents-table double.
+
+    ``delete_calls`` records the *shape* of the delete traffic (one entry
+    per call, holding that call's ids), so a bulk delete can assert it cost
+    a single statement rather than one per document.
+    """
 
     def __init__(self, documents: list[DocumentInfo] | None = None) -> None:
         self.documents = list(documents or [])
         self.deleted: list[str] = []
+        self.delete_calls: list[list[str]] = []
 
     def list_documents(self) -> list[DocumentInfo]:
         return list(self.documents)
 
     def delete_document(self, doc_id: str) -> int:
+        return self.delete_documents([doc_id])
+
+    def delete_documents(self, doc_ids: Sequence[str]) -> int:
+        if not doc_ids:  # the real store skips the statement entirely
+            return 0
+        self.delete_calls.append(list(doc_ids))
+        self.deleted.extend(doc_ids)
         before = len(self.documents)
-        self.documents = [info for info in self.documents if info.doc_id != doc_id]
-        self.deleted.append(doc_id)
+        targets = set(doc_ids)
+        self.documents = [info for info in self.documents if info.doc_id not in targets]
         return before - len(self.documents)
 
 
 class FakeBM25:
-    """delete_document-only double; optionally raises like a downed ES."""
+    """Delete-only double; optionally raises like a downed ES."""
 
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
         self.deleted: list[str] = []
+        self.delete_calls: list[list[str]] = []
 
     def delete_document(self, doc_id: str) -> int:
+        return self.delete_documents([doc_id])
+
+    def delete_documents(self, doc_ids: Sequence[str]) -> int:
+        if not doc_ids:  # the real store skips the round trip, so it can't fail
+            return 0
         if self.error is not None:
             raise self.error
-        self.deleted.append(doc_id)
-        return 3
+        self.delete_calls.append(list(doc_ids))
+        self.deleted.extend(doc_ids)
+        return 3 * len(doc_ids)
 
 
 def make_info(doc_id: str, source: str, n_chunks: int = 4) -> DocumentInfo:
@@ -500,3 +520,140 @@ class TestDelete:
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "es_unreachable"
         assert vector.deleted == []  # ES-first ordering: the marker survived
+
+
+class TestBulkDelete:
+    async def test_deletes_the_whole_set_from_both_stores(self, docs_root: Path) -> None:
+        vector = FakeVectorStore(
+            [make_info(f"d{n}", str(docs_root / f"f{n}.txt"), n_chunks=n) for n in (1, 2, 3)]
+        )
+        bm25 = FakeBM25()
+        response = await request(
+            make_app(vector=vector, bm25=bm25),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": ["d1", "d2", "d3"]},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "deleted": [
+                {"doc_id": "d1", "chunks_deleted": 1, "file_removed": False},
+                {"doc_id": "d2", "chunks_deleted": 2, "file_removed": False},
+                {"doc_id": "d3", "chunks_deleted": 3, "file_removed": False},
+            ],
+            "not_found": [],
+        }
+        assert vector.documents == []
+
+    async def test_costs_one_round_trip_per_store(self, docs_root: Path) -> None:
+        vector = FakeVectorStore(
+            [make_info(f"d{n}", str(docs_root / f"f{n}.txt")) for n in (1, 2, 3)]
+        )
+        bm25 = FakeBM25()
+        await request(
+            make_app(vector=vector, bm25=bm25),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": ["d1", "d2", "d3"]},
+        )
+        # The point of the route: one terms delete_by_query + one DELETE … ANY(…),
+        # not one of each per document.
+        assert bm25.delete_calls == [["d1", "d2", "d3"]]
+        assert vector.delete_calls == [["d1", "d2", "d3"]]
+
+    async def test_unknown_ids_are_reported_not_fatal(self, docs_root: Path) -> None:
+        vector = FakeVectorStore([make_info("d1", str(docs_root / "f1.txt"))])
+        response = await request(
+            make_app(vector=vector, bm25=FakeBM25()),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": ["d1", "ghost"]},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert [entry["doc_id"] for entry in body["deleted"]] == ["d1"]
+        assert body["not_found"] == ["ghost"]
+
+    async def test_every_id_unknown_is_an_empty_200(self, docs_root: Path) -> None:
+        bm25 = FakeBM25()
+        response = await request(
+            make_app(vector=FakeVectorStore(), bm25=bm25),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": ["ghost", "phantom"]},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"deleted": [], "not_found": ["ghost", "phantom"]}
+        assert bm25.delete_calls == []  # nothing to delete ⇒ no round trip
+
+    async def test_duplicate_ids_collapse(self, docs_root: Path) -> None:
+        vector = FakeVectorStore([make_info("d1", str(docs_root / "f1.txt"))])
+        response = await request(
+            make_app(vector=vector, bm25=FakeBM25()),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": ["d1", "d1"]},
+        )
+        assert response.json()["deleted"] == [
+            {"doc_id": "d1", "chunks_deleted": 4, "file_removed": False}
+        ]
+        assert vector.delete_calls == [["d1"]]
+
+    async def test_remove_file_unlinks_each_inside_docs_path(self, docs_root: Path) -> None:
+        sources = [docs_root / f"f{n}.txt" for n in (1, 2)]
+        for source in sources:
+            source.write_text("bye")
+        vector = FakeVectorStore([make_info(f"d{n}", str(sources[n - 1])) for n in (1, 2)])
+        response = await request(
+            make_app(vector=vector, bm25=FakeBM25()),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": ["d1", "d2"]},
+            params={"remove_file": "true"},
+        )
+        assert all(entry["file_removed"] for entry in response.json()["deleted"])
+        assert not any(source.exists() for source in sources)
+
+    async def test_remove_file_is_honored_per_document(
+        self, docs_root: Path, tmp_path: Path
+    ) -> None:
+        inside = docs_root / "mine.txt"
+        inside.write_text("bye")
+        outside = tmp_path / "elsewhere.txt"
+        outside.write_text("keep me")
+        vector = FakeVectorStore([make_info("d1", str(inside)), make_info("d2", str(outside))])
+        response = await request(
+            make_app(vector=vector, bm25=FakeBM25()),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": ["d1", "d2"]},
+            params={"remove_file": "true"},
+        )
+        # Both leave the stores; only the one inside DOCS_PATH loses its file.
+        assert [entry["file_removed"] for entry in response.json()["deleted"]] == [True, False]
+        assert not inside.exists()
+        assert outside.exists()
+
+    async def test_es_down_is_a_structured_503_and_pg_untouched(self, docs_root: Path) -> None:
+        vector = FakeVectorStore([make_info(f"d{n}", str(docs_root / f"f{n}.txt")) for n in (1, 2)])
+        bm25 = FakeBM25(error=ESConnectionError("refused"))
+        response = await request(
+            make_app(vector=vector, bm25=bm25),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": ["d1", "d2"]},
+        )
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "es_unreachable"
+        # Set-wise invariant: no marker row is gone, so the whole batch retries.
+        assert vector.deleted == []
+        assert len(vector.documents) == 2
+
+    async def test_empty_selection_is_a_422(self, docs_root: Path) -> None:
+        response = await request(
+            make_app(vector=FakeVectorStore(), bm25=FakeBM25()),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": []},
+        )
+        assert response.status_code == 422

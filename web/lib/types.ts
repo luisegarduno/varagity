@@ -339,6 +339,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delete Documents
+         * @description Remove several documents' chunks from both stores (bulk GUI-driven GC).
+         *
+         *     The corpus table's multi-select delete (spec_v2 §4.2). A ``POST``
+         *     sub-path rather than a body on ``DELETE`` — the set to delete is the
+         *     request's subject, and bodies on ``DELETE`` are the kind of thing
+         *     intermediaries feel free to drop.
+         *
+         *     Same store ordering as the single-document delete, applied set-wise:
+         *     one ``terms`` ``delete_by_query`` against Elasticsearch first, one
+         *     ``DELETE … WHERE doc_id = ANY(…)`` against pgvector last. So the
+         *     invariant holds for the batch exactly as it does for one document — if
+         *     Elasticsearch fails, no marker row is gone, every document still lists,
+         *     and the whole batch is retryable. Unknown ids are reported in
+         *     ``not_found`` rather than raising: a concurrent delete must not fail
+         *     the rest of the batch.
+         *
+         *     Args:
+         *         payload: The requested ``doc_ids`` (duplicates collapse; order is
+         *             preserved).
+         *         store: The per-request vector store.
+         *         bm25: The per-request BM25 store.
+         *         remove_file: Also unlink each source file — honored per document,
+         *             only inside ``DOCS_PATH``.
+         *
+         *     Returns:
+         *         Per-document outcomes plus the ids that had no ``documents`` row.
+         *
+         *     Raises:
+         *         HTTPException: ``503 es_unreachable`` when Elasticsearch is down
+         *             (nothing deleted — retry when it returns).
+         */
+        post: operations["delete_documents_api_documents_delete_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/ingest": {
         parameters: {
             query?: never;
@@ -590,8 +639,40 @@ export interface components {
             message_count: number;
         };
         /**
+         * DocumentBulkDeleteRequest
+         * @description Body of ``POST /api/documents/delete`` (spec_v2 §4.2).
+         *
+         *     Attributes:
+         *         doc_ids: The documents to remove, at least one. Duplicates collapse
+         *             and unknown ids are reported rather than fatal, so the corpus
+         *             table's selection can be posted as-is.
+         */
+        DocumentBulkDeleteRequest: {
+            /** Doc Ids */
+            doc_ids: string[];
+        };
+        /**
+         * DocumentBulkDeleteResponse
+         * @description Response of ``POST /api/documents/delete`` (spec_v2 §4.2).
+         *
+         *     Attributes:
+         *         deleted: Per-document outcomes, in requested order (duplicates
+         *             collapsed) — the same shape a single delete returns.
+         *         not_found: Requested ids that no longer had a ``documents`` row.
+         *             Reported, never fatal: a concurrent delete (another tab, a
+         *             reingest) must not fail the rest of the batch.
+         */
+        DocumentBulkDeleteResponse: {
+            /** Deleted */
+            deleted: components["schemas"]["DocumentDeleteResponse"][];
+            /** Not Found */
+            not_found: string[];
+        };
+        /**
          * DocumentDeleteResponse
          * @description Response of ``DELETE /api/documents/{doc_id}`` (spec_v2 §4.2).
+         *
+         *     Also one entry of a bulk delete's ``deleted`` list.
          *
          *     Attributes:
          *         doc_id: The deleted document.
@@ -1656,6 +1737,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DocumentDeleteResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_documents_api_documents_delete_post: {
+        parameters: {
+            query?: {
+                remove_file?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DocumentBulkDeleteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentBulkDeleteResponse"];
                 };
             };
             /** @description Validation Error */

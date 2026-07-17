@@ -14,16 +14,28 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ApiError, deleteDocument, type DocumentOut } from "@/lib/api";
+import { ApiError, deleteDocuments, type DocumentOut } from "@/lib/api";
+import {
+  pruneSelection,
+  selectedDocuments,
+  selectionState,
+  toggleSelected,
+  totalChunks,
+} from "@/lib/selection";
 
 /**
  * The ingested-documents table (spec_v2 §4.2): file, type badge, chunk
- * count, ingested-at, extraction mix (how much came through OCR), and the
- * per-document delete — the GUI-driven GC for the v1 "removing a file
- * doesn't remove its chunks" gap. Delete removes from both stores; the
- * confirm offers removing the source file too so the next ingest can't
- * resurrect it.
+ * count, ingested-at, extraction mix (how much came through OCR), and
+ * delete — the GUI-driven GC for the v1 "removing a file doesn't remove its
+ * chunks" gap. Delete removes from both stores; the confirm offers removing
+ * the source files too so the next ingest can't resurrect them.
+ *
+ * Rows are multi-selectable, and one row's trash button is just a selection
+ * of one: both go through the same confirm and the same bulk request, so
+ * there's a single delete path to reason about rather than two that can
+ * drift.
  */
 export function DocumentTable({
   documents,
@@ -32,17 +44,42 @@ export function DocumentTable({
   documents: DocumentOut[] | null;
   onChanged: () => void;
 }) {
-  const [target, setTarget] = useState<DocumentOut | null>(null);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  // Pending is the *committed* delete target: null while the dialog is
+  // closed. Kept apart from `selected` so the confirm keeps naming what the
+  // user agreed to even as the table refetches beneath it.
+  const [pending, setPending] = useState<DocumentOut[] | null>(null);
   const [removeFile, setRemoveFile] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Derived every render rather than synced: a refetch (this delete, an
+  // ingest, another tab) must not leave ids selected whose rows are gone.
+  const live = pruneSelection(selected, documents);
+  const chosen = selectedDocuments(documents, live);
+  const headerState = selectionState(live.size, documents?.length ?? 0);
+
+  function openConfirm(targets: DocumentOut[]) {
+    if (targets.length === 0) return;
+    setPending(targets);
+    setRemoveFile(true);
+    setError(null);
+  }
+
   async function confirmDelete() {
-    if (target === null || busy) return;
+    if (pending === null || busy) return;
     setBusy(true);
     try {
-      await deleteDocument(target.doc_id, { removeFile });
-      setTarget(null);
+      const doomed = pending.map((document) => document.doc_id);
+      await deleteDocuments(doomed, { removeFile });
+      // Unselect exactly what was deleted; a row ticked while the request
+      // was in flight stays ticked.
+      setSelected((current) => {
+        const next = new Set(current);
+        for (const docId of doomed) next.delete(docId);
+        return next;
+      });
+      setPending(null);
       setError(null);
       onChanged();
     } catch (failure) {
@@ -52,9 +89,35 @@ export function DocumentTable({
     }
   }
 
+  const pendingChunks = totalChunks(pending ?? []);
+
   return (
     <section aria-label="Ingested documents" className="flex flex-col gap-2">
-      <h2 className="text-sm font-semibold">Documents</h2>
+      <div className="flex min-h-8 items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold">Documents</h2>
+        {live.size > 0 && (
+          <div className="flex items-center gap-3">
+            <span aria-live="polite" className="text-xs text-muted-foreground">
+              {live.size} selected
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSelected(new Set())}
+            >
+              Clear
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => openConfirm(chosen)}
+            >
+              <Trash2Icon className="size-4" />
+              Delete {live.size}
+            </Button>
+          </div>
+        )}
+      </div>
 
       {documents === null ? (
         <div className="overflow-hidden rounded-lg border border-border">
@@ -78,6 +141,24 @@ export function DocumentTable({
           <table className="w-full text-left text-sm">
             <thead className="bg-muted/40 text-xs text-muted-foreground">
               <tr>
+                <th className="w-0 px-3 py-2">
+                  <Checkbox
+                    aria-label={
+                      headerState === "all"
+                        ? "Deselect all documents"
+                        : "Select all documents"
+                    }
+                    checked={headerState === "all"}
+                    indeterminate={headerState === "some"}
+                    onCheckedChange={() =>
+                      setSelected(
+                        headerState === "all"
+                          ? new Set()
+                          : new Set(documents.map((d) => d.doc_id)),
+                      )
+                    }
+                  />
+                </th>
                 <th className="px-3 py-2 font-medium">File</th>
                 <th className="px-3 py-2 font-medium">Type</th>
                 <th className="px-3 py-2 font-medium">Chunks</th>
@@ -92,8 +173,18 @@ export function DocumentTable({
               {documents.map((document) => (
                 <tr
                   key={document.doc_id}
-                  className="border-t border-border transition-colors hover:bg-muted/40"
+                  data-selected={live.has(document.doc_id) || undefined}
+                  className="border-t border-border transition-colors hover:bg-muted/40 data-selected:bg-muted/60"
                 >
+                  <td className="w-0 px-3 py-2">
+                    <Checkbox
+                      aria-label={`Select ${document.file_name}`}
+                      checked={live.has(document.doc_id)}
+                      onCheckedChange={() =>
+                        setSelected(toggleSelected(live, document.doc_id))
+                      }
+                    />
+                  </td>
                   <td className="max-w-64 truncate px-3 py-2" title={document.source}>
                     {document.file_name}
                   </td>
@@ -119,11 +210,7 @@ export function DocumentTable({
                       variant="ghost"
                       size="icon-sm"
                       aria-label={`Delete ${document.file_name}`}
-                      onClick={() => {
-                        setTarget(document);
-                        setRemoveFile(true);
-                        setError(null);
-                      }}
+                      onClick={() => openConfirm([document])}
                     >
                       <Trash2Icon className="size-4" />
                     </Button>
@@ -136,20 +223,38 @@ export function DocumentTable({
       )}
 
       <AlertDialog
-        open={target !== null}
+        open={pending !== null}
         onOpenChange={(open) => {
-          if (!open) setTarget(null);
+          if (!open) setPending(null);
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete “{target?.file_name}”?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {pending?.length === 1
+                ? `Delete “${pending[0].file_name}”?`
+                : `Delete ${pending?.length ?? 0} documents?`}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Removes its {target?.n_chunks ?? 0} chunk(s) from both stores, so
-              it can no longer ground answers. Persisted conversations keep
-              their evidence snapshots.
+              Removes {pending?.length === 1 ? "its" : "their"} {pendingChunks}{" "}
+              chunk(s) from both stores, so{" "}
+              {pending?.length === 1 ? "it" : "they"} can no longer ground
+              answers. Persisted conversations keep their evidence snapshots.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {pending !== null && pending.length > 1 && (
+            <ul className="max-h-40 overflow-y-auto rounded-md border border-border bg-muted/30 px-3 py-2 text-xs">
+              {pending.map((document) => (
+                <li
+                  key={document.doc_id}
+                  className="truncate py-0.5"
+                  title={document.source}
+                >
+                  {document.file_name}
+                </li>
+              ))}
+            </ul>
+          )}
           <label className="flex items-start gap-2 text-sm">
             <input
               type="checkbox"
@@ -158,8 +263,10 @@ export function DocumentTable({
               onChange={(event) => setRemoveFile(event.target.checked)}
             />
             <span>
-              Also remove the file from the corpus directory (otherwise the next
-              ingest re-adds it)
+              Also remove{" "}
+              {pending?.length === 1 ? "the file" : "the files"} from the corpus
+              directory (otherwise the next ingest re-adds{" "}
+              {pending?.length === 1 ? "it" : "them"})
             </span>
           </label>
           {error && (

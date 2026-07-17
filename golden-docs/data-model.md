@@ -420,6 +420,13 @@ Notes:
   first, then the pg cascade (the marker is deleted last, so a failed ES
   delete leaves the document visible and retryable), with opt-in source-file
   removal (`?remove_file=true`, honored only for paths inside `DOCS_PATH`).
+  `POST /api/documents/delete` is the same operation over a set (the corpus
+  table's multi-select): one `terms` `delete_by_query` and one
+  `DELETE … WHERE doc_id = ANY(…)`, so the ordering — and therefore the
+  retryability — holds set-wise, at one round trip per store rather than
+  per document. Ids with no `documents` row come back in `not_found`
+  instead of failing the batch, so a selection racing a concurrent delete
+  still removes what remains.
 
 The write ordering that makes the `documents` row a reliable idempotency
 marker — sparse store first, transactional store last:

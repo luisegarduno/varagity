@@ -462,6 +462,8 @@ class UploadResponse(BaseModel):
 class DocumentDeleteResponse(BaseModel):
     """Response of ``DELETE /api/documents/{doc_id}`` (spec_v2 §4.2).
 
+    Also one entry of a bulk delete's ``deleted`` list.
+
     Attributes:
         doc_id: The deleted document.
         chunks_deleted: Chunks removed (the pgvector count; the
@@ -475,6 +477,35 @@ class DocumentDeleteResponse(BaseModel):
     doc_id: str
     chunks_deleted: int
     file_removed: bool
+
+
+class DocumentBulkDeleteRequest(BaseModel):
+    """Body of ``POST /api/documents/delete`` (spec_v2 §4.2).
+
+    Attributes:
+        doc_ids: The documents to remove, at least one. Duplicates collapse
+            and unknown ids are reported rather than fatal, so the corpus
+            table's selection can be posted as-is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    doc_ids: list[str] = Field(min_length=1)
+
+
+class DocumentBulkDeleteResponse(BaseModel):
+    """Response of ``POST /api/documents/delete`` (spec_v2 §4.2).
+
+    Attributes:
+        deleted: Per-document outcomes, in requested order (duplicates
+            collapsed) — the same shape a single delete returns.
+        not_found: Requested ids that no longer had a ``documents`` row.
+            Reported, never fatal: a concurrent delete (another tab, a
+            reingest) must not fail the rest of the batch.
+    """
+
+    deleted: list[DocumentDeleteResponse]
+    not_found: list[str]
 
 
 class IngestStartRequest(BaseModel):

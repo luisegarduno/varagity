@@ -34,6 +34,7 @@ export type DocumentOut = Schemas["DocumentOut"];
 export type UploadResponse = Schemas["UploadResponse"];
 export type UploadedFile = Schemas["UploadedFileOut"];
 export type DocumentDeleteResponse = Schemas["DocumentDeleteResponse"];
+export type DocumentBulkDeleteResponse = Schemas["DocumentBulkDeleteResponse"];
 export type IngestRun = Schemas["IngestRunOut"];
 export type IngestSummary = Schemas["IngestSummaryOut"];
 export type IngestStatusEvent = Schemas["IngestStatusEvent"];
@@ -166,14 +167,25 @@ export async function uploadDocuments(
   return (await response.json()) as UploadResponse;
 }
 
-/** Remove a document's chunks from both stores (optionally the file too). */
-export function deleteDocument(
-  docId: string,
+/**
+ * Remove documents' chunks from both stores in one round trip (optionally
+ * their files too) — the corpus table's delete, for one row or a whole
+ * selection. A `POST` sub-path, not a body on `DELETE`.
+ *
+ * Ids that no longer exist come back in `not_found` rather than failing the
+ * batch, so a selection made before a concurrent delete still removes what
+ * is left. The single-document `DELETE /api/documents/{doc_id}` route
+ * remains the REST shape for API consumers; the GUI has no second delete
+ * path of its own.
+ */
+export function deleteDocuments(
+  docIds: readonly string[],
   options?: { removeFile?: boolean },
-): Promise<DocumentDeleteResponse> {
+): Promise<DocumentBulkDeleteResponse> {
   const query = options?.removeFile ? "?remove_file=true" : "";
-  return request(`/api/documents/${encodeURIComponent(docId)}${query}`, {
-    method: "DELETE",
+  return request(`/api/documents/delete${query}`, {
+    method: "POST",
+    body: JSON.stringify({ doc_ids: docIds }),
   });
 }
 

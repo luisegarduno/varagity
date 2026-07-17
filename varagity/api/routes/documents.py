@@ -13,7 +13,10 @@ chunks") turned into GUI-driven GC — Elasticsearch first, pgvector last,
 mirroring the reingest ordering rationale (the ``documents`` row is the
 idempotency marker, so it must go last); with ``?remove_file=true`` the
 source file is also unlinked when it lives inside ``DOCS_PATH``, so the
-next ingest can't resurrect the document.
+next ingest can't resurrect the document. ``POST /api/documents/delete``
+is the same operation over a set (the corpus table's multi-select): the
+same ordering applied set-wise, in one round trip per store instead of one
+per document.
 """
 
 import contextlib
@@ -29,6 +32,8 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 
 from varagity.api.deps import get_bm25_store, get_vector_store
 from varagity.api.schemas import (
+    DocumentBulkDeleteRequest,
+    DocumentBulkDeleteResponse,
     DocumentDeleteResponse,
     DocumentOut,
     UploadedFileOut,
@@ -36,6 +41,7 @@ from varagity.api.schemas import (
 )
 from varagity.config import get_settings
 from varagity.stores.bm25_store import ElasticsearchBM25
+from varagity.stores.records import DocumentInfo
 from varagity.stores.vector_store import ContextualVectorDB
 
 logger = logging.getLogger(__name__)
@@ -394,6 +400,57 @@ def list_documents(store: VectorStoreDep) -> list[DocumentOut]:
     ]
 
 
+def _remove_source_file(info: DocumentInfo) -> bool:
+    """Unlink one deleted document's source file, if it's ours to unlink.
+
+    Honored only inside ``DOCS_PATH``: a document ingested from elsewhere
+    would simply be re-added by the next ingest, and unlinking outside the
+    corpus directory is not this route's business either way.
+
+    Args:
+        info: The (already deleted) document's stored metadata.
+
+    Returns:
+        Whether the file was removed.
+    """
+    docs_root = Path(get_settings().DOCS_PATH).resolve()
+    source = Path(info.source)
+    try:
+        inside_corpus = source.resolve().is_relative_to(docs_root)
+    except OSError:  # unresolvable (dangling symlink target, …)
+        inside_corpus = False
+    if not inside_corpus:
+        logger.warning(
+            "not removing %s — outside DOCS_PATH (%s); the next ingest will re-add it",
+            info.source,
+            docs_root,
+        )
+        return False
+    if not source.exists():
+        return False
+    source.unlink()
+    return True
+
+
+def _es_unreachable(error: TransportError) -> HTTPException:
+    """Build the structured 503 for a downed Elasticsearch.
+
+    Args:
+        error: The transport failure raised by the BM25 store.
+
+    Returns:
+        The ``503 es_unreachable`` to raise — nothing has been deleted from
+        either store, so the caller can simply retry.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "code": "es_unreachable",
+            "message": f"elasticsearch unreachable — nothing deleted ({error})",
+        },
+    )
+
+
 @router.delete("/api/documents/{doc_id}")
 def delete_document(
     doc_id: str,
@@ -435,33 +492,10 @@ def delete_document(
     try:
         bm25.delete_document(doc_id)
     except TransportError as error:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "es_unreachable",
-                "message": f"elasticsearch unreachable — nothing deleted ({error})",
-            },
-        ) from error
+        raise _es_unreachable(error) from error
     store.delete_document(doc_id)
 
-    file_removed = False
-    if remove_file:
-        docs_root = Path(get_settings().DOCS_PATH).resolve()
-        source = Path(info.source)
-        try:
-            inside_corpus = source.resolve().is_relative_to(docs_root)
-        except OSError:  # unresolvable (dangling symlink target, …)
-            inside_corpus = False
-        if inside_corpus and source.exists():
-            source.unlink()
-            file_removed = True
-        elif not inside_corpus:
-            logger.warning(
-                "not removing %s — outside DOCS_PATH (%s); the next ingest will re-add it",
-                info.source,
-                docs_root,
-            )
-
+    file_removed = _remove_source_file(info) if remove_file else False
     logger.info(
         "deleted document %s (%d chunk(s)) from both stores%s",
         doc_id,
@@ -471,3 +505,71 @@ def delete_document(
     return DocumentDeleteResponse(
         doc_id=doc_id, chunks_deleted=info.n_chunks, file_removed=file_removed
     )
+
+
+@router.post("/api/documents/delete")
+def delete_documents(
+    payload: DocumentBulkDeleteRequest,
+    store: VectorStoreDep,
+    bm25: BM25StoreDep,
+    remove_file: bool = False,
+) -> DocumentBulkDeleteResponse:
+    """Remove several documents' chunks from both stores (bulk GUI-driven GC).
+
+    The corpus table's multi-select delete (spec_v2 §4.2). A ``POST``
+    sub-path rather than a body on ``DELETE`` — the set to delete is the
+    request's subject, and bodies on ``DELETE`` are the kind of thing
+    intermediaries feel free to drop.
+
+    Same store ordering as the single-document delete, applied set-wise:
+    one ``terms`` ``delete_by_query`` against Elasticsearch first, one
+    ``DELETE … WHERE doc_id = ANY(…)`` against pgvector last. So the
+    invariant holds for the batch exactly as it does for one document — if
+    Elasticsearch fails, no marker row is gone, every document still lists,
+    and the whole batch is retryable. Unknown ids are reported in
+    ``not_found`` rather than raising: a concurrent delete must not fail
+    the rest of the batch.
+
+    Args:
+        payload: The requested ``doc_ids`` (duplicates collapse; order is
+            preserved).
+        store: The per-request vector store.
+        bm25: The per-request BM25 store.
+        remove_file: Also unlink each source file — honored per document,
+            only inside ``DOCS_PATH``.
+
+    Returns:
+        Per-document outcomes plus the ids that had no ``documents`` row.
+
+    Raises:
+        HTTPException: ``503 es_unreachable`` when Elasticsearch is down
+            (nothing deleted — retry when it returns).
+    """
+    documents = {info.doc_id: info for info in store.list_documents()}
+    requested = list(dict.fromkeys(payload.doc_ids))  # collapse dupes, keep order
+    targets = [documents[doc_id] for doc_id in requested if doc_id in documents]
+    not_found = [doc_id for doc_id in requested if doc_id not in documents]
+
+    doc_ids = [info.doc_id for info in targets]
+    try:
+        bm25.delete_documents(doc_ids)
+    except TransportError as error:
+        raise _es_unreachable(error) from error
+    store.delete_documents(doc_ids)
+
+    deleted = [
+        DocumentDeleteResponse(
+            doc_id=info.doc_id,
+            chunks_deleted=info.n_chunks,
+            file_removed=_remove_source_file(info) if remove_file else False,
+        )
+        for info in targets
+    ]
+    logger.info(
+        "deleted %d document(s) (%d chunk(s)) from both stores%s%s",
+        len(deleted),
+        sum(entry.chunks_deleted for entry in deleted),
+        f" + {sum(entry.file_removed for entry in deleted)} source file(s)" if remove_file else "",
+        f"; {len(not_found)} unknown id(s)" if not_found else "",
+    )
+    return DocumentBulkDeleteResponse(deleted=deleted, not_found=not_found)

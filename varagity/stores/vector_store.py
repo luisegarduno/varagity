@@ -8,6 +8,7 @@ the postgres container on first boot).
 """
 
 import logging
+from collections.abc import Sequence
 from types import TracebackType
 from typing import Any
 
@@ -312,7 +313,27 @@ class ContextualVectorDB:
         Returns:
             The number of ``documents`` rows deleted (0 or 1).
         """
-        cursor = self._conn.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,))
+        return self.delete_documents([doc_id])
+
+    def delete_documents(self, doc_ids: Sequence[str]) -> int:
+        """Delete several document rows and, via FK cascade, their chunks.
+
+        Backs the corpus table's multi-select delete (spec_v2 §4.2): one
+        statement for the whole set, so the marker rows the delete route
+        writes last all fall in the same round trip.
+
+        Args:
+            doc_ids: The documents' stable ids (unknown ids are no-ops; an
+                empty sequence skips the statement entirely).
+
+        Returns:
+            The number of ``documents`` rows deleted.
+        """
+        if not doc_ids:
+            return 0
+        cursor = self._conn.execute(
+            "DELETE FROM documents WHERE doc_id = ANY(%s)", (list(doc_ids),)
+        )
         return cursor.rowcount
 
     def next_original_index(self) -> int:

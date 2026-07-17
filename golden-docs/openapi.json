@@ -278,8 +278,52 @@
         "title": "DeltaEvent",
         "type": "object"
       },
+      "DocumentBulkDeleteRequest": {
+        "additionalProperties": false,
+        "description": "Body of ``POST /api/documents/delete`` (spec_v2 \u00a74.2).\n\nAttributes:\n    doc_ids: The documents to remove, at least one. Duplicates collapse\n        and unknown ids are reported rather than fatal, so the corpus\n        table's selection can be posted as-is.",
+        "properties": {
+          "doc_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Doc Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "doc_ids"
+        ],
+        "title": "DocumentBulkDeleteRequest",
+        "type": "object"
+      },
+      "DocumentBulkDeleteResponse": {
+        "description": "Response of ``POST /api/documents/delete`` (spec_v2 \u00a74.2).\n\nAttributes:\n    deleted: Per-document outcomes, in requested order (duplicates\n        collapsed) \u2014 the same shape a single delete returns.\n    not_found: Requested ids that no longer had a ``documents`` row.\n        Reported, never fatal: a concurrent delete (another tab, a\n        reingest) must not fail the rest of the batch.",
+        "properties": {
+          "deleted": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentDeleteResponse"
+            },
+            "title": "Deleted",
+            "type": "array"
+          },
+          "not_found": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Not Found",
+            "type": "array"
+          }
+        },
+        "required": [
+          "deleted",
+          "not_found"
+        ],
+        "title": "DocumentBulkDeleteResponse",
+        "type": "object"
+      },
       "DocumentDeleteResponse": {
-        "description": "Response of ``DELETE /api/documents/{doc_id}`` (spec_v2 \u00a74.2).\n\nAttributes:\n    doc_id: The deleted document.\n    chunks_deleted: Chunks removed (the pgvector count; the\n        Elasticsearch ``delete_by_query`` removes the same identity-\n        addressed set).\n    file_removed: Whether the source file was also deleted from\n        ``DOCS_PATH`` (requested via ``?remove_file=true`` and only\n        honored inside the corpus directory).",
+        "description": "Response of ``DELETE /api/documents/{doc_id}`` (spec_v2 \u00a74.2).\n\nAlso one entry of a bulk delete's ``deleted`` list.\n\nAttributes:\n    doc_id: The deleted document.\n    chunks_deleted: Chunks removed (the pgvector count; the\n        Elasticsearch ``delete_by_query`` removes the same identity-\n        addressed set).\n    file_removed: Whether the source file was also deleted from\n        ``DOCS_PATH`` (requested via ``?remove_file=true`` and only\n        honored inside the corpus directory).",
         "properties": {
           "chunks_deleted": {
             "title": "Chunks Deleted",
@@ -1665,6 +1709,60 @@
           }
         },
         "summary": "Upload Documents",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/delete": {
+      "post": {
+        "description": "Remove several documents' chunks from both stores (bulk GUI-driven GC).\n\nThe corpus table's multi-select delete (spec_v2 \u00a74.2). A ``POST``\nsub-path rather than a body on ``DELETE`` \u2014 the set to delete is the\nrequest's subject, and bodies on ``DELETE`` are the kind of thing\nintermediaries feel free to drop.\n\nSame store ordering as the single-document delete, applied set-wise:\none ``terms`` ``delete_by_query`` against Elasticsearch first, one\n``DELETE \u2026 WHERE doc_id = ANY(\u2026)`` against pgvector last. So the\ninvariant holds for the batch exactly as it does for one document \u2014 if\nElasticsearch fails, no marker row is gone, every document still lists,\nand the whole batch is retryable. Unknown ids are reported in\n``not_found`` rather than raising: a concurrent delete must not fail\nthe rest of the batch.\n\nArgs:\n    payload: The requested ``doc_ids`` (duplicates collapse; order is\n        preserved).\n    store: The per-request vector store.\n    bm25: The per-request BM25 store.\n    remove_file: Also unlink each source file \u2014 honored per document,\n        only inside ``DOCS_PATH``.\n\nReturns:\n    Per-document outcomes plus the ids that had no ``documents`` row.\n\nRaises:\n    HTTPException: ``503 es_unreachable`` when Elasticsearch is down\n        (nothing deleted \u2014 retry when it returns).",
+        "operationId": "delete_documents_api_documents_delete_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "remove_file",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Remove File",
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentBulkDeleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentBulkDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Documents",
         "tags": [
           "documents"
         ]

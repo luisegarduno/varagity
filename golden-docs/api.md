@@ -34,7 +34,7 @@ The code vocabulary, as built:
 | `unknown_setting` / `invalid_settings` | 422 | `PATCH /api/settings` — unknown name / value failing the `Settings` validators (linked settings validate as a merged whole). |
 | `no_file_stored` | 422 | `POST /api/documents` when every file in the batch was rejected. |
 | `conversation_not_found` | 404 | `POST /api/chat` (pre-stream) and the conversation routes. |
-| `document_not_found` | 404 | `DELETE /api/documents/{doc_id}`. |
+| `document_not_found` | 404 | `DELETE /api/documents/{doc_id}` only — the bulk `POST /api/documents/delete` reports unknown ids in `not_found` rather than failing the batch. |
 | `ingest_already_running` | 409 | `POST /api/ingest` while a run is in flight (one run at a time). |
 | `<service>_unreachable` | 503 | Dependency preflights and per-request store construction: `postgres_unreachable`, `es_unreachable`, `llamacpp_unreachable`, `infinity_unreachable`. |
 | `docs_path_not_writable` | 500 | `POST /api/documents` when `DOCS_PATH` rejects writes (the container-UID gotcha — see the runbook). |

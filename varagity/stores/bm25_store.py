@@ -9,11 +9,12 @@ are contextualized before they reach this store (Phase 5 precedes Phase 6),
 the BM25 index is *contextual* from its first document.
 
 Identity fields are mapped ``"index": false`` but keep doc values, so
-term-level queries against them (``delete_document``'s ``delete_by_query``)
+term-level queries against them (``delete_documents``' ``delete_by_query``)
 still work — just via a slower doc-values scan, which is fine at dev scale.
 """
 
 import logging
+from collections.abc import Sequence
 from types import TracebackType
 from typing import Any
 
@@ -219,7 +220,6 @@ class ElasticsearchBM25:
         self._client.indices.refresh(index=self.index_name)
         return success
 
-    @_es_retry
     def delete_document(self, doc_id: str) -> int:
         """Delete all of a document's chunks (``--reingest`` consistency).
 
@@ -237,9 +237,34 @@ class ElasticsearchBM25:
             elastic_transport.ConnectionError: If Elasticsearch is still
                 unreachable after retries.
         """
+        return self.delete_documents([doc_id])
+
+    @_es_retry
+    def delete_documents(self, doc_ids: Sequence[str]) -> int:
+        """Delete every chunk of several documents in one pass (bulk GC).
+
+        One ``terms`` ``delete_by_query`` rather than a query per document:
+        the whole set costs a single round trip and a single forced index
+        refresh, which is what makes the corpus table's multi-select delete
+        (spec_v2 §4.2) cheap. The retry lives here, so the single-document
+        wrapper inherits it exactly once.
+
+        Args:
+            doc_ids: The documents' stable ids (unknown ids are no-ops; an
+                empty sequence skips the round trip entirely).
+
+        Returns:
+            The number of chunks deleted across all of them.
+
+        Raises:
+            elastic_transport.ConnectionError: If Elasticsearch is still
+                unreachable after retries.
+        """
+        if not doc_ids:
+            return 0
         response = self._client.delete_by_query(
             index=self.index_name,
-            query={"term": {"doc_id": doc_id}},
+            query={"terms": {"doc_id": list(doc_ids)}},
             refresh=True,
         )
         return int(response["deleted"])
