@@ -38,6 +38,7 @@ from varagity.api.schemas import (
     DoneEvent,
     ErrorResponse,
     RetrievalEvent,
+    StatsEvent,
     UsageInfo,
 )
 from varagity.api.streaming import (
@@ -46,9 +47,10 @@ from varagity.api.streaming import (
     done_event,
     error_event,
     retrieval_event,
+    stats_event,
 )
 from varagity.config import get_settings
-from varagity.models.llm import LLMClient
+from varagity.models.llm import GenerationTimings, LLMClient
 from varagity.models.stream import Kind
 from varagity.pipeline import query_stream_flow
 from varagity.pipeline.query_flow import StreamedQueryState
@@ -59,6 +61,17 @@ from varagity.stores.records import RetrievedChunk
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
+
+# Throughput readings below this many decoded tokens are discarded. The
+# model server's counters start at predicted_n=1 / predicted_ms=0.001,
+# which computes to a literal 1,000,000 tok/s — real, and meaningless.
+# The average needs a few tokens before it means anything.
+_STATS_WARMUP_TOKENS = 8
+
+# Floor on the gap between `stats` frames. The server reports timings on
+# every chunk; at ~56 tok/s that is a frame per ~18 ms, which would swamp
+# the deltas the user actually came for. 250 ms reads as live.
+_STATS_MIN_INTERVAL_S = 0.25
 
 
 @dataclass
@@ -191,10 +204,16 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
     """Answer one question as a typed SSE stream (spec_v2 §4.3).
 
     Event order: ``retrieval`` (the provenance payload) → ``reasoning``/
-    ``token`` deltas → ``done`` (ids, full answer, usage + per-stage
-    latency). A failure after the stream opened emits an in-band ``error``
-    event instead. Aborted turns (client disconnect) persist nothing — the
-    turn is persisted *at* ``done``.
+    ``token`` deltas, interleaved with throttled ``stats`` frames while the
+    model server reports throughput → ``done`` (ids, full answer, usage +
+    per-stage latency). A failure after the stream opened emits an in-band
+    ``error`` event instead. Aborted turns (client disconnect) persist
+    nothing — the turn is persisted *at* ``done``.
+
+    ``stats`` is optional in the protocol: it appears only when the model
+    server reports its own decode counters (llama.cpp does; see
+    :class:`~varagity.models.llm.GenerationTimings`), so clients must treat
+    zero ``stats`` frames as normal rather than as a stalled stream.
 
     Args:
         plan: The validated request plan.
@@ -225,6 +244,25 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
     def _on_delta(kind: Kind, text: str) -> None:
         bridge.emit_frame(delta_event(kind, text))
 
+    last_stats_at = 0.0
+
+    def _on_stats(timings: GenerationTimings) -> None:
+        # Called from the flow's worker thread, once per model-server
+        # chunk. Both gates live here rather than in the client: the
+        # transport reports what the server said, the edge decides what is
+        # worth a frame.
+        nonlocal last_stats_at
+        rate = timings.tokens_per_second
+        if rate is None or timings.predicted_n < _STATS_WARMUP_TOKENS:
+            return
+        now = time.monotonic()
+        if now - last_stats_at < _STATS_MIN_INTERVAL_S:
+            return
+        last_stats_at = now
+        bridge.emit_frame(
+            stats_event(StatsEvent(tokens_per_second=rate, completion_tokens=timings.predicted_n))
+        )
+
     def _run_flow() -> StreamedQueryState:
         try:
             return query_stream_flow(
@@ -236,6 +274,7 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
                 on_retrieved=_on_retrieved,
                 on_delta=_on_delta,
                 should_abort=bridge.should_abort,
+                on_stats=_on_stats,
             )
         finally:
             bridge.close()
@@ -282,6 +321,7 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
                     prompt_tokens=usage.get("prompt_tokens"),
                     completion_tokens=usage.get("completion_tokens"),
                     latency_ms=dict(timings),
+                    tokens_per_second=state["tokens_per_second"],
                 ),
             )
         )

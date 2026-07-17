@@ -23,6 +23,7 @@ from varagity.api.deps import (
     get_services_preflight,
 )
 from varagity.api.main import create_app
+from varagity.models.llm import GenerationTimings
 from varagity.stores.conversation_store import ConversationSummary
 from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
@@ -83,12 +84,19 @@ class FakeRetriever:
 class StreamingFakeLLM:
     """Scripted deltas + optional usage; generate() covers auto-titling."""
 
-    def __init__(self, deltas: Sequence[str] | None = None) -> None:
+    def __init__(
+        self,
+        deltas: Sequence[str] | None = None,
+        timings: Sequence[GenerationTimings] | None = None,
+    ) -> None:
         self.deltas = list(
             deltas
             if deltas is not None
             else ["<think>let me see</think>", "The answer", " is 42. [SOURCE]: x.txt"]
         )
+        # One reading reported after each delta, llama.cpp-style (cumulative
+        # counters); empty = a server that reports no timings.
+        self.timings = list(timings or [])
 
     def generate_stream(
         self,
@@ -98,9 +106,13 @@ class StreamingFakeLLM:
         temperature: float | None = None,
         verbose: int | None = None,
         on_usage: Callable[[Any], None] | None = None,
+        on_timings: Callable[[GenerationTimings], None] | None = None,
     ) -> Iterator[str]:
         def gen() -> Iterator[str]:
-            yield from self.deltas
+            for index, delta in enumerate(self.deltas):
+                yield delta
+                if on_timings is not None and index < len(self.timings):
+                    on_timings(self.timings[index])
             if on_usage is not None:
 
                 class _Usage:
@@ -243,6 +255,55 @@ async def test_done_carries_ids_answer_usage_and_latency(
     assert data["usage"]["prompt_tokens"] == 11
     assert data["usage"]["completion_tokens"] == 7
     assert {"retrieval", "generation", "total"} <= set(data["usage"]["latency_ms"])
+    # The default fake reports no timings — the non-llama.cpp shape.
+    assert data["usage"]["tokens_per_second"] is None
+
+
+async def test_no_stats_frames_when_the_server_reports_no_timings(app: FastAPI) -> None:
+    _, _, body = await post_chat(app, {"query": "q"})
+    names = [name for name, _ in parse_sse(body)]
+    assert "stats" not in names
+
+
+async def test_stats_streamed_and_done_carries_the_final_rate(app: FastAPI) -> None:
+    # Cumulative llama.cpp-style readings, all past the warmup gate.
+    app.dependency_overrides[get_llm] = lambda: StreamingFakeLLM(
+        timings=[
+            GenerationTimings(predicted_n=10, predicted_ms=100.0),
+            GenerationTimings(predicted_n=20, predicted_ms=250.0),
+            GenerationTimings(predicted_n=30, predicted_ms=500.0),
+        ]
+    )
+    _, _, body = await post_chat(app, {"query": "q"})
+    events = parse_sse(body)
+    names = [name for name, _ in events]
+
+    stats = [data for name, data in events if name == "stats"]
+    # At least the first qualifying reading becomes a frame; later ones may
+    # be swallowed by the 250 ms throttle (real time, so not pinned here).
+    assert stats
+    assert stats[0] == {"tokens_per_second": 100.0, "completion_tokens": 10}
+    assert names.index("retrieval") < names.index("stats") < names.index("done")
+
+    _, done = events[-1]
+    # The done rate is the *last* reading (30 tok / 500 ms), throttle-exempt.
+    assert done["usage"]["tokens_per_second"] == pytest.approx(60.0)
+
+
+async def test_stats_suppressed_below_the_warmup_gate(app: FastAPI) -> None:
+    # llama.cpp's first readings (tiny predicted_n) compute absurd rates;
+    # the gate keeps them off the wire while done still gets the real total.
+    app.dependency_overrides[get_llm] = lambda: StreamingFakeLLM(
+        timings=[
+            GenerationTimings(predicted_n=1, predicted_ms=0.001),
+            GenerationTimings(predicted_n=3, predicted_ms=60.0),
+        ]
+    )
+    _, _, body = await post_chat(app, {"query": "q"})
+    events = parse_sse(body)
+    assert "stats" not in [name for name, _ in events]
+    _, done = events[-1]
+    assert done["usage"]["tokens_per_second"] == pytest.approx(50.0)
 
 
 async def test_turn_persisted_user_then_assistant(

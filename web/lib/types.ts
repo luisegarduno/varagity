@@ -156,10 +156,16 @@ export interface paths {
          * @description Answer one question as a typed SSE stream (spec_v2 §4.3).
          *
          *     Event order: ``retrieval`` (the provenance payload) → ``reasoning``/
-         *     ``token`` deltas → ``done`` (ids, full answer, usage + per-stage
-         *     latency). A failure after the stream opened emits an in-band ``error``
-         *     event instead. Aborted turns (client disconnect) persist nothing — the
-         *     turn is persisted *at* ``done``.
+         *     ``token`` deltas, interleaved with throttled ``stats`` frames while the
+         *     model server reports throughput → ``done`` (ids, full answer, usage +
+         *     per-stage latency). A failure after the stream opened emits an in-band
+         *     ``error`` event instead. Aborted turns (client disconnect) persist
+         *     nothing — the turn is persisted *at* ``done``.
+         *
+         *     ``stats`` is optional in the protocol: it appears only when the model
+         *     server reports its own decode counters (llama.cpp does; see
+         *     :class:`~varagity.models.llm.GenerationTimings`), so clients must treat
+         *     zero ``stats`` frames as normal rather than as a stalled stream.
          *
          *     Args:
          *         plan: The validated request plan.
@@ -1251,6 +1257,30 @@ export interface components {
             trace: components["schemas"]["RetrievalTrace"] | null;
         };
         /**
+         * StatsEvent
+         * @description Payload of the SSE ``stats`` event — live decode throughput.
+         *
+         *     Emitted while generation runs, interleaved with the ``reasoning``/
+         *     ``token`` deltas and throttled server-side (the model server reports
+         *     these counters on *every* chunk; a frame per token would be noise).
+         *     Purely additive to the protocol: the event only exists when the model
+         *     server reports its own timings — llama.cpp does, so the readout is
+         *     llama.cpp-only by construction rather than by configuration.
+         *
+         *     Attributes:
+         *         tokens_per_second: Decode throughput so far, averaged over the
+         *             whole generation (cumulative, not instantaneous — it settles
+         *             rather than jitters).
+         *         completion_tokens: Tokens decoded so far, the denominator behind
+         *             that average.
+         */
+        StatsEvent: {
+            /** Tokens Per Second */
+            tokens_per_second: number;
+            /** Completion Tokens */
+            completion_tokens: number;
+        };
+        /**
          * UsageInfo
          * @description Token usage and per-stage latency reported by the ``done`` event.
          *
@@ -1261,6 +1291,10 @@ export interface components {
          *             unreported).
          *         latency_ms: Wall-clock milliseconds per stage: ``retrieval``,
          *             ``generation``, ``total``.
+         *         tokens_per_second: Final decode throughput as the model server
+         *             measured it, or ``None`` when it reports no timings. Distinct
+         *             from ``completion_tokens / latency_ms["generation"]``, which
+         *             would smear queueing and prompt eval into the rate.
          */
         UsageInfo: {
             /**
@@ -1277,6 +1311,11 @@ export interface components {
             latency_ms: {
                 [key: string]: number;
             };
+            /**
+             * Tokens Per Second
+             * @default null
+             */
+            tokens_per_second: number | null;
         };
     };
     responses: never;

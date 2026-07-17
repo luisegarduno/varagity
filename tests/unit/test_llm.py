@@ -17,7 +17,12 @@ from openai.types import CompletionUsage
 from tenacity import wait_none
 
 from varagity.config import get_settings
-from varagity.models.llm import _CTX_HEADROOM_TOKENS, LLMClient, clean_response
+from varagity.models.llm import (
+    _CTX_HEADROOM_TOKENS,
+    GenerationTimings,
+    LLMClient,
+    clean_response,
+)
 from varagity.tokens import count_tokens
 
 BASE_URL = "http://fake-llamacpp/v1"
@@ -61,6 +66,7 @@ def _stream_chunk(
     reasoning_content: str | None = None,
     usage: dict[str, int] | None = None,
     finish: str | None = None,
+    timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     delta: dict[str, Any] = {}
     if content is not None:
@@ -78,6 +84,9 @@ def _stream_chunk(
     }
     if usage is not None:
         chunk["usage"] = {"total_tokens": sum(usage.values()), **usage}
+    if timings is not None:
+        # llama.cpp extension: a sibling of `choices`, not nested in `usage`.
+        chunk["timings"] = timings
     return chunk
 
 
@@ -297,6 +306,7 @@ class TestGenerateStream:
         sent = json.loads(route.calls[0].request.content)
         assert sent["stream"] is True
         assert sent["stream_options"] == {"include_usage": True}
+        assert sent["timings_per_token"] is True
         assert sent["model"] == "test-model.gguf"
 
     @respx.mock
@@ -356,6 +366,73 @@ class TestGenerateStream:
         assert (seen[0].prompt_tokens, seen[0].completion_tokens) == (11, 7)
 
     @respx.mock
+    def test_timings_callback_fires_per_carrying_chunk(self) -> None:
+        respx.post(ENDPOINT).mock(
+            return_value=_stream_response(
+                [
+                    _stream_chunk(content="a"),  # llama.cpp's first chunk has none
+                    _stream_chunk(
+                        content="b",
+                        timings={"predicted_n": 2, "predicted_ms": 40.0, "cache_n": 81},
+                    ),
+                    _stream_chunk(
+                        content="c",
+                        timings={"predicted_n": 3, "predicted_ms": 60.0},
+                    ),
+                ]
+            )
+        )
+        seen: list[GenerationTimings] = []
+        deltas = list(
+            _client().generate_stream(
+                [{"role": "user", "content": "q"}], verbose=0, on_timings=seen.append
+            )
+        )
+        assert deltas == ["a", "b", "c"]
+        assert seen == [
+            GenerationTimings(predicted_n=2, predicted_ms=40.0),
+            GenerationTimings(predicted_n=3, predicted_ms=60.0),
+        ]
+
+    @respx.mock
+    def test_timings_never_fires_when_the_server_reports_none(self) -> None:
+        # The non-llama.cpp shape: standard chunks, no `timings` anywhere.
+        respx.post(ENDPOINT).mock(
+            return_value=_stream_response(
+                [
+                    _stream_chunk(content="ok"),
+                    _stream_chunk(usage={"prompt_tokens": 1, "completion_tokens": 1}),
+                ]
+            )
+        )
+        seen: list[GenerationTimings] = []
+        list(
+            _client().generate_stream(
+                [{"role": "user", "content": "q"}], verbose=0, on_timings=seen.append
+            )
+        )
+        assert seen == []
+
+    @respx.mock
+    def test_malformed_timings_are_skipped_not_fatal(self) -> None:
+        respx.post(ENDPOINT).mock(
+            return_value=_stream_response(
+                [
+                    _stream_chunk(content="a", timings={"predicted_n": "not-a-count"}),
+                    _stream_chunk(content="b", timings={"predicted_ms": 5.0}),
+                ]
+            )
+        )
+        seen: list[GenerationTimings] = []
+        deltas = list(
+            _client().generate_stream(
+                [{"role": "user", "content": "q"}], verbose=0, on_timings=seen.append
+            )
+        )
+        assert deltas == ["a", "b"]
+        assert seen == []
+
+    @respx.mock
     def test_establishment_retries_on_5xx_then_streams(self, no_retry_wait: None) -> None:
         route = respx.post(ENDPOINT)
         route.side_effect = [
@@ -393,3 +470,21 @@ class TestGenerateStream:
         with pytest.raises(ValueError, match="verbose"):
             _client().generate_stream([{"role": "user", "content": "q"}], verbose=9)
         assert route.call_count == 0
+
+
+class TestGenerationTimings:
+    def test_rate_is_tokens_over_seconds(self) -> None:
+        timings = GenerationTimings(predicted_n=24, predicted_ms=428.028)
+        assert timings.tokens_per_second == pytest.approx(56.071, abs=0.001)
+
+    def test_first_chunk_counters_yield_none_not_a_million(self) -> None:
+        # llama.cpp's literal first reading: predicted_ms=0.001 computes to
+        # 1,000,000 tok/s. predicted_n < 1 is the other degenerate shape.
+        assert GenerationTimings(predicted_n=0, predicted_ms=0.0).tokens_per_second is None
+        assert GenerationTimings(predicted_n=0, predicted_ms=10.0).tokens_per_second is None
+        assert GenerationTimings(predicted_n=5, predicted_ms=0.0).tokens_per_second is None
+
+    def test_single_token_reading_is_still_a_rate(self) -> None:
+        # n=1 with real elapsed time is valid arithmetic — the display-side
+        # warmup gate, not this property, decides whether to show it.
+        assert GenerationTimings(predicted_n=1, predicted_ms=20.0).tokens_per_second == 50.0

@@ -14,7 +14,12 @@ const done: DoneEvent = {
   message_id: "m1",
   conversation_id: "c1",
   answer: "The full authoritative answer.",
-  usage: { prompt_tokens: 10, completion_tokens: 5, latency_ms: { total: 42 } },
+  usage: {
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    latency_ms: { total: 42 },
+    tokens_per_second: 56.1,
+  },
 };
 
 function play(events: ChatEvent[], start?: StreamingTurn): StreamingTurn {
@@ -28,6 +33,7 @@ describe("reduceChatEvent", () => {
       reasoning: "",
       answer: "",
       retrieval: null,
+      tokensPerSecond: null,
       done: null,
       error: null,
       stopped: false,
@@ -66,6 +72,31 @@ describe("reduceChatEvent", () => {
     ]);
     expect(turn.done).toEqual(done);
     expect(turn.answer).toBe("The full authoritative answer.");
+  });
+
+  it("tracks the newest stats frame's rate (cumulative — latest wins)", () => {
+    const turn = play([
+      { type: "stats", data: { tokens_per_second: 61.2, completion_tokens: 10 } },
+      { type: "stats", data: { tokens_per_second: 55.8, completion_tokens: 40 } },
+    ]);
+    expect(turn.tokensPerSecond).toBe(55.8);
+  });
+
+  it("on done, the final rate supersedes the last throttled stats frame", () => {
+    const turn = play([
+      { type: "stats", data: { tokens_per_second: 61.2, completion_tokens: 10 } },
+      { type: "done", data: done },
+    ]);
+    expect(turn.tokensPerSecond).toBe(56.1);
+  });
+
+  it("on done without a rate, clears any stale live value", () => {
+    const noRate = { ...done, usage: { ...done.usage, tokens_per_second: null } };
+    const turn = play([
+      { type: "stats", data: { tokens_per_second: 61.2, completion_tokens: 10 } },
+      { type: "done", data: noRate },
+    ]);
+    expect(turn.tokensPerSecond).toBeNull();
   });
 
   it("captures the in-band error event", () => {

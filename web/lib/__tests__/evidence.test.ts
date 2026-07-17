@@ -10,8 +10,10 @@ import {
   assistantMessageFromTurn,
   evidenceFromMessage,
   evidenceFromRetrieval,
+  formatTokensPerSecond,
   latencyRecord,
   LIVE_EVIDENCE_KEY,
+  usageFromDone,
 } from "@/lib/evidence";
 
 const chunkA: RetrievedChunk = {
@@ -74,6 +76,7 @@ const done: DoneEvent = {
     prompt_tokens: 100,
     completion_tokens: 20,
     latency_ms: { retrieval: 690, generation: 8441, total: 9200 },
+    tokens_per_second: 2.4,
   },
 };
 
@@ -208,5 +211,49 @@ describe("latencyRecord", () => {
     });
     expect(latencyRecord(null)).toBeNull();
     expect(latencyRecord({})).toBeNull();
+  });
+});
+
+describe("usageFromDone", () => {
+  it("normalizes the done event's usage block", () => {
+    expect(usageFromDone(done.usage)).toEqual({
+      promptTokens: 100,
+      completionTokens: 20,
+      tokensPerSecond: 2.4,
+    });
+  });
+
+  it("collapses an all-null report to null (nothing worth a footer line)", () => {
+    expect(
+      usageFromDone({
+        prompt_tokens: null,
+        completion_tokens: null,
+        latency_ms: {},
+        tokens_per_second: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("threads into both evidence builders", () => {
+    const usage = usageFromDone(done.usage);
+    const live = evidenceFromRetrieval(retrieval, { usage });
+    expect(live.usage).toEqual(usage);
+
+    const message = assistantMessageFromTurn(done, retrieval, "");
+    expect(evidenceFromMessage(message, null, usage)?.usage).toEqual(usage);
+    // Without the session-recall arg (a pre-reload turn): no usage.
+    expect(evidenceFromMessage(message, null)?.usage).toBeNull();
+  });
+});
+
+describe("formatTokensPerSecond", () => {
+  it("rounds to whole tokens at real decode speeds", () => {
+    expect(formatTokensPerSecond(56.07)).toBe("56 tok/s");
+    expect(formatTokensPerSecond(199.5)).toBe("200 tok/s");
+  });
+
+  it("keeps one decimal below 10 where rounding would hide the number", () => {
+    expect(formatTokensPerSecond(2.44)).toBe("2.4 tok/s");
+    expect(formatTokensPerSecond(9.96)).toBe("10.0 tok/s");
   });
 });

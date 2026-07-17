@@ -16,7 +16,7 @@ from openai.types import CompletionUsage
 
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
-from varagity.models.llm import LLMClient, clean_response
+from varagity.models.llm import GenerationTimings, LLMClient, clean_response
 from varagity.models.registry import get_model
 from varagity.models.stream import Kind, ThinkStreamSplitter
 from varagity.retrieval.base import Retriever, get_retriever
@@ -137,12 +137,18 @@ class StreamedAnswer(TypedDict):
             (client disconnect); ``answer`` then holds the partial text.
         usage: Server-reported token counts (``prompt_tokens``,
             ``completion_tokens``), or ``None`` when the server sent none.
+        tokens_per_second: Final decode throughput reported by llama.cpp,
+            or ``None`` on any server that doesn't report ``timings``
+            (see :class:`~varagity.models.llm.GenerationTimings`). Kept
+            out of ``usage`` deliberately: that dict is token *counts*,
+            and this is a rate.
     """
 
     answer: str
     reasoning: str
     aborted: bool
     usage: dict[str, int] | None
+    tokens_per_second: float | None
 
 
 def generate_answer_stream(
@@ -153,6 +159,7 @@ def generate_answer_stream(
     llm: LLMClient | None = None,
     formatted_context: str | None = None,
     should_abort: Callable[[], bool] | None = None,
+    on_stats: Callable[[GenerationTimings], None] | None = None,
     verbose: int | None = None,
 ) -> StreamedAnswer:
     """Generate a grounded answer, streaming deltas to a callback.
@@ -174,6 +181,10 @@ def generate_answer_stream(
         should_abort: Polled between deltas; returning ``True`` stops
             generation (the underlying HTTP stream closes, which frees the
             model server) and marks the result ``aborted``.
+        on_stats: Called with llama.cpp's cumulative decode counters as
+            they arrive — once per chunk, so a caller rendering them is
+            expected to throttle. Silent on servers that report no
+            ``timings``.
         verbose: Console verbosity (0–2); defaults to
             ``settings.DEFAULT_VERBOSE``.
 
@@ -196,6 +207,9 @@ def generate_answer_stream(
     reasoning_parts: list[str] = []
     splitter = ThinkStreamSplitter()
     aborted = False
+    # Only the newest reading is worth keeping: the counters are cumulative,
+    # so the last one is both the live value and the final total.
+    last_timings: GenerationTimings | None = None
 
     def _dispatch(fragments: list[tuple[Kind, str]]) -> None:
         for kind, text in fragments:
@@ -203,10 +217,17 @@ def generate_answer_stream(
                 reasoning_parts.append(text)
             on_delta(kind, text)
 
+    def _record_timings(timings: GenerationTimings) -> None:
+        nonlocal last_timings
+        last_timings = timings
+        if on_stats is not None:
+            on_stats(timings)
+
     deltas = client.generate_stream(
         [{"role": "user", "content": prompt}],
         verbose=verbose,
         on_usage=usage_holder.append,
+        on_timings=_record_timings,
     )
     try:
         for delta in deltas:
@@ -233,6 +254,7 @@ def generate_answer_stream(
                 "completion_tokens": usage.completion_tokens,
             }
         ),
+        tokens_per_second=(None if last_timings is None else last_timings.tokens_per_second),
     )
 
 

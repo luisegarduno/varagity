@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator, Sequence
 import pytest
 
 from varagity.generation.answer import ANSWER_PROMPT, generate_answer_stream
-from varagity.models.llm import clean_response
+from varagity.models.llm import GenerationTimings, clean_response
 from varagity.models.stream import Kind
 from varagity.stores.records import RetrievedChunk
 
@@ -31,9 +31,17 @@ def make_chunk(index: int = 0, content: str = "Planted fact.") -> RetrievedChunk
 class StreamingFakeLLM:
     """Yields scripted deltas; records prompts and close() on the iterator."""
 
-    def __init__(self, deltas: Sequence[str], usage: dict[str, int] | None = None) -> None:
+    def __init__(
+        self,
+        deltas: Sequence[str],
+        usage: dict[str, int] | None = None,
+        timings: Sequence[GenerationTimings] | None = None,
+    ) -> None:
         self.deltas = list(deltas)
         self.usage = usage
+        # One reading reported after each delta, llama.cpp-style (cumulative
+        # counters); empty = a server that reports no timings.
+        self.timings = list(timings or [])
         self.prompts: list[str] = []
         self.closed = False
         self.yielded: list[str] = []
@@ -46,14 +54,17 @@ class StreamingFakeLLM:
         temperature: float | None = None,
         verbose: int | None = None,
         on_usage: Callable[[object], None] | None = None,
+        on_timings: Callable[[GenerationTimings], None] | None = None,
     ) -> Iterator[str]:
         self.prompts.append(messages[0]["content"])
 
         def gen() -> Iterator[str]:
             try:
-                for delta in self.deltas:
+                for index, delta in enumerate(self.deltas):
                     self.yielded.append(delta)
                     yield delta
+                    if on_timings is not None and index < len(self.timings):
+                        on_timings(self.timings[index])
                 if self.usage is not None and on_usage is not None:
 
                     class _Usage:
@@ -172,6 +183,42 @@ def test_usage_none_when_unreported() -> None:
     llm = StreamingFakeLLM(["x"])
     _, result = collect(llm)
     assert result["usage"] is None
+
+
+def test_final_rate_is_the_last_timings_reading() -> None:
+    llm = StreamingFakeLLM(
+        ["a", "b"],
+        timings=[
+            GenerationTimings(predicted_n=10, predicted_ms=100.0),
+            GenerationTimings(predicted_n=24, predicted_ms=600.0),
+        ],
+    )
+    _, result = collect(llm)
+    assert result["tokens_per_second"] == pytest.approx(40.0)
+
+
+def test_on_stats_forwards_every_reading_in_order() -> None:
+    readings = [
+        GenerationTimings(predicted_n=10, predicted_ms=100.0),
+        GenerationTimings(predicted_n=20, predicted_ms=300.0),
+    ]
+    llm = StreamingFakeLLM(["a", "b"], timings=readings)
+    seen: list[GenerationTimings] = []
+    generate_answer_stream(
+        "q",
+        [make_chunk()],
+        on_delta=lambda kind, text: None,
+        llm=llm,
+        on_stats=seen.append,
+        verbose=0,
+    )
+    assert seen == readings
+
+
+def test_rate_none_when_the_server_reports_no_timings() -> None:
+    llm = StreamingFakeLLM(["x"])
+    _, result = collect(llm)
+    assert result["tokens_per_second"] is None
 
 
 def test_unclosed_think_yields_empty_answer() -> None:

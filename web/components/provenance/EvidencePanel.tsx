@@ -13,7 +13,12 @@ import {
   DrawerTitle,
 } from "@/components/ui/drawer";
 import { useMountEffect } from "@/hooks/use-mount-effect";
-import { LIVE_EVIDENCE_KEY, type Evidence } from "@/lib/evidence";
+import {
+  formatTokensPerSecond,
+  LIVE_EVIDENCE_KEY,
+  type Evidence,
+  type EvidenceUsage,
+} from "@/lib/evidence";
 import { cn } from "@/lib/utils";
 
 /** A citation chip's scroll request: bump `nonce` to re-trigger. */
@@ -68,6 +73,49 @@ function latencyLine(latencyMs: Record<string, number>): string {
   return stages
     .map((stage) => `${stage} ${formatSeconds(latencyMs[stage])}`)
     .join(" · ");
+}
+
+/**
+ * The token-accounting line: counts plus the model server's own decode
+ * rate. Segments drop out individually when unreported (only llama.cpp
+ * reports a rate), and the whole line disappears for turns answered
+ * before this page load — usage is session-only, never persisted.
+ */
+function usageLine(usage: EvidenceUsage): string | null {
+  const segments: string[] = [];
+  if (usage.promptTokens !== null) segments.push(`${usage.promptTokens} prompt`);
+  if (usage.completionTokens !== null)
+    segments.push(`${usage.completionTokens} completion`);
+  if (usage.tokensPerSecond !== null)
+    segments.push(formatTokensPerSecond(usage.tokensPerSecond));
+  return segments.length > 0 ? segments.join(" · ") : null;
+}
+
+/** The footer stat lines both hosts share: per-stage latency, then usage. */
+function FooterStats({ evidence }: { evidence: Evidence }) {
+  const lines = [
+    evidence.latencyMs && latencyLine(evidence.latencyMs),
+    evidence.usage && usageLine(evidence.usage),
+  ].filter((line): line is string => Boolean(line));
+  return (
+    <>
+      {lines.map((line) => (
+        <p
+          key={line}
+          className="font-mono text-xs text-muted-foreground tabular-nums"
+        >
+          {line}
+        </p>
+      ))}
+    </>
+  );
+}
+
+/** Whether {@link FooterStats} would render anything for this evidence. */
+function hasFooterStats(evidence: Evidence | null): evidence is Evidence {
+  return Boolean(
+    evidence && (evidence.latencyMs || (evidence.usage && usageLine(evidence.usage))),
+  );
 }
 
 /** The answer-level meta line: method badge, top_k → reranked-to, count. */
@@ -209,11 +257,9 @@ export function EvidencePanel({
         className="min-h-0 flex-1 overflow-y-auto p-3 scroll-fade-y"
       />
 
-      {evidence?.latencyMs && (
-        <footer className="border-t border-border px-4 py-2.5">
-          <p className="font-mono text-xs text-muted-foreground tabular-nums">
-            {latencyLine(evidence.latencyMs)}
-          </p>
+      {hasFooterStats(evidence) && (
+        <footer className="space-y-0.5 border-t border-border px-4 py-2.5">
+          <FooterStats evidence={evidence} />
         </footer>
       )}
     </aside>
@@ -247,10 +293,10 @@ export function EvidenceSheet({
           {evidence && <EvidenceMeta evidence={evidence} />}
         </DrawerHeader>
         <EvidenceCardList evidence={evidence} scrollTarget={scrollTarget} />
-        {evidence?.latencyMs && (
-          <p className="border-t border-border pt-3 font-mono text-xs text-muted-foreground tabular-nums">
-            {latencyLine(evidence.latencyMs)}
-          </p>
+        {hasFooterStats(evidence) && (
+          <div className="space-y-0.5 border-t border-border pt-3">
+            <FooterStats evidence={evidence} />
+          </div>
         )}
       </DrawerContent>
     </Drawer>

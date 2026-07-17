@@ -11,6 +11,7 @@ on the streaming path (spec_v2 §4.3), classify them delta-by-delta with
 import logging
 import re
 from collections.abc import Callable, Generator, Sequence
+from dataclasses import dataclass
 
 import openai
 from openai import Stream
@@ -34,6 +35,71 @@ logger = logging.getLogger(__name__)
 # the chat template's scaffolding tokens plus the cl100k approximation's
 # drift vs the served model's own tokenizer (~2% measured; plan decision #8).
 _CTX_HEADROOM_TOKENS = 512
+
+
+@dataclass(frozen=True)
+class GenerationTimings:
+    """One reading of llama.cpp's ``timings`` counters (spec_v3 §7).
+
+    llama.cpp extends the OpenAI chunk with a top-level ``timings`` object —
+    a sibling of ``choices``, *not* nested inside ``usage``. It is the
+    server's own cumulative decode accounting, which is why the throughput
+    figure here is the model's and not a guess from chunk arrival times
+    (browser scheduling and network jitter would both taint that).
+
+    The field is the **capability probe**: only llama.cpp emits it, so an
+    absent ``timings`` means "this server can't report throughput" and the
+    readout simply never appears. No version sniffing, no config flag.
+
+    Attributes:
+        predicted_n: Tokens decoded so far this generation (cumulative).
+        predicted_ms: Milliseconds spent decoding them (cumulative).
+    """
+
+    predicted_n: int
+    predicted_ms: float
+
+    @property
+    def tokens_per_second(self) -> float | None:
+        """Decode throughput, or ``None`` when the counters can't support one.
+
+        Computed from the raw counters rather than read from the server's
+        own ``predicted_per_second`` — the same arithmetic llama.cpp's web
+        UI does, and it keeps the parse tolerant of builds that omit the
+        derived field.
+
+        Returns:
+            Tokens per second, or ``None`` if nothing has been decoded yet
+            (``predicted_ms`` is 0 on the first chunk, which would divide
+            by zero).
+        """
+        if self.predicted_n < 1 or self.predicted_ms <= 0:
+            return None
+        return self.predicted_n / self.predicted_ms * 1000.0
+
+
+def _parse_timings(chunk: ChatCompletionChunk) -> GenerationTimings | None:
+    """Read llama.cpp's ``timings`` off a chunk, if it carried one.
+
+    Defensive by design: this is a non-standard extension read through
+    pydantic's ``extra="allow"`` escape hatch, so every field is treated as
+    untrusted shape rather than assumed present.
+
+    Args:
+        chunk: One streamed SDK chunk.
+
+    Returns:
+        The parsed counters, or ``None`` when the server sent no usable
+        ``timings`` (any non-llama.cpp backend, every time).
+    """
+    raw = getattr(chunk, "timings", None)
+    if not isinstance(raw, dict):
+        return None
+    predicted_n = raw.get("predicted_n")
+    predicted_ms = raw.get("predicted_ms")
+    if not isinstance(predicted_n, int) or not isinstance(predicted_ms, int | float):
+        return None
+    return GenerationTimings(predicted_n=predicted_n, predicted_ms=float(predicted_ms))
 
 
 def _fit_max_tokens(messages: Sequence[ChatCompletionMessageParam], max_tokens: int) -> int:
@@ -225,6 +291,7 @@ class LLMClient:
         temperature: float | None = None,
         verbose: int | None = None,
         on_usage: Callable[[CompletionUsage], None] | None = None,
+        on_timings: Callable[[GenerationTimings], None] | None = None,
     ) -> Generator[str, None, None]:
         """Generate one chat completion, streamed as raw text deltas.
 
@@ -257,6 +324,12 @@ class LLMClient:
                 final stream chunk carries it (requested via
                 ``stream_options.include_usage``; servers that don't report
                 usage simply never trigger it).
+            on_timings: Called with llama.cpp's cumulative decode counters
+                as each chunk carrying them arrives — many times per
+                generation, so callers that surface this are expected to
+                throttle. Never fires on a server that doesn't emit
+                ``timings``, which is what keeps the throughput readout
+                llama.cpp-only (see :class:`GenerationTimings`).
 
         Returns:
             A generator of raw text deltas, in generation order —
@@ -278,7 +351,7 @@ class LLMClient:
             ),
             temperature=self.temperature if temperature is None else temperature,
         )
-        return _iter_stream_deltas(stream, on_usage)
+        return _iter_stream_deltas(stream, on_usage, on_timings)
 
     @retry(
         retry=retry_if_exception_type(_RETRYABLE_ERRORS),
@@ -311,6 +384,12 @@ class LLMClient:
             temperature=temperature,
             stream=True,
             stream_options={"include_usage": True},
+            # llama.cpp extension: put its `timings` counters on *every*
+            # chunk, not just the last one — the live throughput readout.
+            # Servers that don't know the field ignore it; the final chunk
+            # carries `timings` regardless, so a backend that rejected it
+            # outright would still lose only the live half.
+            extra_body={"timings_per_token": True},
         )
 
     @retry(
@@ -349,6 +428,7 @@ class LLMClient:
 def _iter_stream_deltas(
     stream: Stream[ChatCompletionChunk],
     on_usage: Callable[[CompletionUsage], None] | None,
+    on_timings: Callable[[GenerationTimings], None] | None = None,
 ) -> Generator[str, None, None]:
     """Yield text deltas from an established SDK stream, closing it on exit.
 
@@ -360,6 +440,9 @@ def _iter_stream_deltas(
     Args:
         stream: The established streaming response.
         on_usage: Optional callback for the final chunk's token usage.
+        on_timings: Optional callback for llama.cpp's decode counters,
+            fired per chunk that carries them (see
+            :meth:`LLMClient.generate_stream`).
 
     Yields:
         Raw text deltas in generation order.
@@ -369,6 +452,8 @@ def _iter_stream_deltas(
         for chunk in stream:
             if chunk.usage is not None and on_usage is not None:
                 on_usage(chunk.usage)
+            if on_timings is not None and (timings := _parse_timings(chunk)) is not None:
+                on_timings(timings)
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta

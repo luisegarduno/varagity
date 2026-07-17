@@ -28,9 +28,11 @@ import {
 import {
   evidenceFromMessage,
   evidenceFromRetrieval,
+  usageFromDone,
   LIVE_EVIDENCE_KEY,
   type Evidence,
 } from "@/lib/evidence";
+import { sessionUsage } from "@/lib/session-usage";
 import { onToggleEvidence } from "@/lib/ui-bus";
 import { cn } from "@/lib/utils";
 
@@ -132,7 +134,13 @@ export function Conversation({ conversationId }: { conversationId: string }) {
         lastQuery = message.content;
         continue;
       }
-      const evidence = evidenceFromMessage(message, lastQuery);
+      const evidence = evidenceFromMessage(
+        message,
+        lastQuery,
+        // Session recall only — usage is never persisted, so turns from
+        // before this page load simply show no token line.
+        sessionUsage(message.message_id),
+      );
       if (evidence) map.set(message.message_id, evidence);
     }
     return map;
@@ -143,6 +151,7 @@ export function Conversation({ conversationId }: { conversationId: string }) {
     return evidenceFromRetrieval(turn.retrieval, {
       query: turn.query,
       latencyMs: turn.done?.usage.latency_ms ?? null,
+      usage: turn.done ? usageFromDone(turn.done.usage) : null,
     });
   }, [turn]);
 

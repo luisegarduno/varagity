@@ -41,6 +41,24 @@ export interface EvidenceChunk {
   trace: RetrievalTrace | null;
 }
 
+/**
+ * A completed turn's token accounting, session-only by design: it rides
+ * the `done` event and is never persisted, so history reloaded from the
+ * server shows latency but no counts (see `lib/session-usage.ts`).
+ */
+export interface EvidenceUsage {
+  /** Server-reported prompt tokens (`null` when unreported). */
+  promptTokens: number | null;
+  /** Server-reported completion tokens (`null` when unreported). */
+  completionTokens: number | null;
+  /**
+   * Final decode throughput as the model server measured it. `null` on
+   * servers that report no timings — only llama.cpp does, which is what
+   * scopes the tok/s readout to llama.cpp-hosted models.
+   */
+  tokensPerSecond: number | null;
+}
+
 /** One answer's full evidence: the chunks plus the answer-level meta. */
 export interface Evidence {
   /** Which answer this belongs to: a persisted `message_id`, or `"live"`. */
@@ -57,6 +75,8 @@ export interface Evidence {
   rerankedTo: number | null;
   /** Wall-clock per-stage timings (`retrieval` / `generation` / `total`). */
   latencyMs: Record<string, number> | null;
+  /** Token counts + decode rate (this session's turns only; else `null`). */
+  usage: EvidenceUsage | null;
 }
 
 /** The `"live"` evidence key of the in-flight streaming turn. */
@@ -81,6 +101,30 @@ export function latencyRecord(
     if (parsed !== null) timings[stage] = parsed;
   }
   return Object.keys(timings).length > 0 ? timings : null;
+}
+
+/**
+ * Normalize a `done` event's usage block, or `null` when the model server
+ * reported neither counts nor timings (nothing worth a footer line).
+ */
+export function usageFromDone(usage: DoneEvent["usage"]): EvidenceUsage | null {
+  const normalized: EvidenceUsage = {
+    promptTokens: usage.prompt_tokens ?? null,
+    completionTokens: usage.completion_tokens ?? null,
+    tokensPerSecond: usage.tokens_per_second ?? null,
+  };
+  return Object.values(normalized).some((value) => value !== null)
+    ? normalized
+    : null;
+}
+
+/**
+ * Display form of a decode rate: whole tokens/second, one decimal only
+ * below 10 where rounding would hide most of the number.
+ */
+export function formatTokensPerSecond(rate: number): string {
+  const figure = rate >= 10 ? Math.round(rate).toString() : rate.toFixed(1);
+  return `${figure} tok/s`;
 }
 
 /** A loosely-typed persisted snapshot's serialized retrieval trace. */
@@ -118,6 +162,7 @@ export function evidenceFromRetrieval(
     key?: string;
     query?: string | null;
     latencyMs?: Record<string, number> | null;
+    usage?: EvidenceUsage | null;
   } = {},
 ): Evidence {
   return {
@@ -127,6 +172,7 @@ export function evidenceFromRetrieval(
     topK: event.top_k,
     rerankedTo: event.reranked_to,
     latencyMs: options.latencyMs ?? null,
+    usage: options.usage ?? null,
     chunks: event.chunks.map((chunk, index) => ({
       key: chunk.chunk_id,
       rank: index + 1,
@@ -149,10 +195,14 @@ export function evidenceFromRetrieval(
  * Returns `null` for user turns and for assistant turns with no stored
  * evidence (nothing for the panel to show). `top_k`/`reranked_to` are not
  * persisted — the trace's `rerank_delta` still marks reranked answers.
+ * Token usage is not persisted either: `usage` is the caller's
+ * session-recall lookup (`lib/session-usage.ts`), `null` for turns
+ * answered before this page load.
  */
 export function evidenceFromMessage(
   message: ChatMessage,
   query: string | null,
+  usage: EvidenceUsage | null = null,
 ): Evidence | null {
   if (message.role !== "assistant" || message.sources.length === 0) {
     return null;
@@ -164,6 +214,7 @@ export function evidenceFromMessage(
     topK: null,
     rerankedTo: null,
     latencyMs: latencyRecord(message.latency_ms),
+    usage,
     chunks: message.sources.map((row) => {
       const snapshot = row.trace;
       return {

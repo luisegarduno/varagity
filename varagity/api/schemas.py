@@ -110,6 +110,28 @@ class DeltaEvent(BaseModel):
     delta: str
 
 
+class StatsEvent(BaseModel):
+    """Payload of the SSE ``stats`` event — live decode throughput.
+
+    Emitted while generation runs, interleaved with the ``reasoning``/
+    ``token`` deltas and throttled server-side (the model server reports
+    these counters on *every* chunk; a frame per token would be noise).
+    Purely additive to the protocol: the event only exists when the model
+    server reports its own timings — llama.cpp does, so the readout is
+    llama.cpp-only by construction rather than by configuration.
+
+    Attributes:
+        tokens_per_second: Decode throughput so far, averaged over the
+            whole generation (cumulative, not instantaneous — it settles
+            rather than jitters).
+        completion_tokens: Tokens decoded so far, the denominator behind
+            that average.
+    """
+
+    tokens_per_second: float
+    completion_tokens: int
+
+
 class UsageInfo(BaseModel):
     """Token usage and per-stage latency reported by the ``done`` event.
 
@@ -120,11 +142,16 @@ class UsageInfo(BaseModel):
             unreported).
         latency_ms: Wall-clock milliseconds per stage: ``retrieval``,
             ``generation``, ``total``.
+        tokens_per_second: Final decode throughput as the model server
+            measured it, or ``None`` when it reports no timings. Distinct
+            from ``completion_tokens / latency_ms["generation"]``, which
+            would smear queueing and prompt eval into the rate.
     """
 
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     latency_ms: dict[str, int]
+    tokens_per_second: float | None = None
 
 
 class DoneEvent(BaseModel):

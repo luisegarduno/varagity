@@ -3,9 +3,10 @@
 Two concerns live here:
 
 * **Typed framing** — one constructor per event in the chat protocol
-  (``retrieval``, ``reasoning``, ``token``, ``done``, ``error``), each
-  pairing the event name with its :mod:`varagity.api.schemas` payload, so
-  routes can't emit a misnamed or mistyped frame.
+  (``retrieval``, ``reasoning``, ``token``, ``stats``, ``done``,
+  ``error``), each pairing the event name with its
+  :mod:`varagity.api.schemas` payload, so routes can't emit a misnamed or
+  mistyped frame.
 * **The bridge** — the query pipeline is synchronous and runs in a worker
   thread (spec_v2 §4.1: async at the edge, sync flows underneath), while
   the SSE response is an async generator on the event loop.
@@ -27,6 +28,7 @@ from varagity.api.schemas import (
     DoneEvent,
     ErrorEvent,
     RetrievalEvent,
+    StatsEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 EVENT_RETRIEVAL = "retrieval"
 EVENT_REASONING = "reasoning"
 EVENT_TOKEN = "token"
+EVENT_STATS = "stats"
 EVENT_DONE = "done"
 EVENT_ERROR = "error"
 
@@ -63,6 +66,18 @@ def delta_event(kind: str, text: str) -> ServerSentEvent:
     """
     event = EVENT_REASONING if kind == "reasoning" else EVENT_TOKEN
     return ServerSentEvent(event=event, data=DeltaEvent(delta=text))
+
+
+def stats_event(payload: StatsEvent) -> ServerSentEvent:
+    """Frame one live-throughput reading as the ``stats`` event.
+
+    Args:
+        payload: The decode throughput so far and its token count.
+
+    Returns:
+        The framed event.
+    """
+    return ServerSentEvent(event=EVENT_STATS, data=payload)
 
 
 def done_event(payload: DoneEvent) -> ServerSentEvent:

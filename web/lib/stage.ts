@@ -10,6 +10,7 @@
  * all comes from the settings catalog (the caller's `rerankActive` guess);
  * once it lands, `reranked_to` is the truth and overrides the guess.
  */
+import { formatTokensPerSecond } from "@/lib/evidence";
 
 /** The slice of a `StreamingTurn` the stage model reads. */
 export interface StageTurn {
@@ -19,6 +20,11 @@ export interface StageTurn {
   answer: string;
   /** The `retrieval` event (post-rerank), `null` before it lands. */
   retrieval: { top_k: number; reranked_to: number | null } | null;
+  /**
+   * Live decode throughput from the newest `stats` frame (`null` until
+   * one arrives — and forever, on model servers that report no timings).
+   */
+  tokensPerSecond: number | null;
   /** The terminal `done` payload (`null` until the turn completes). */
   done: unknown;
   /** The in-band `error` payload (`null` unless the pipeline failed). */
@@ -93,7 +99,12 @@ export function deriveStages(
   stages.push({
     key: "generate",
     label: "Generating",
-    detail: null,
+    // Like the rerank narrowing, data-driven rather than status-driven:
+    // shown whenever a rate is known, absent on servers that report none.
+    detail:
+      turn.tokensPerSecond !== null
+        ? formatTokensPerSecond(turn.tokensPerSecond)
+        : null,
     status: "pending",
   });
 

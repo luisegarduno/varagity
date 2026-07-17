@@ -24,6 +24,13 @@ export interface StreamingTurn {
   answer: string;
   /** The `retrieval` event payload, stashed for the Phase 4 evidence panel. */
   retrieval: RetrievalEvent | null;
+  /**
+   * Live decode throughput from the newest `stats` frame — the readings
+   * are cumulative averages, so the latest supersedes the rest. Stays
+   * `null` when the model server reports no timings (anything but
+   * llama.cpp), which is what keeps the readout llama.cpp-only.
+   */
+  tokensPerSecond: number | null;
   /** The terminal `done` payload (ids, full answer, usage), once received. */
   done: DoneEvent | null;
   /** An in-band `error` payload, if the pipeline failed mid-stream. */
@@ -39,6 +46,7 @@ export function newTurn(query: string): StreamingTurn {
     reasoning: "",
     answer: "",
     retrieval: null,
+    tokensPerSecond: null,
     done: null,
     error: null,
     stopped: false,
@@ -63,8 +71,18 @@ export function reduceChatEvent(
       return { ...turn, reasoning: turn.reasoning + event.data.delta };
     case "token":
       return { ...turn, answer: turn.answer + event.data.delta };
+    case "stats":
+      return { ...turn, tokensPerSecond: event.data.tokens_per_second };
     case "done":
-      return { ...turn, done: event.data, answer: event.data.answer };
+      // `usage.tokens_per_second` is the server's final reading — newer
+      // than any throttled `stats` frame, so it wins (and it is `null` on
+      // servers that report no timings, clearing a stale live value).
+      return {
+        ...turn,
+        done: event.data,
+        answer: event.data.answer,
+        tokensPerSecond: event.data.usage.tokens_per_second ?? null,
+      };
     case "error":
       return { ...turn, error: event.data };
   }

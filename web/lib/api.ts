@@ -22,6 +22,7 @@ export type RetrievalEvent = Schemas["RetrievalEvent"];
 export type RetrievedChunk = Schemas["RetrievedChunk"];
 export type RetrievalTrace = Schemas["RetrievalTrace"];
 export type DeltaEvent = Schemas["DeltaEvent"];
+export type StatsEvent = Schemas["StatsEvent"];
 export type DoneEvent = Schemas["DoneEvent"];
 export type ChatErrorEvent = Schemas["ErrorEvent"];
 export type ErrorResponse = Schemas["ErrorResponse"];
@@ -187,12 +188,16 @@ export function startIngest(reingest: boolean): Promise<IngestRun> {
 /**
  * One parsed frame of the chat SSE protocol, discriminated on the event
  * name (spec_v2 §4.3): `retrieval` → `reasoning`/`token` deltas → `done`,
- * with `error` as the in-band mid-stream failure.
+ * with `error` as the in-band mid-stream failure. Throttled `stats`
+ * frames (live decode throughput) interleave with the deltas — but only
+ * when the model server reports its own timings (llama.cpp does), so a
+ * turn with zero `stats` frames is normal, not stalled.
  */
 export type ChatEvent =
   | { type: "retrieval"; data: RetrievalEvent }
   | { type: "reasoning"; data: DeltaEvent }
   | { type: "token"; data: DeltaEvent }
+  | { type: "stats"; data: StatsEvent }
   | { type: "done"; data: DoneEvent }
   | { type: "error"; data: ChatErrorEvent };
 
@@ -200,6 +205,7 @@ const CHAT_EVENT_NAMES = new Set([
   "retrieval",
   "reasoning",
   "token",
+  "stats",
   "done",
   "error",
 ]);

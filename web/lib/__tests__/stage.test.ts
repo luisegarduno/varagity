@@ -7,6 +7,7 @@ function makeTurn(overrides: Partial<StageTurn> = {}): StageTurn {
     reasoning: "",
     answer: "",
     retrieval: null,
+    tokensPerSecond: null,
     done: null,
     error: null,
     stopped: false,
@@ -66,6 +67,20 @@ describe("deriveStages", () => {
   it("leaves the rerank detail empty until the event lands", () => {
     const rerank = deriveStages(makeTurn(), { rerankActive: true })[1];
     expect(rerank.detail).toBeNull();
+  });
+
+  it("carries the live decode rate as the generate stage's detail", () => {
+    const turn = makeTurn({ answer: "so far", tokensPerSecond: 56.07 });
+    const generate = deriveStages(turn, { rerankActive: false })[1];
+    expect(generate.key).toBe("generate");
+    expect(generate.detail).toBe("56 tok/s");
+  });
+
+  it("shows no generate detail when the server reports no rate", () => {
+    const generate = deriveStages(makeTurn({ answer: "x" }), {
+      rerankActive: false,
+    })[1];
+    expect(generate.detail).toBeNull();
   });
 
   it("treats a delta before the retrieval event as retrieval done", () => {

@@ -53,7 +53,7 @@ consume it with `fetch` plus an SSE parser (the web app uses
 Event order:
 
 ```
-retrieval → (reasoning | token)* → done | error
+retrieval → (reasoning | token | stats)* → done | error
 ```
 
 The `retrieval` frame fires once retrieval (+rerank) completes, **before
@@ -64,14 +64,18 @@ the answer is still streaming, and it is the flow's natural shape
 deltas then interleave in stream order — a reasoning model's
 `<think>…</think>` content is classified fragment-by-fragment
 (`ThinkStreamSplitter`) into `reasoning` events, everything after into
-`token` events.
+`token` events. Throttled `stats` frames (live decode throughput) may
+interleave with the deltas — **only when the model server reports its own
+timings**. llama.cpp does; a backend that doesn't simply produces a stream
+with zero `stats` frames, so clients must treat their absence as normal.
 
 | Event | Payload | Fields |
 |---|---|---|
 | `retrieval` | `RetrievalEvent` | `chunks` (list of `RetrievedChunk`, best first, each with metadata and — when the method fills it — a `RetrievalTrace`), `method`, `top_k`, `reranked_to` (`RERANK_TOP_N` when the `reranked` method narrowed the list, else `null`). |
 | `reasoning` | `DeltaEvent` | `delta` — the next `<think>` fragment, stream order. |
 | `token` | `DeltaEvent` | `delta` — the next answer fragment. |
-| `done` | `DoneEvent` | `message_id`, `conversation_id` (the one just created when the request named none), `answer` (full, `<think>`-stripped — authoritative; streamed deltas are best-effort display), `usage` (`prompt_tokens`, `completion_tokens`, `latency_ms` keyed `retrieval`/`generation`/`total`). |
+| `stats` | `StatsEvent` | `tokens_per_second` (decode throughput so far, cumulative average — it settles rather than jitters), `completion_tokens` (tokens decoded so far). Warmup-gated (no frame before 8 decoded tokens — the model server's first readings compute absurd rates) and throttled to ≥250 ms apart. |
+| `done` | `DoneEvent` | `message_id`, `conversation_id` (the one just created when the request named none), `answer` (full, `<think>`-stripped — authoritative; streamed deltas are best-effort display), `usage` (`prompt_tokens`, `completion_tokens`, `latency_ms` keyed `retrieval`/`generation`/`total`, `tokens_per_second` — the model server's own final decode rate, `null` when it reports no timings). |
 | `error` | `ErrorEvent` | `code` (`pipeline_error`), `message`. |
 
 **Failure surfaces split by stream state.** Everything detectable before

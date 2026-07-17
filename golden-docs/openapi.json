@@ -1173,6 +1173,25 @@
         "title": "SettingsResponse",
         "type": "object"
       },
+      "StatsEvent": {
+        "description": "Payload of the SSE ``stats`` event \u2014 live decode throughput.\n\nEmitted while generation runs, interleaved with the ``reasoning``/\n``token`` deltas and throttled server-side (the model server reports\nthese counters on *every* chunk; a frame per token would be noise).\nPurely additive to the protocol: the event only exists when the model\nserver reports its own timings \u2014 llama.cpp does, so the readout is\nllama.cpp-only by construction rather than by configuration.\n\nAttributes:\n    tokens_per_second: Decode throughput so far, averaged over the\n        whole generation (cumulative, not instantaneous \u2014 it settles\n        rather than jitters).\n    completion_tokens: Tokens decoded so far, the denominator behind\n        that average.",
+        "properties": {
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "tokens_per_second": {
+            "title": "Tokens Per Second",
+            "type": "number"
+          }
+        },
+        "required": [
+          "tokens_per_second",
+          "completion_tokens"
+        ],
+        "title": "StatsEvent",
+        "type": "object"
+      },
       "UploadResponse": {
         "description": "Response of ``POST /api/documents``.\n\nAttributes:\n    files: Per-file outcomes, in upload order.",
         "properties": {
@@ -1242,7 +1261,7 @@
         "type": "object"
       },
       "UsageInfo": {
-        "description": "Token usage and per-stage latency reported by the ``done`` event.\n\nAttributes:\n    prompt_tokens: Server-reported prompt tokens (``None`` when the\n        model server reports no usage).\n    completion_tokens: Server-reported completion tokens (``None`` when\n        unreported).\n    latency_ms: Wall-clock milliseconds per stage: ``retrieval``,\n        ``generation``, ``total``.",
+        "description": "Token usage and per-stage latency reported by the ``done`` event.\n\nAttributes:\n    prompt_tokens: Server-reported prompt tokens (``None`` when the\n        model server reports no usage).\n    completion_tokens: Server-reported completion tokens (``None`` when\n        unreported).\n    latency_ms: Wall-clock milliseconds per stage: ``retrieval``,\n        ``generation``, ``total``.\n    tokens_per_second: Final decode throughput as the model server\n        measured it, or ``None`` when it reports no timings. Distinct\n        from ``completion_tokens / latency_ms[\"generation\"]``, which\n        would smear queueing and prompt eval into the rate.",
         "properties": {
           "completion_tokens": {
             "anyOf": [
@@ -1274,6 +1293,18 @@
             ],
             "default": null,
             "title": "Prompt Tokens"
+          },
+          "tokens_per_second": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tokens Per Second"
           }
         },
         "required": [
@@ -1333,7 +1364,7 @@
   "paths": {
     "/api/chat": {
       "post": {
-        "description": "Answer one question as a typed SSE stream (spec_v2 \u00a74.3).\n\nEvent order: ``retrieval`` (the provenance payload) \u2192 ``reasoning``/\n``token`` deltas \u2192 ``done`` (ids, full answer, usage + per-stage\nlatency). A failure after the stream opened emits an in-band ``error``\nevent instead. Aborted turns (client disconnect) persist nothing \u2014 the\nturn is persisted *at* ``done``.\n\nArgs:\n    plan: The validated request plan.\n\nYields:\n    The framed SSE events, in protocol order.",
+        "description": "Answer one question as a typed SSE stream (spec_v2 \u00a74.3).\n\nEvent order: ``retrieval`` (the provenance payload) \u2192 ``reasoning``/\n``token`` deltas, interleaved with throttled ``stats`` frames while the\nmodel server reports throughput \u2192 ``done`` (ids, full answer, usage +\nper-stage latency). A failure after the stream opened emits an in-band\n``error`` event instead. Aborted turns (client disconnect) persist\nnothing \u2014 the turn is persisted *at* ``done``.\n\n``stats`` is optional in the protocol: it appears only when the model\nserver reports its own decode counters (llama.cpp does; see\n:class:`~varagity.models.llm.GenerationTimings`), so clients must treat\nzero ``stats`` frames as normal rather than as a stalled stream.\n\nArgs:\n    plan: The validated request plan.\n\nYields:\n    The framed SSE events, in protocol order.",
         "operationId": "chat_api_chat_post",
         "requestBody": {
           "content": {

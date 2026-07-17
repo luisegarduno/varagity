@@ -43,7 +43,7 @@ from varagity.generation.answer import (
     generate_answer,
     generate_answer_stream,
 )
-from varagity.models.llm import LLMClient
+from varagity.models.llm import GenerationTimings, LLMClient
 from varagity.models.stream import Kind
 from varagity.observability import metrics
 from varagity.retrieval import get_retriever
@@ -164,6 +164,7 @@ def generate_answer_stream_task(
     formatted_context: str,
     on_delta: Callable[[Kind, str], None],
     should_abort: Callable[[], bool] | None,
+    on_stats: Callable[[GenerationTimings], None] | None,
     verbose: int,
 ) -> StreamedAnswer:
     """Task wrapper over streamed answer generation (spec_v2 §4.3).
@@ -180,6 +181,7 @@ def generate_answer_stream_task(
         formatted_context: The pre-built context block (spec §10.2).
         on_delta: Called with each classified ``(kind, text)`` fragment.
         should_abort: Polled between deltas; ``True`` stops generation.
+        on_stats: Called with llama.cpp's decode counters as they arrive.
         verbose: Validated console verbosity.
 
     Returns:
@@ -192,6 +194,7 @@ def generate_answer_stream_task(
         llm=llm,
         formatted_context=formatted_context,
         should_abort=should_abort,
+        on_stats=on_stats,
         verbose=verbose,
     )
     logger = get_run_logger()
@@ -214,11 +217,14 @@ class StreamedQueryState(QueryState):
         reasoning: The captured ``<think>`` stream (``""`` when none).
         aborted: ``True`` when the client aborted generation mid-stream.
         usage: Server-reported token counts, or ``None`` when unreported.
+        tokens_per_second: Final decode throughput reported by llama.cpp,
+            or ``None`` when the model server reports no ``timings``.
     """
 
     reasoning: str
     aborted: bool
     usage: dict[str, int] | None
+    tokens_per_second: float | None
 
 
 @flow(name="query-stream", validate_parameters=False)
@@ -232,6 +238,7 @@ def query_stream_flow(
     on_retrieved: Callable[[list[RetrievedChunk]], None] | None = None,
     on_delta: Callable[[Kind, str], None],
     should_abort: Callable[[], bool] | None = None,
+    on_stats: Callable[[GenerationTimings], None] | None = None,
 ) -> StreamedQueryState:
     """Answer one question with tracked stages, streaming generation deltas.
 
@@ -255,6 +262,9 @@ def query_stream_flow(
             stream order (``kind`` is ``"reasoning"`` or ``"answer"``).
         should_abort: Polled between deltas; returning ``True`` stops
             generation early and marks the state ``aborted``.
+        on_stats: Called with llama.cpp's cumulative decode counters as
+            they arrive (once per chunk — throttle before rendering);
+            never fires on a server that reports no ``timings``.
 
     Returns:
         The completed :class:`StreamedQueryState`.
@@ -293,6 +303,7 @@ def query_stream_flow(
             formatted_context=formatted_context,
             on_delta=on_delta,
             should_abort=should_abort,
+            on_stats=on_stats,
             verbose=verbose,
         )
         metrics.observe_query_stage("generate", method, time.perf_counter() - stage_started)
@@ -311,6 +322,7 @@ def query_stream_flow(
         reasoning=result["reasoning"],
         aborted=result["aborted"],
         usage=result["usage"],
+        tokens_per_second=result["tokens_per_second"],
     )
 
 

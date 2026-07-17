@@ -13,6 +13,7 @@ import {
 import { notifyConversationsChanged } from "@/lib/conversations-bus";
 import { assistantMessageFromTurn } from "@/lib/evidence";
 import { conversationQuery } from "@/lib/queries";
+import { recordSessionUsage } from "@/lib/session-usage";
 
 /** What `useChat` exposes to the conversation UI. */
 export interface ChatState {
@@ -99,6 +100,11 @@ export function useChat(conversationId: string): ChatState {
           if (current.done) {
             const done = current.done;
             const settled = current;
+            // Session-only recall: the fold below renders evidence from
+            // the persisted message shape, which carries no usage — this
+            // map is where the panel finds the turn's tokens + rate until
+            // the next reload.
+            recordSessionUsage(done.message_id, done.usage);
             // Fold the turn into the cache as the server persisted it —
             // evidence snapshot, reasoning, latency — so the just-answered
             // turn renders exactly like a reload (the evidence panel

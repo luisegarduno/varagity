@@ -48,6 +48,7 @@ from varagity.api.schemas import (
     IngestProgressEvent,
     IngestStatusEvent,
     RetrievalEvent,
+    StatsEvent,
 )
 from varagity.config import get_settings
 from varagity.logging_setup import setup_logging
@@ -67,6 +68,7 @@ logger = logging.getLogger(__name__)
 _SSE_EVENT_MODELS = (
     RetrievalEvent,
     DeltaEvent,
+    StatsEvent,
     DoneEvent,
     ErrorEvent,
     IngestStatusEvent,
