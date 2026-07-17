@@ -470,6 +470,22 @@ class TestList:
         response = await request(make_app(vector=FakeVectorStore()), "GET", "/api/documents")
         assert response.json() == []
 
+    async def test_relative_path_is_derived_against_docs_path(self, docs_root: Path) -> None:
+        """The GUI's folder-grouping key: inside ⇒ relative, outside ⇒ None."""
+        vector = FakeVectorStore(
+            [
+                make_info("d1", str(docs_root / "reports" / "2026" / "q3.pdf")),
+                make_info("d2", str(docs_root / "root.md")),
+                make_info("d3", "/elsewhere/out.pdf"),
+            ]
+        )
+        response = await request(make_app(vector=vector), "GET", "/api/documents")
+        by_id = {entry["doc_id"]: entry for entry in response.json()}
+        assert by_id["d1"]["relative_path"] == "reports/2026/q3.pdf"
+        assert by_id["d1"]["file_name"] == "q3.pdf"  # display name stays the base name
+        assert by_id["d2"]["relative_path"] == "root.md"
+        assert by_id["d3"]["relative_path"] is None
+
 
 class TestDelete:
     async def test_deletes_from_both_stores(self, docs_root: Path) -> None:
@@ -496,6 +512,43 @@ class TestDelete:
         )
         assert response.json()["file_removed"] is True
         assert not source.exists()
+
+    async def test_remove_file_prunes_now_empty_folders(self, docs_root: Path) -> None:
+        """Deleting a folder upload's last file must not strand empty shells."""
+        nested = docs_root / "reports" / "2026"
+        nested.mkdir(parents=True)
+        source = nested / "q3.txt"
+        source.write_text("bye")
+        (docs_root / "keep.txt").write_text("stay")  # a sibling file, not in the chain
+        vector = FakeVectorStore([make_info("d1", str(source))])
+        response = await request(
+            make_app(vector=vector, bm25=FakeBM25()),
+            "DELETE",
+            "/api/documents/d1",
+            params={"remove_file": "true"},
+        )
+        assert response.json()["file_removed"] is True
+        assert not (docs_root / "reports").exists()  # the emptied chain is gone
+        assert docs_root.exists()  # DOCS_PATH itself is never touched
+        assert (docs_root / "keep.txt").exists()
+
+    async def test_remove_file_keeps_folders_that_still_hold_files(self, docs_root: Path) -> None:
+        shared = docs_root / "reports"
+        shared.mkdir()
+        gone = shared / "q3.txt"
+        gone.write_text("bye")
+        kept = shared / "q4.txt"
+        kept.write_text("stay")
+        vector = FakeVectorStore([make_info("d1", str(gone))])
+        response = await request(
+            make_app(vector=vector, bm25=FakeBM25()),
+            "DELETE",
+            "/api/documents/d1",
+            params={"remove_file": "true"},
+        )
+        assert response.json()["file_removed"] is True
+        assert kept.exists()
+        assert shared.exists()  # still holds q4.txt ⇒ not pruned
 
     async def test_remove_file_refuses_outside_docs_path(
         self, docs_root: Path, tmp_path: Path
@@ -639,6 +692,31 @@ class TestBulkDelete:
         assert [entry["file_removed"] for entry in response.json()["deleted"]] == [True, False]
         assert not inside.exists()
         assert outside.exists()
+
+    async def test_remove_file_prunes_a_folder_the_batch_emptied(self, docs_root: Path) -> None:
+        """The GUI's delete-a-whole-folder flow: bulk delete + remove_file.
+
+        Each unlink alone leaves the folder non-empty; only the batch as a
+        whole empties it — the prune must land after the last one.
+        """
+        folder = docs_root / "reports"
+        folder.mkdir()
+        sources = [folder / name for name in ("q3.txt", "q4.txt")]
+        for source in sources:
+            source.write_text("bye")
+        vector = FakeVectorStore(
+            [make_info(f"d{n}", str(source)) for n, source in enumerate(sources, start=1)]
+        )
+        response = await request(
+            make_app(vector=vector, bm25=FakeBM25()),
+            "POST",
+            "/api/documents/delete",
+            json={"doc_ids": ["d1", "d2"]},
+            params={"remove_file": "true"},
+        )
+        assert all(entry["file_removed"] for entry in response.json()["deleted"])
+        assert not folder.exists()
+        assert docs_root.exists()
 
     async def test_es_down_is_a_structured_503_and_pg_untouched(self, docs_root: Path) -> None:
         vector = FakeVectorStore([make_info(f"d{n}", str(docs_root / f"f{n}.txt")) for n in (1, 2)])

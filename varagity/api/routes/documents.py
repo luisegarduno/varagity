@@ -7,7 +7,8 @@ per-file relative ``paths`` (folder uploads): structure is *identity*, not
 decoration — ``doc_id`` hashes the path relative to ``DOCS_PATH``, so
 ``q3/notes.md`` and ``q4/notes.md`` must land at distinct paths or the
 second silently replaces the first. ``GET`` lists the ``documents`` table
-with each document's extraction mix. ``DELETE`` removes a document's chunks
+with each document's extraction mix and its path relative to ``DOCS_PATH``
+(the GUI's folder-grouping key). ``DELETE`` removes a document's chunks
 from **both** stores — the v1 gap ("removing a file does not remove its
 chunks") turned into GUI-driven GC — Elasticsearch first, pgvector last,
 mirroring the reingest ordering rationale (the ``documents`` row is the
@@ -389,13 +390,41 @@ def upload_documents(
     return UploadResponse(files=results)
 
 
+def _relative_to_corpus(source: str, docs_root: Path) -> str | None:
+    """A source's path relative to ``DOCS_PATH``, when it lives inside.
+
+    The corpus table's grouping key: folder uploads (spec_v3 §5.2) keep
+    their directory structure, and the GUI folds the flat document list
+    back into those folders. Only the server knows the corpus root, so the
+    relative path is computed here rather than string-guessed client-side.
+
+    Args:
+        source: The absolute source path recorded at ingest time.
+        docs_root: The resolved ``DOCS_PATH`` directory.
+
+    Returns:
+        The POSIX-separated relative path, or ``None`` when the source
+        doesn't resolve inside the corpus directory (ingested from
+        elsewhere — such documents simply list flat).
+    """
+    try:
+        resolved = Path(source).resolve()
+        if not resolved.is_relative_to(docs_root):
+            return None
+    except OSError:  # unresolvable (symlink loop, …)
+        return None
+    return resolved.relative_to(docs_root).as_posix()
+
+
 @router.get("/api/documents")
 def list_documents(store: VectorStoreDep) -> list[DocumentOut]:
     """List every ingested document (the corpus-management table).
 
     Files uploaded but not yet ingested don't appear here — the ``documents``
     table records ingests; the GUI pairs this list with the upload outcomes
-    it already holds.
+    it already holds. Each entry carries its ``relative_path`` under
+    ``DOCS_PATH`` (``None`` for sources living elsewhere) so the GUI can
+    group the table by the folders a folder upload created.
 
     Args:
         store: The per-request vector store.
@@ -403,13 +432,40 @@ def list_documents(store: VectorStoreDep) -> list[DocumentOut]:
     Returns:
         One entry per document, newest ingest first.
     """
+    docs_root = Path(get_settings().DOCS_PATH).resolve()
     return [
         DocumentOut(
             file_name=Path(info.source).name,
+            relative_path=_relative_to_corpus(info.source, docs_root),
             **info.model_dump(),
         )
         for info in store.list_documents()
     ]
+
+
+def _prune_empty_parents(directory: Path, docs_root: Path) -> None:
+    """Remove now-empty folders an unlinked source file leaves behind.
+
+    Folder uploads create real directories under ``DOCS_PATH``; deleting a
+    whole folder from the GUI unlinks its files one by one, and without
+    this sweep the empty shells would accumulate invisibly (no document
+    lists them, no ingest reads them). Walks upward from the file's
+    folder, stopping at the first non-empty ancestor and never touching
+    ``DOCS_PATH`` itself. Best-effort by design: ``rmdir`` refusing a
+    non-empty directory (say, a concurrent upload into it) is the stop
+    condition, not an error.
+
+    Args:
+        directory: The deleted file's (resolved) parent directory.
+        docs_root: The resolved ``DOCS_PATH`` — the exclusive upper bound.
+    """
+    current = directory
+    while current != docs_root and current.is_relative_to(docs_root):
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
 
 
 def _remove_source_file(info: DocumentInfo) -> bool:
@@ -417,7 +473,9 @@ def _remove_source_file(info: DocumentInfo) -> bool:
 
     Honored only inside ``DOCS_PATH``: a document ingested from elsewhere
     would simply be re-added by the next ingest, and unlinking outside the
-    corpus directory is not this route's business either way.
+    corpus directory is not this route's business either way. Folders the
+    unlink empties are pruned too, so deleting a folder upload's documents
+    doesn't strand empty directory shells in the corpus.
 
     Args:
         info: The (already deleted) document's stored metadata.
@@ -428,7 +486,8 @@ def _remove_source_file(info: DocumentInfo) -> bool:
     docs_root = Path(get_settings().DOCS_PATH).resolve()
     source = Path(info.source)
     try:
-        inside_corpus = source.resolve().is_relative_to(docs_root)
+        resolved = source.resolve()
+        inside_corpus = resolved.is_relative_to(docs_root)
     except OSError:  # unresolvable (dangling symlink target, …)
         inside_corpus = False
     if not inside_corpus:
@@ -441,6 +500,7 @@ def _remove_source_file(info: DocumentInfo) -> bool:
     if not source.exists():
         return False
     source.unlink()
+    _prune_empty_parents(resolved.parent, docs_root)
     return True
 
 

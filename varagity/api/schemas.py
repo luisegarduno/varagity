@@ -408,6 +408,12 @@ class DocumentOut(BaseModel):
         doc_id: The document's stable id.
         file_name: Base name of the source file.
         source: Absolute file path recorded at ingest time.
+        relative_path: The source's path relative to the corpus directory
+            (``DOCS_PATH``), POSIX-separated — folder uploads (spec_v3
+            §5.2) keep their structure, and this is the GUI's grouping key
+            for folding the corpus table back into those folders. ``None``
+            when the source doesn't resolve inside ``DOCS_PATH`` (a
+            document ingested from elsewhere lists flat).
         file_type: File extension without the dot (``pdf``, ``docx``, …).
         content_hash: sha256 of the source file's bytes at ingest time.
         n_chunks: Chunks ingested (``0`` = no extractable text).
@@ -419,6 +425,7 @@ class DocumentOut(BaseModel):
     doc_id: str
     file_name: str
     source: str
+    relative_path: str | None = None
     file_type: str
     content_hash: str
     n_chunks: int

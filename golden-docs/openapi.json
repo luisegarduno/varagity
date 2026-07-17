@@ -352,7 +352,7 @@
         "type": "object"
       },
       "DocumentOut": {
-        "description": "One corpus document in the ``GET /api/documents`` list (spec_v2 \u00a74.2).\n\nAttributes:\n    doc_id: The document's stable id.\n    file_name: Base name of the source file.\n    source: Absolute file path recorded at ingest time.\n    file_type: File extension without the dot (``pdf``, ``docx``, \u2026).\n    content_hash: sha256 of the source file's bytes at ingest time.\n    n_chunks: Chunks ingested (``0`` = no extractable text).\n    ingested_at: When the document (last) landed in the stores.\n    extraction_mix: Chunk count per extraction method (``text`` /\n        ``ocr_fallback``).",
+        "description": "One corpus document in the ``GET /api/documents`` list (spec_v2 \u00a74.2).\n\nAttributes:\n    doc_id: The document's stable id.\n    file_name: Base name of the source file.\n    source: Absolute file path recorded at ingest time.\n    relative_path: The source's path relative to the corpus directory\n        (``DOCS_PATH``), POSIX-separated \u2014 folder uploads (spec_v3\n        \u00a75.2) keep their structure, and this is the GUI's grouping key\n        for folding the corpus table back into those folders. ``None``\n        when the source doesn't resolve inside ``DOCS_PATH`` (a\n        document ingested from elsewhere lists flat).\n    file_type: File extension without the dot (``pdf``, ``docx``, \u2026).\n    content_hash: sha256 of the source file's bytes at ingest time.\n    n_chunks: Chunks ingested (``0`` = no extractable text).\n    ingested_at: When the document (last) landed in the stores.\n    extraction_mix: Chunk count per extraction method (``text`` /\n        ``ocr_fallback``).",
         "properties": {
           "content_hash": {
             "title": "Content Hash",
@@ -385,6 +385,17 @@
           "n_chunks": {
             "title": "N Chunks",
             "type": "integer"
+          },
+          "relative_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relative Path"
           },
           "source": {
             "title": "Source",
@@ -1771,7 +1782,7 @@
     },
     "/api/documents": {
       "get": {
-        "description": "List every ingested document (the corpus-management table).\n\nFiles uploaded but not yet ingested don't appear here \u2014 the ``documents``\ntable records ingests; the GUI pairs this list with the upload outcomes\nit already holds.\n\nArgs:\n    store: The per-request vector store.\n\nReturns:\n    One entry per document, newest ingest first.",
+        "description": "List every ingested document (the corpus-management table).\n\nFiles uploaded but not yet ingested don't appear here \u2014 the ``documents``\ntable records ingests; the GUI pairs this list with the upload outcomes\nit already holds. Each entry carries its ``relative_path`` under\n``DOCS_PATH`` (``None`` for sources living elsewhere) so the GUI can\ngroup the table by the folders a folder upload created.\n\nArgs:\n    store: The per-request vector store.\n\nReturns:\n    One entry per document, newest ingest first.",
         "operationId": "list_documents_api_documents_get",
         "responses": {
           "200": {
