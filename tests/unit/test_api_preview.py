@@ -7,6 +7,7 @@ fixture PDFs copied under a tmp ``DOCS_PATH``.
 """
 
 import shutil
+import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from tests.unit.test_api_documents import FakeVectorStore, make_app, request
+from varagity.preview import ConversionFailed
 from varagity.stores.records import DocumentInfo, content_hash
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "corpus"
@@ -129,15 +131,54 @@ class TestLocateRoute:
         response = await locate(make_app(vector=FakeVectorStore([pdf_doc])), pdf_doc.doc_id)
         assert response.json()["reason"] == "file_changed"
 
-    async def test_pptx_degrades_to_conversion_unavailable_in_phase_1(
-        self, docs_root: Path
+    async def test_pptx_without_soffice_degrades_to_conversion_unavailable(
+        self, docs_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A host-mode run without LibreOffice loses only PPTX previews."""
+        source = docs_root / "petrel_turbine_briefing.pptx"
+        shutil.copyfile(FIXTURES / "petrel_turbine_briefing.pptx", source)
+        info = ingested_info("d1", source)
+        # Isolate the conversion cache (a stale hit would answer without
+        # soffice — by design), then take the binary off PATH.
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        response = await locate(make_app(vector=FakeVectorStore([info])), "d1")
+        assert response.status_code == 200  # degradable, never a 500
+        assert response.json()["reason"] == "conversion_unavailable"
+
+    async def test_pptx_locates_on_the_converted_rendition(
+        self, docs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The wiring past ensure_pdf: a converted deck locates like any PDF."""
+        source = docs_root / "petrel_turbine_briefing.pptx"
+        shutil.copyfile(FIXTURES / "petrel_turbine_briefing.pptx", source)
+        info = ingested_info("d1", source)
+        converted = docs_root.parent / "converted.pdf"  # containment gates the *source* only
+        shutil.copyfile(FIXTURES / "saltmere_observatory.pdf", converted)
+        monkeypatch.setattr(
+            "varagity.preview.source.ensure_pdf",
+            lambda source, doc_id, *, timeout_s: converted,
+        )
+        response = await locate(make_app(vector=FakeVectorStore([info])), "d1")
+        body = response.json()
+        assert body["available"] is True
+        assert body["page"] == 2
+        assert body["rects"]
+
+    async def test_pptx_conversion_failure_degrades_to_conversion_failed(
+        self, docs_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         source = docs_root / "petrel_turbine_briefing.pptx"
         shutil.copyfile(FIXTURES / "petrel_turbine_briefing.pptx", source)
         info = ingested_info("d1", source)
+
+        def explode(source: Path, doc_id: str, *, timeout_s: int) -> Path:
+            raise ConversionFailed("soffice exited 1")
+
+        monkeypatch.setattr("varagity.preview.source.ensure_pdf", explode)
         response = await locate(make_app(vector=FakeVectorStore([info])), "d1")
-        assert response.status_code == 200  # degradable, never a 500
-        assert response.json()["reason"] == "conversion_unavailable"
+        assert response.status_code == 200
+        assert response.json()["reason"] == "conversion_failed"
 
     async def test_corrupt_pdf_degrades_instead_of_500ing(self, docs_root: Path) -> None:
         """Bytes that hash-match but aren't a PDF: pdfium failure is contained."""

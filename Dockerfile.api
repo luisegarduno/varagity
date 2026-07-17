@@ -13,8 +13,17 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 # in the shared cv2/ directory. Docling's TableFormer and EasyOCR both
 # `import cv2`, so without libGL every PDF conversion dies at pipeline init
 # (and docling masks the real error as "EasyOCR is not installed").
+# libreoffice-impress: headless PPTX→PDF for the evidence-panel page preview
+# (ADR-010) — Impress only; docx/xlsx previews are out of scope, so no
+# -writer/-calc. The fonts are Gotenberg's slim metric-compatible set
+# (Liberation ⇒ Arial/Times/Courier, Carlito ⇒ Calibri, Caladea ⇒ Cambria)
+# so converted decks keep their layout; fonts-noto-cjk is deliberately
+# omitted (~300 MB; English corpora — CJK decks render substituted glyphs).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng libgl1 \
+    libreoffice-impress \
+    fonts-liberation fonts-liberation2 fonts-crosextra-carlito \
+    fonts-crosextra-caladea fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
 
 # Setup a non-root user. Its uid/gid default to 1000 — the first (and on a
