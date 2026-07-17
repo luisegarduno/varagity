@@ -15,12 +15,14 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from prefect.cache_policies import NO_CACHE
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import FlowRunFilter
 from prefect.testing.utilities import prefect_test_harness
 from prometheus_client import REGISTRY
 
 from tests.unit.test_loader import FakeBM25, FakeEmbeddings, FakeStore
+from varagity.chat import PreparedQuery, Turn
 from varagity.pipeline import ingest_flow, query_flow
 from varagity.pipeline.ingest_flow import (
     chunk_document_task,
@@ -31,6 +33,7 @@ from varagity.pipeline.ingest_flow import (
     store_chunks_task,
 )
 from varagity.pipeline.query_flow import (
+    condense_query_task,
     embed_query_task,
     generate_answer_task,
     retrieve_task,
@@ -286,6 +289,10 @@ class TestQueryFlow:
         assert state["retrieved"] == retriever.chunks
         assert state["formatted_context"] in llm.prompts[0]
         assert state["answer"] == "Lantern powers Aurora. [SOURCE]: a.md"  # think-stripped
+        # The default (simple) engine states the identity split (spec_v3 §4.2).
+        assert state["prepared"].search_query == "What powers Aurora?"
+        assert state["prepared"].original_query == "What powers Aurora?"
+        assert state["prepared"].condensed is False
 
     def test_bm25_style_retriever_yields_no_query_vector(self, pinned_settings: None) -> None:
         retriever = FakeRetriever([_chunk("Pelican-9 hauls 40 tons.")], vector=None)
@@ -303,12 +310,67 @@ class TestQueryFlow:
         )
         assert state.is_completed()
         names = _task_run_names(state.state_details.flow_run_id)
-        assert sorted(names) == ["embed_query", "generate_answer", "retrieve"]
+        # condense is always in the graph, simple engine included (v3 #14).
+        assert sorted(names) == ["condense_query", "embed_query", "generate_answer", "retrieve"]
+
+    def test_engine_seam_splits_search_and_answer_queries(self, pinned_settings: None) -> None:
+        """★ spec_v3 §4.2: the condensed string retrieves, the original answers."""
+
+        class RecordingEngine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def prepare(
+                self, query: str, *, history: Sequence[Turn], llm: object, verbose: int
+            ) -> PreparedQuery:
+                self.calls.append({"query": query, "history": tuple(history), "llm": llm})
+                return PreparedQuery(
+                    search_query="standalone kelp corridor length",
+                    original_query=query,
+                    condensed=True,
+                    condense_latency_s=0.01,
+                )
+
+        vector = [0.5, 0.5]
+        retriever = FakeRetriever([_chunk("The corridor is 1.8 km.")], vector)
+        llm = ScriptedLLM("1.8 km.")
+        engine = RecordingEngine()
+        history = (Turn("user", "Tell me about the corridor"), Turn("assistant", "It exists."))
+
+        state = query_flow(
+            "how long is it?",
+            history=history,
+            engine=engine,
+            retriever=retriever,
+            llm=llm,
+            verbose=0,
+        )
+
+        # The engine saw the turn, its history, and the flow's LLM.
+        assert engine.calls == [{"query": "how long is it?", "history": history, "llm": llm}]
+        # The condensed string drove BOTH retrieval arms (embed + retrieve)…
+        assert retriever.encode_calls == ["standalone kelp corridor length"]
+        assert retriever.retrieve_calls[0]["query"] == "standalone kelp corridor length"
+        # …while the answer prompt got the user's words, verbatim.
+        assert "QUESTION: how long is it?" in llm.prompts[0]
+        assert "standalone kelp corridor length" not in llm.prompts[0]
+        assert state["query"] == "how long is it?"
+        assert state["prepared"].condensed is True
+        assert state["prepared"].search_query == "standalone kelp corridor length"
 
     def test_interactive_tasks_carry_no_retries(self) -> None:
         """The query path leaves retrying to the clients' tenacity layer."""
-        for interactive in (embed_query_task, retrieve_task, generate_answer_task):
+        for interactive in (
+            condense_query_task,
+            embed_query_task,
+            retrieve_task,
+            generate_answer_task,
+        ):
             assert not interactive.retries, interactive.name
+
+    def test_condense_task_disables_result_caching(self) -> None:
+        """NO_CACHE, like every pipeline task (live inputs, unhashable args)."""
+        assert condense_query_task.cache_policy is NO_CACHE
 
     def test_invalid_verbose_raises(self, pinned_settings: None) -> None:
         with pytest.raises(ValueError, match="verbose"):
@@ -339,7 +401,7 @@ class TestFlowMetrics:
         rank1 = {"method": "custom", "rank": "1"}
         before_stages = {
             s: _sample("varagity_query_latency_seconds_count", stage(s))
-            for s in ("embed", "retrieve", "generate")
+            for s in ("condense", "embed", "retrieve", "generate")
         }
         before_ok = _sample("varagity_query_total", ok)
         before_score = _sample("varagity_retrieval_score_count", rank1)

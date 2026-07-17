@@ -153,10 +153,10 @@ def observe_query_stage(stage: str, method: str, seconds: float) -> None:
     """Record one query stage's wall-clock latency.
 
     Args:
-        stage: Pipeline stage name (``embed``/``retrieve``/``rerank``/
-            ``generate``). The ``retrieve`` observation of the ``reranked``
-            method *includes* its ``rerank`` sub-stage, which is also
-            recorded separately by the reranked retriever.
+        stage: Pipeline stage name (``condense``/``embed``/``retrieve``/
+            ``rerank``/``generate``). The ``retrieve`` observation of the
+            ``reranked`` method *includes* its ``rerank`` sub-stage, which
+            is also recorded separately by the reranked retriever.
         method: The retrieval method's registry name (low-cardinality
             label; injected non-registry implementations record as
             ``custom``).

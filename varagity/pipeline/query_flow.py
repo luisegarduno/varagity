@@ -1,9 +1,16 @@
 """Prefect query flow: the spec §10.1 pipeline as tracked task runs.
 
-Embed → retrieve → generate, each a task run, returning the spec §10.1
-state dict. Query embedding — encapsulated inside the retrievers on the
-plain path (:func:`varagity.generation.answer.answer_query`) — is hoisted
-into its own tracked stage here via the retrievers'
+Condense → embed → retrieve → generate, each a task run, returning the
+spec §10.1 state dict. The condense stage (spec_v3 §4.2) runs the
+configured chat engine over the turn and its history to decide the *search
+query*; retrieval sees ``prepared.search_query`` while the answer prompt
+always gets ``prepared.original_query`` — the user's words are never
+rewritten for generation. The stage is always in the graph (plan decision
+#14): under the ``simple`` engine it is a no-LLM pass-through, so a
+tracked run is its only cost. Query embedding — encapsulated inside the
+retrievers on the plain path
+(:func:`varagity.generation.answer.answer_query`) — is hoisted into its
+own tracked stage here via the retrievers'
 :meth:`~varagity.retrieval.base.Retriever.encode_query` seam, which also
 fills the state's ``query_vector`` (``None`` for ``bm25``: nothing to
 encode).
@@ -28,12 +35,14 @@ additionally counts the server-reported token usage it already returns.
 """
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from prefect import flow, task
 from prefect.cache_policies import NO_CACHE
 from prefect.logging import get_run_logger
 
+from varagity.chat import get_chat_engine
+from varagity.chat.base import ChatEngine, PreparedQuery, Turn
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
 from varagity.generation.answer import (
@@ -67,6 +76,42 @@ def _method_label(retriever: Retriever) -> str:
         if type(retriever) is type(registered):
             return name
     return "custom"
+
+
+@task(name="condense_query", cache_policy=NO_CACHE)
+def condense_query_task(
+    engine: ChatEngine,
+    query: str,
+    *,
+    history: Sequence[Turn],
+    llm: LLMClient | None,
+    verbose: int,
+) -> PreparedQuery:
+    """Task wrapper over the chat engine's query preparation (spec_v3 §4.2).
+
+    Always in the graph, whatever the engine (plan decision #14): ``simple``
+    returns the identity split with no LLM call, so the tracked stage is
+    ~free — and the registry stays a seam rather than a special case.
+
+    Args:
+        engine: The chat engine (owns the condense decision).
+        query: The user's question, verbatim.
+        history: Prior conversation turns, oldest first (empty on a first
+            turn, and from history-less callers like the CLI).
+        llm: Chat client for engines that condense; ``None`` lets them
+            resolve one via the model registry.
+        verbose: Validated console verbosity.
+
+    Returns:
+        The two-string split downstream stages retrieve and answer with.
+    """
+    prepared = engine.prepare(query, history=history, llm=llm, verbose=verbose)
+    logger = get_run_logger()
+    if prepared.condensed:
+        logger.info("condensed the search query → %r", prepared.search_query)
+    else:
+        logger.info("search query is the user's words, verbatim")
+    return prepared
 
 
 @task(name="embed_query", cache_policy=NO_CACHE)
@@ -231,6 +276,8 @@ class StreamedQueryState(QueryState):
 def query_stream_flow(
     query: str,
     *,
+    history: Sequence[Turn] = (),
+    engine: ChatEngine | None = None,
     retriever: Retriever | None = None,
     llm: LLMClient | None = None,
     k: int | None = None,
@@ -243,13 +290,18 @@ def query_stream_flow(
     """Answer one question with tracked stages, streaming generation deltas.
 
     :func:`query_flow`'s streaming twin, backing ``POST /api/chat``
-    (spec_v2 §4.3): identical embed/retrieve staging (``on_retrieved``
-    still fires before generation — the SSE ``retrieval`` event), then the
-    streaming generate task hands each classified delta to ``on_delta``
-    while it runs.
+    (spec_v2 §4.3): identical condense/embed/retrieve staging
+    (``on_retrieved`` still fires before generation — the SSE ``retrieval``
+    event), then the streaming generate task hands each classified delta to
+    ``on_delta`` while it runs.
 
     Args:
         query: The user's question.
+        history: Prior conversation turns, oldest first; the chat engine
+            reads them when preparing the search query (empty by default —
+            a first turn, or a history-less caller).
+        engine: Chat engine preparing the search query; resolved from
+            ``settings.CHAT_ENGINE`` when omitted.
         retriever: Retrieval method; resolved from
             ``settings.RETRIEVAL_METHOD`` when omitted.
         llm: Chat client; resolved via the model registry when omitted.
@@ -272,23 +324,34 @@ def query_stream_flow(
     Raises:
         ValueError: If ``verbose`` is invalid.
         KeyError: If ``settings.RETRIEVAL_METHOD`` names an unregistered
-            retrieval method.
+            retrieval method, or ``settings.CHAT_ENGINE`` an unregistered
+            chat engine.
     """
     settings = get_settings()
     verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
     active_retriever = (
         retriever if retriever is not None else get_retriever(settings.RETRIEVAL_METHOD)
     )
+    active_engine = engine if engine is not None else get_chat_engine(settings.CHAT_ENGINE)
     top_k = settings.TOP_K if k is None else k
 
     method = _method_label(active_retriever)
     try:
         stage_started = time.perf_counter()
-        query_vector = embed_query_task(active_retriever, query, verbose=verbose)
+        prepared = condense_query_task(
+            active_engine, query, history=history, llm=llm, verbose=verbose
+        )
+        metrics.observe_query_stage("condense", method, time.perf_counter() - stage_started)
+        stage_started = time.perf_counter()
+        query_vector = embed_query_task(active_retriever, prepared.search_query, verbose=verbose)
         metrics.observe_query_stage("embed", method, time.perf_counter() - stage_started)
         stage_started = time.perf_counter()
         chunks = retrieve_task(
-            active_retriever, query, k=top_k, query_vector=query_vector, verbose=verbose
+            active_retriever,
+            prepared.search_query,
+            k=top_k,
+            query_vector=query_vector,
+            verbose=verbose,
         )
         metrics.observe_query_stage("retrieve", method, time.perf_counter() - stage_started)
         metrics.observe_retrieval(method, chunks)
@@ -297,7 +360,7 @@ def query_stream_flow(
         formatted_context = format_context(chunks)
         stage_started = time.perf_counter()
         result = generate_answer_stream_task(
-            query,
+            prepared.original_query,  # always the user's words (spec_v3 §4.2)
             chunks,
             llm=llm,
             formatted_context=formatted_context,
@@ -315,6 +378,7 @@ def query_stream_flow(
     metrics.count_llm_tokens(usage.get("prompt_tokens"), usage.get("completion_tokens"))
     return StreamedQueryState(
         query=query,
+        prepared=prepared,
         query_vector=query_vector,
         retrieved=chunks,
         formatted_context=formatted_context,
@@ -330,6 +394,8 @@ def query_stream_flow(
 def query_flow(
     query: str,
     *,
+    history: Sequence[Turn] = (),
+    engine: ChatEngine | None = None,
     retriever: Retriever | None = None,
     llm: LLMClient | None = None,
     k: int | None = None,
@@ -339,13 +405,19 @@ def query_flow(
     """Answer one question with every stage tracked as a Prefect task run.
 
     The tracked twin of :func:`varagity.generation.answer.answer_query`
-    (same parameters and state dict); the composition differs only in query
-    embedding running as its own stage. Parameter validation is off because
-    callers inject duck-typed retriever/client fakes that pydantic would
-    reject; the flow's inputs are already-validated internals.
+    (same state dict); the composition differs in query embedding and chat
+    engine preparation each running as their own stage. Parameter
+    validation is off because callers inject duck-typed retriever/client
+    fakes that pydantic would reject; the flow's inputs are
+    already-validated internals.
 
     Args:
         query: The user's question.
+        history: Prior conversation turns, oldest first; the chat engine
+            reads them when preparing the search query (empty by default —
+            a first turn, or a history-less caller).
+        engine: Chat engine preparing the search query; resolved from
+            ``settings.CHAT_ENGINE`` when omitted.
         retriever: Retrieval method; resolved from
             ``settings.RETRIEVAL_METHOD`` when omitted.
         llm: Chat client; resolved via the model registry when omitted.
@@ -361,23 +433,34 @@ def query_flow(
     Raises:
         ValueError: If ``verbose`` is invalid.
         KeyError: If ``settings.RETRIEVAL_METHOD`` names an unregistered
-            retrieval method.
+            retrieval method, or ``settings.CHAT_ENGINE`` an unregistered
+            chat engine.
     """
     settings = get_settings()
     verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
     active_retriever = (
         retriever if retriever is not None else get_retriever(settings.RETRIEVAL_METHOD)
     )
+    active_engine = engine if engine is not None else get_chat_engine(settings.CHAT_ENGINE)
     top_k = settings.TOP_K if k is None else k
 
     method = _method_label(active_retriever)
     try:
         stage_started = time.perf_counter()
-        query_vector = embed_query_task(active_retriever, query, verbose=verbose)
+        prepared = condense_query_task(
+            active_engine, query, history=history, llm=llm, verbose=verbose
+        )
+        metrics.observe_query_stage("condense", method, time.perf_counter() - stage_started)
+        stage_started = time.perf_counter()
+        query_vector = embed_query_task(active_retriever, prepared.search_query, verbose=verbose)
         metrics.observe_query_stage("embed", method, time.perf_counter() - stage_started)
         stage_started = time.perf_counter()
         chunks = retrieve_task(
-            active_retriever, query, k=top_k, query_vector=query_vector, verbose=verbose
+            active_retriever,
+            prepared.search_query,
+            k=top_k,
+            query_vector=query_vector,
+            verbose=verbose,
         )
         metrics.observe_query_stage("retrieve", method, time.perf_counter() - stage_started)
         metrics.observe_retrieval(method, chunks)
@@ -386,7 +469,11 @@ def query_flow(
         formatted_context = format_context(chunks)
         stage_started = time.perf_counter()
         answer = generate_answer_task(
-            query, chunks, llm=llm, formatted_context=formatted_context, verbose=verbose
+            prepared.original_query,  # always the user's words (spec_v3 §4.2)
+            chunks,
+            llm=llm,
+            formatted_context=formatted_context,
+            verbose=verbose,
         )
         metrics.observe_query_stage("generate", method, time.perf_counter() - stage_started)
     except Exception:
@@ -395,6 +482,7 @@ def query_flow(
     metrics.count_query(method, "ok")
     return QueryState(
         query=query,
+        prepared=prepared,
         query_vector=query_vector,
         retrieved=chunks,
         formatted_context=formatted_context,

@@ -29,6 +29,7 @@ SETTINGS_ENV_VARS = (
     "LLM_CONTEXT_TOKENS",
     "CONTEXTUALIZE_MAX_TOKENS",
     "CHAT_MODEL_TYPE",
+    "CHAT_ENGINE",
     "POSTGRES_HOST",
     "POSTGRES_PORT",
     "POSTGRES_DB",
@@ -191,6 +192,35 @@ class TestChatModelTypeValidation:
         for alias in LLM_MODEL_TYPES:
             assert alias == Settings(_env_file=None, CHAT_MODEL_TYPE=alias).CHAT_MODEL_TYPE
         assert len(LLM_MODEL_TYPES) == 3
+
+
+class TestChatEngineValidation:
+    def test_default_is_simple(self) -> None:
+        assert Settings(_env_file=None).CHAT_ENGINE == "simple"
+
+    @pytest.mark.parametrize("bad", ["condense_context", "SIMPLE", "", "made_up"])
+    def test_unknown_engine_fails_fast(self, bad: str) -> None:
+        """Unregistered names rejected at config load, not at first query.
+
+        ``condense_context`` joins the vocabulary the day v3 Phase 5
+        registers it — accepting it earlier would pass validation and then
+        ``KeyError`` at runtime.
+        """
+        with pytest.raises(ValidationError, match="CHAT_ENGINE"):
+            Settings(_env_file=None, CHAT_ENGINE=bad)
+
+    def test_vocabulary_matches_the_registry(self) -> None:
+        """config.py hard-codes the tuple (circular import); keep them equal.
+
+        The guard that forces the validator tuple to grow in lockstep with
+        ``varagity/chat/`` — registering an engine without widening the
+        vocabulary (or vice versa) fails here.
+        """
+        from varagity.chat import CHAT_ENGINE_REGISTRY
+
+        for name in sorted(CHAT_ENGINE_REGISTRY):
+            assert name == Settings(_env_file=None, CHAT_ENGINE=name).CHAT_ENGINE
+        assert len(CHAT_ENGINE_REGISTRY) == 1  # v3 Phase 5 adds condense_context
 
 
 class TestRerankValidation:

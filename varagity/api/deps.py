@@ -17,6 +17,8 @@ import psycopg
 from fastapi import HTTPException
 
 from varagity.api.schemas import ServiceHealth
+from varagity.chat import get_chat_engine
+from varagity.chat.base import ChatEngine
 from varagity.config import get_settings
 from varagity.models.llm import LLMClient
 from varagity.models.registry import get_model
@@ -60,6 +62,15 @@ def get_retriever_resolver() -> Callable[[str], Retriever]:
         :func:`varagity.retrieval.get_retriever`.
     """
     return get_retriever
+
+
+def get_chat_engine_resolver() -> Callable[[str], ChatEngine]:
+    """Provide the chat-engine resolver (override seam for tests).
+
+    Returns:
+        :func:`varagity.chat.get_chat_engine`.
+    """
+    return get_chat_engine
 
 
 def get_conversation_store() -> Iterator[ConversationStore]:

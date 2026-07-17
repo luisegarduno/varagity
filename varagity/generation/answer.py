@@ -14,6 +14,7 @@ from typing import TypedDict
 
 from openai.types import CompletionUsage
 
+from varagity.chat.base import PreparedQuery
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
 from varagity.models.llm import GenerationTimings, LLMClient, clean_response
@@ -46,6 +47,12 @@ class QueryState(TypedDict):
 
     Attributes:
         query: The user's question.
+        prepared: The chat engine's two-string split (spec_v3 §4.2):
+            ``search_query`` drove retrieval while ``original_query``
+            (always ``query``) drove the answer prompt. The plain path
+            (:func:`answer_query`) never condenses and fills the identity
+            split; the Prefect flows run the engine as its own tracked
+            stage.
         query_vector: The query embedding. ``None`` on the plain path
             (:func:`answer_query`), where the retrieval seam encapsulates
             query encoding (bm25 has no vector at all); the Prefect
@@ -57,6 +64,7 @@ class QueryState(TypedDict):
     """
 
     query: str
+    prepared: PreparedQuery
     query_vector: list[float] | None
     retrieved: list[RetrievedChunk]
     formatted_context: str
@@ -306,6 +314,10 @@ def answer_query(
     )
     return QueryState(
         query=query,
+        # The plain path never condenses — the identity split, stated.
+        prepared=PreparedQuery(
+            search_query=query, original_query=query, condensed=False, condense_latency_s=None
+        ),
         query_vector=None,  # encapsulated by the retrieval seam (see QueryState)
         retrieved=chunks,
         formatted_context=formatted_context,

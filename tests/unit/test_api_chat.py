@@ -165,6 +165,15 @@ class FakeConversationStore:
     def conversation_exists(self, conversation_id: str) -> bool:
         return conversation_id in self._state["conversations"]
 
+    def recent_turns(self, conversation_id: str, limit: int) -> list[tuple[str, str]]:
+        self._state["recent_turns_calls"].append((conversation_id, limit))
+        turns = [
+            (m["role"], m["content"])
+            for m in self._state["messages"]
+            if m["conversation_id"] == conversation_id
+        ]
+        return turns[-limit:] if limit > 0 else []
+
     def append_message(self, conversation_id: str, role: str, content: str, **kwargs: Any) -> str:
         self._state["messages"].append(
             {"conversation_id": conversation_id, "role": role, "content": content, **kwargs}
@@ -178,7 +187,7 @@ class FakeConversationStore:
 
 @pytest.fixture
 def store_state() -> dict[str, Any]:
-    return {"conversations": {}, "messages": [], "titled": []}
+    return {"conversations": {}, "messages": [], "titled": [], "recent_turns_calls": []}
 
 
 @pytest.fixture
@@ -326,6 +335,28 @@ async def test_existing_conversation_is_reused(app: FastAPI, store_state: dict[s
     _, data = parse_sse(body)[-1]
     assert data["conversation_id"] == "known"
     assert len(store_state["conversations"]) == 1  # nothing new created
+
+
+async def test_history_loaded_for_an_existing_conversation(
+    app: FastAPI, store_state: dict[str, Any]
+) -> None:
+    """The plan loads the newest turns (v3 Phase 4 plumbing — simple ignores them)."""
+    store_state["conversations"]["known"] = "Existing"
+    store_state["messages"] = [
+        {"conversation_id": "known", "role": "user", "content": "q0"},
+        {"conversation_id": "known", "role": "assistant", "content": "a0"},
+    ]
+    _, _, body = await post_chat(app, {"query": "follow-up?", "conversation_id": "known"})
+    assert parse_sse(body)[-1][0] == "done"  # unchanged behavior under simple
+    assert store_state["recent_turns_calls"] == [("known", 6)]
+
+
+async def test_no_history_lookup_without_a_conversation_id(
+    app: FastAPI, store_state: dict[str, Any]
+) -> None:
+    """A fresh conversation has no history to load — no store round-trip."""
+    await post_chat(app, {"query": "q"})
+    assert store_state["recent_turns_calls"] == []
 
 
 async def test_unknown_conversation_404_before_stream(app: FastAPI) -> None:

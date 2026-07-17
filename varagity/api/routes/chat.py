@@ -27,6 +27,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 from varagity.api.deps import (
+    get_chat_engine_resolver,
     get_conversation_store_factory,
     get_llm,
     get_retriever_resolver,
@@ -49,6 +50,7 @@ from varagity.api.streaming import (
     retrieval_event,
     stats_event,
 )
+from varagity.chat.base import ChatEngine, Turn
 from varagity.config import get_settings
 from varagity.models.llm import GenerationTimings, LLMClient
 from varagity.models.stream import Kind
@@ -73,6 +75,10 @@ _STATS_WARMUP_TOKENS = 8
 # the deltas the user actually came for. 250 ms reads as live.
 _STATS_MIN_INTERVAL_S = 0.25
 
+# Prior turns loaded for the chat engine (three user/assistant pairs). A
+# literal until v3 Phase 5 lands CONDENSE_HISTORY_TURNS and passes it here.
+_HISTORY_TURNS = 6
+
 
 @dataclass
 class ChatPlan:
@@ -89,6 +95,9 @@ class ChatPlan:
         top_k: Chunks to retrieve (override or settings default).
         reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrows
             the list; ``None`` otherwise.
+        engine: The resolved chat engine (``settings.CHAT_ENGINE``).
+        history: The conversation's recent turns, oldest first (empty for
+            a fresh conversation) — the engine's condense input.
         llm: The chat client.
         store_factory: Conversation-store constructor (persistence runs in
             a worker thread with its own short-lived connection).
@@ -99,6 +108,8 @@ class ChatPlan:
     method: str
     top_k: int
     reranked_to: int | None
+    engine: ChatEngine
+    history: list[Turn]
     llm: LLMClient
     store_factory: Callable[[], ConversationStore]
 
@@ -107,6 +118,7 @@ async def prepare_chat(
     payload: ChatRequest,
     llm: Annotated[LLMClient, Depends(get_llm)],
     resolve_retriever: Annotated[Callable[[str], Retriever], Depends(get_retriever_resolver)],
+    resolve_engine: Annotated[Callable[[str], ChatEngine], Depends(get_chat_engine_resolver)],
     store_factory: Annotated[
         Callable[[], ConversationStore], Depends(get_conversation_store_factory)
     ],
@@ -115,13 +127,16 @@ async def prepare_chat(
     """Validate the request and resolve everything the stream will need.
 
     Checks run cheapest-first: body shape (FastAPI, 422) → retrieval-method
-    resolution (422) → dependency reachability (503, *before* the stream
-    opens) → conversation existence (404).
+    resolution (422) → chat-engine resolution (settings-driven, validated
+    at config load) → dependency reachability (503, *before* the stream
+    opens) → conversation existence (404), whose store round-trip doubles
+    as the history load for the chat engine.
 
     Args:
         payload: The request body (FastAPI shares the parse with the route).
         llm: The chat client provider.
         resolve_retriever: The retrieval-method resolver.
+        resolve_engine: The chat-engine resolver.
         store_factory: The conversation-store factory.
         services_preflight: The awaitable reachability check (raises the
             structured 503).
@@ -145,23 +160,32 @@ async def prepare_chat(
             status_code=422,
             detail={"code": "unknown_retrieval_method", "message": str(error)},
         ) from error
+    # No 422 mapping here: CHAT_ENGINE is server config (validator-gated),
+    # not client input — a KeyError would be a config bug worth a 500.
+    engine = resolve_engine(settings.CHAT_ENGINE)
 
     await services_preflight()
 
+    history: list[Turn] = []
     if payload.conversation_id is not None:
+        conversation_id = payload.conversation_id
 
-        def _exists() -> bool:
+        def _load_history() -> list[tuple[str, str]] | None:
             with store_factory() as store:
-                return store.conversation_exists(payload.conversation_id or "")
+                if not store.conversation_exists(conversation_id):
+                    return None
+                return store.recent_turns(conversation_id, limit=_HISTORY_TURNS)
 
-        if not await run_in_threadpool(_exists):
+        turns = await run_in_threadpool(_load_history)
+        if turns is None:
             raise HTTPException(
                 status_code=404,
                 detail={
                     "code": "conversation_not_found",
-                    "message": f"No conversation with id {payload.conversation_id!r}",
+                    "message": f"No conversation with id {conversation_id!r}",
                 },
             )
+        history = [Turn(role=role, content=content) for role, content in turns]
 
     return ChatPlan(
         payload=payload,
@@ -169,6 +193,8 @@ async def prepare_chat(
         method=method,
         top_k=overrides.top_k or settings.TOP_K,
         reranked_to=settings.RERANK_TOP_N if method == "reranked" else None,
+        engine=engine,
+        history=history,
         llm=llm,
         store_factory=store_factory,
     )
@@ -267,6 +293,8 @@ async def chat(plan: Annotated[ChatPlan, Depends(prepare_chat)]) -> AsyncIterato
         try:
             return query_stream_flow(
                 plan.payload.query,
+                history=plan.history,
+                engine=plan.engine,
                 retriever=plan.retriever,
                 llm=plan.llm,
                 k=plan.top_k,

@@ -128,10 +128,63 @@ class _Cursor:
         return self.row
 
 
-def store_with(conn: FakeTitleConnection) -> ConversationStore:
+class FakeTurnsConnection:
+    """Scripts the newest-first recent-turns SELECT; records the queries."""
+
+    def __init__(self, rows: list[tuple[str, str]]) -> None:
+        self.rows = rows
+        self.queries: list[tuple[str, Any]] = []
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        self.queries.append((sql, params))
+        return _RowsCursor(self.rows)
+
+
+class _RowsCursor:
+    def __init__(self, rows: list[Any]) -> None:
+        self.rows = rows
+
+    def fetchall(self) -> list[Any]:
+        return self.rows
+
+
+def store_with(conn: Any) -> ConversationStore:
     store = ConversationStore.__new__(ConversationStore)
     store._conn = conn  # type: ignore[assignment]
     return store
+
+
+class TestRecentTurns:
+    """The chat engine's history feed (spec_v3 §4.4).
+
+    SQL round-trips are integration-tested; here the reversal, the SQL
+    shape, and the non-positive-limit guard.
+    """
+
+    def test_newest_first_rows_come_back_oldest_first(self) -> None:
+        conn = FakeTurnsConnection([("assistant", "a2"), ("user", "q2"), ("assistant", "a1")])
+        assert store_with(conn).recent_turns("c1", limit=3) == [
+            ("assistant", "a1"),
+            ("user", "q2"),
+            ("assistant", "a2"),
+        ]
+
+    def test_bounds_in_sql_with_no_sources_join(self) -> None:
+        """Decision #8: LIMIT belongs in SQL, and evidence is never hydrated."""
+        conn = FakeTurnsConnection([])
+        store_with(conn).recent_turns("c1", limit=6)
+        sql, params = conn.queries[0]
+        assert "LIMIT" in sql
+        assert "DESC" in sql  # newest-first, so LIMIT keeps the newest
+        assert "message_sources" not in sql  # no snapshot/trace hydration
+        assert "trace" not in sql
+        assert params == ("c1", 6)
+
+    def test_non_positive_limit_short_circuits(self) -> None:
+        conn = FakeTurnsConnection([("user", "q")])
+        assert store_with(conn).recent_turns("c1", limit=0) == []
+        assert store_with(conn).recent_turns("c1", limit=-1) == []
+        assert conn.queries == []  # the database is never touched
 
 
 class TestAutoTitle:

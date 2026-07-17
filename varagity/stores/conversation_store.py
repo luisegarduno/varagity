@@ -64,6 +64,17 @@ WHERE m.conversation_id = %s
 ORDER BY s.message_id, s.rank
 """
 
+# Newest rows first so LIMIT bounds the read in SQL; the method reverses
+# to oldest-first. The message_id tiebreak matches _SELECT_MESSAGES_SQL,
+# so history and transcript agree on within-timestamp order.
+_RECENT_TURNS_SQL = """
+SELECT role, content
+FROM messages
+WHERE conversation_id = %s
+ORDER BY created_at DESC, message_id DESC
+LIMIT %s
+"""
+
 
 class ConversationSummary(BaseModel):
     """One conversation as listed in the sidebar (spec_v2 §4.2).
@@ -318,6 +329,32 @@ class ConversationStore:
             updated_at=conversation_row[2],
             messages=messages,
         )
+
+    def recent_turns(self, conversation_id: str, limit: int) -> list[tuple[str, str]]:
+        """Fetch a conversation's newest turns, re-ordered oldest first.
+
+        The chat engine's history feed (spec_v3 §4.4) — deliberately not
+        :meth:`get_conversation`, which hydrates every message's snapshotted
+        sources and traces: evidence the condenser must not see, on the
+        pre-first-token hot path, growing with conversation length. Here the
+        bound is applied **in SQL** (newest ``limit`` rows) and only
+        ``role``/``content`` are read. Primitive pairs keep
+        ``varagity/stores/`` from importing ``varagity/chat/`` — callers map
+        them to their own turn type.
+
+        Args:
+            conversation_id: The conversation to read (an unknown id yields
+                the empty list — existence is the caller's check).
+            limit: Maximum turns returned; non-positive yields the empty
+                list without touching the database.
+
+        Returns:
+            Up to ``limit`` newest ``(role, content)`` pairs, oldest first.
+        """
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(_RECENT_TURNS_SQL, (conversation_id, limit)).fetchall()
+        return [(row[0], row[1]) for row in reversed(rows)]
 
     def delete_conversation(self, conversation_id: str) -> int:
         """Delete a conversation; messages and sources cascade (spec_v2 §9.1).

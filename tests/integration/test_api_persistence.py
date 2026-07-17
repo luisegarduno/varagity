@@ -10,6 +10,7 @@ Select with ``pytest -m integration`` (needs Docker).
 """
 
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -21,12 +22,19 @@ from tests.sse import parse_sse
 from tests.unit.test_api_chat import FakeRetriever, StreamingFakeLLM
 from varagity.eval.containers import ephemeral_postgres
 from varagity.stores.conversation_store import DEFAULT_TITLE, ConversationStore
-from varagity.stores.migrate import run_migrations
+from varagity.stores.migrate import MIGRATIONS_PATH, run_migrations
 from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
 pytestmark = pytest.mark.integration
 
 CONVERSATION_TABLES = ("conversations", "messages", "message_sources")
+
+ALL_MIGRATIONS = [
+    "001_conversations.sql",
+    "002_app_settings.sql",
+    "003_condensed_query.sql",
+    "004_message_engine.sql",
+]
 
 
 @pytest.fixture(scope="module")
@@ -52,35 +60,83 @@ def _table_names(conn: psycopg.Connection) -> set[str]:
     return {row[0] for row in rows}
 
 
+def _message_columns(conn: psycopg.Connection) -> dict[str, tuple[str, str]]:
+    """Shape of the messages table: column → (data_type, is_nullable)."""
+    rows = conn.execute(
+        "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'messages'"
+    ).fetchall()
+    return {row[0]: (row[1], row[2]) for row in rows}
+
+
+def _drop_migrated_state(conn: psycopg.Connection) -> None:
+    conn.execute(
+        "DROP TABLE IF EXISTS message_sources, messages, conversations, "
+        "app_settings, schema_migrations CASCADE"
+    )
+
+
 class TestMigrationRunner:
     def test_fresh_volume_applies_then_noops(self, pg_conninfo: str) -> None:
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-            conn.execute(
-                "DROP TABLE IF EXISTS message_sources, messages, conversations, "
-                "app_settings, schema_migrations CASCADE"
-            )
+            _drop_migrated_state(conn)
             first = run_migrations(conn)
-            assert first == ["001_conversations.sql", "002_app_settings.sql"]
+            assert first == ALL_MIGRATIONS
             assert set(CONVERSATION_TABLES) | {"app_settings"} <= _table_names(conn)
+            # The v3 columns land inert: nullable TEXT, nothing writes them.
+            columns = _message_columns(conn)
+            assert columns["condensed_query"] == ("text", "YES")
+            assert columns["chat_engine"] == ("text", "YES")
             # Idempotent: a second run applies nothing and changes nothing.
             assert run_migrations(conn) == []
             applied = conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall()
-            assert [row[0] for row in applied] == [
-                "001_conversations.sql",
-                "002_app_settings.sql",
-            ]
+            assert [row[0] for row in applied] == ALL_MIGRATIONS
 
     def test_existing_v1_volume_converges(self, pg_conninfo: str) -> None:
         """A volume with only schema.sql state (v1) gains the v2 tables."""
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-            conn.execute(
-                "DROP TABLE IF EXISTS message_sources, messages, conversations, "
-                "app_settings, schema_migrations CASCADE"
-            )
+            _drop_migrated_state(conn)
             assert {"documents", "chunks"} <= _table_names(conn)  # v1 state intact
             run_migrations(conn)
             assert set(CONVERSATION_TABLES) | {"app_settings"} <= _table_names(conn)
             assert {"documents", "chunks"} <= _table_names(conn)  # untouched
+
+    def test_v2_volume_and_fresh_volume_converge_on_v3_columns(
+        self, pg_conninfo: str, tmp_path: Path
+    ) -> None:
+        """003/004 alone reconcile a v2-shaped volume; both paths converge.
+
+        The invariant behind plan decisions #11/#13: an existing volume
+        (001+002 applied, rows present) and a fresh volume must end with the
+        byte-identical messages shape, and the reconciling run must apply
+        exactly the two v3 migrations without touching existing rows.
+        """
+        v2_dir = tmp_path / "v2_migrations"
+        v2_dir.mkdir()
+        for name in ("001_conversations.sql", "002_app_settings.sql"):
+            (v2_dir / name).write_text((MIGRATIONS_PATH / name).read_text())
+
+        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+            # Path A: a v2-shaped volume — only 001+002 known, one turn stored.
+            _drop_migrated_state(conn)
+            assert run_migrations(conn, v2_dir) == ALL_MIGRATIONS[:2]
+            assert "condensed_query" not in _message_columns(conn)  # truly v2
+            with ConversationStore(pg_conninfo) as store:
+                conversation_id = store.create_conversation().conversation_id
+                store.append_message(conversation_id, "user", "pre-migration turn")
+
+            assert run_migrations(conn) == ALL_MIGRATIONS[2:]  # exactly 003/004
+            v2_shape = _message_columns(conn)
+            row = conn.execute(
+                "SELECT content, condensed_query, chat_engine FROM messages"
+            ).fetchone()
+            assert row == ("pre-migration turn", None, None)  # rows untouched, inert NULLs
+            assert run_migrations(conn) == []  # idempotent on the converged volume
+
+            # Path B: a fresh volume, the full runner from scratch.
+            _drop_migrated_state(conn)
+            run_migrations(conn)
+            assert _message_columns(conn) == v2_shape  # the two paths converge
 
 
 def make_chunk(index: int) -> RetrievedChunk:
@@ -152,6 +208,41 @@ class TestConversationStoreRoundTrip:
     def test_delete_unknown_is_a_noop(self, migrated_conninfo: str) -> None:
         with ConversationStore(migrated_conninfo) as store:
             assert store.delete_conversation("ghost") == 0
+
+    def test_recent_turns_bounds_in_sql_and_orders_oldest_first(
+        self, migrated_conninfo: str
+    ) -> None:
+        """The chat engine's history feed: newest ``limit`` turns, oldest first."""
+        with ConversationStore(migrated_conninfo) as store:
+            created = store.create_conversation()
+            conversation_id = created.conversation_id
+            for index in range(3):
+                store.append_message(conversation_id, "user", f"q{index}")
+                store.append_message(
+                    conversation_id,
+                    "assistant",
+                    f"a{index}",
+                    retrieval_method="hybrid",
+                    sources=[make_chunk(index)],  # must never be hydrated here
+                )
+
+            # The newest three of six messages, re-ordered oldest first.
+            assert store.recent_turns(conversation_id, limit=3) == [
+                ("assistant", "a1"),
+                ("user", "q2"),
+                ("assistant", "a2"),
+            ]
+            # A limit beyond the history returns everything, oldest first.
+            assert store.recent_turns(conversation_id, limit=100) == [
+                ("user", "q0"),
+                ("assistant", "a0"),
+                ("user", "q1"),
+                ("assistant", "a1"),
+                ("user", "q2"),
+                ("assistant", "a2"),
+            ]
+            assert store.recent_turns(conversation_id, limit=0) == []
+            assert store.recent_turns("ghost", limit=5) == []
 
     def test_auto_title_only_replaces_the_default(self, migrated_conninfo: str) -> None:
         class ScriptedLLM:

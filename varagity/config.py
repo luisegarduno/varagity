@@ -118,6 +118,12 @@ class Settings(BaseSettings):
             to the single llama.cpp server in v2; the knob exists so the
             composer quick-toggle survives the aliases becoming separate
             servers post-v2.
+        CHAT_ENGINE: Registry name of the chat engine preparing each turn's
+            retrieval query (spec_v3 §4.2; see ``varagity.chat``). ``simple``
+            is today's stateless behavior — the retriever searches with the
+            user's words, verbatim; v3 Phase 5 registers
+            ``condense_context``, which rewrites follow-ups into standalone
+            search queries against the conversation history.
         POSTGRES_HOST: PostgreSQL host (service name in-container).
         POSTGRES_PORT: PostgreSQL port.
         POSTGRES_DB: PostgreSQL database name.
@@ -225,6 +231,7 @@ class Settings(BaseSettings):
     LLM_CONTEXT_TOKENS: int = 16384
     CONTEXTUALIZE_MAX_TOKENS: int = 2048
     CHAT_MODEL_TYPE: str = "default"
+    CHAT_ENGINE: str = "simple"
 
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
@@ -609,6 +616,32 @@ class Settings(BaseSettings):
         allowed = ("default", "reasoning", "tool")
         if value not in allowed:
             raise ValueError(f"CHAT_MODEL_TYPE must be one of {allowed}; got {value!r}")
+        return value
+
+    @field_validator("CHAT_ENGINE")
+    @classmethod
+    def _validate_chat_engine(cls, value: str) -> str:
+        """Reject chat engines outside the spec_v3 §4.2 vocabulary.
+
+        The vocabulary is hard-coded (mirroring ``CHAT_MODEL_TYPE``) because
+        importing the engine registry here would be circular —
+        ``varagity/chat/`` reads this module through its model clients. The
+        tuple is regression-tested to equal
+        ``varagity.chat.CHAT_ENGINE_REGISTRY`` and grows in lockstep with it
+        (v3 Phase 5 adds ``condense_context``).
+
+        Args:
+            value: The configured ``CHAT_ENGINE`` value.
+
+        Returns:
+            The validated value, unchanged.
+
+        Raises:
+            ValueError: If ``value`` is not a registered engine name.
+        """
+        allowed = ("simple",)
+        if value not in allowed:
+            raise ValueError(f"CHAT_ENGINE must be one of {allowed}; got {value!r}")
         return value
 
     @field_validator("LLM_TEMPERATURE")
