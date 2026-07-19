@@ -76,14 +76,15 @@ export const CODEBASE_MAP = {
         sourceRef: "web/components/settings/SettingsDrawer.tsx",
       },
       {
-        // No sourceRef this phase — web/app/map/page.tsx does not exist yet;
-        // it is added in the Phase 3 commit that creates the page (guard and
-        // artifact land together, per the openapi.json precedent).
+        // Pinned to its own page now that Phase 3 has created it — the map's
+        // update rule applied to itself (guard and artifact land together, per
+        // the openapi.json precedent).
         id: "web-map",
         label: "Codebase Map",
         kind: "entry",
         sub: "this map; developer mode only",
         group: "Web app",
+        sourceRef: "web/app/map/page.tsx",
       },
 
       // --- CLI (v1 terminal front-end) ---

@@ -54,9 +54,12 @@ describe("CODEBASE_MAP shape", () => {
     ]);
   });
 
-  it("keeps web-map and store-corpus without a sourceRef in this phase", () => {
+  it("pins web-map to its page and keeps store-corpus sourceRef-free", () => {
     const byId = new Map(CODEBASE_MAP.graph.nodes.map((node) => [node.id, node]));
-    expect(byId.get("web-map")?.sourceRef).toBeUndefined();
+    // Phase 3 created web/app/map/page.tsx, so the map now pins itself to it
+    // (guard and artifact land together); store-corpus stays sourceRef-free
+    // because DOCS_PATH is gitignored and could never resolve on a CI checkout.
+    expect(byId.get("web-map")?.sourceRef).toBe("web/app/map/page.tsx");
     expect(byId.get("store-corpus")?.sourceRef).toBeUndefined();
   });
 
