@@ -15,3 +15,7 @@ conversation that produced it. Format: Context → Decision → Consequences.
 | [ADR-008](ADR-008-chunking-default.md) | `recursive_character` stays the chunking default (benchmark-decided) | Accepted |
 | [ADR-009](ADR-009-modality-expansion.md) | Office/web modalities via a generalized Docling core (images/audio deferred) | Accepted |
 | [ADR-010](ADR-010-document-page-preview.md) | Evidence-panel page previews via on-demand server-side locate + render | Accepted |
+| [ADR-011](ADR-011-chat-engine-condense.md) | The chat engine registry and Condense + Context (default stays `simple` — benchmark-decided) | Accepted |
+| [ADR-012](ADR-012-relative-path-uploads.md) | Relative-path uploads + the composer's client-side ingest queue | Accepted |
+| [ADR-013](ADR-013-corpus-gauges-vs-counters.md) | Store-derived corpus gauges over ingest-counter arithmetic | Accepted |
+| [ADR-014](ADR-014-bun-package-manager.md) | bun as the package manager, Node as the runtime | Accepted |

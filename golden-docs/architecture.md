@@ -7,9 +7,10 @@ two peer front-ends — a terminal CLI and a FastAPI service backing the Next.js
 web GUI — that ingest a corpus and answer questions with grounded, cited
 answers.
 
-This page describes the system **as built**. The forward-looking designs are
-[`spec.md`](https://github.com/luisegarduno/varagity/blob/main/spec.md) (v1)
-and `spec_v2.md` (v2), both at the repository root.
+This page describes the system **as built**. The forward-looking designs —
+`spec.md` (v1), `spec_v2.md` (v2), and `spec_v3.md` (v3), the documents the
+`§` references in docstrings point at — are untracked working papers under
+`thoughts/shared/specs/`.
 
 ## Service topology
 
@@ -163,12 +164,12 @@ flowchart LR
     iembed --> pg[("pgvector<br/>vectors + metadata")]
     iembed --> es[("Elasticsearch<br/>contextual BM25")]
 
-    subgraph query["Query (RETRIEVAL_METHOD)"]
+    subgraph query["Query (RETRIEVAL_METHOD · CHAT_ENGINE)"]
         direction LR
-        retrieve["retrieve<br/>semantic · bm25 · hybrid · reranked"] --> generate["generate<br/>grounded + cited"]
+        condense["condense<br/>(chat engine)"] --> retrieve["retrieve<br/>semantic · bm25 · hybrid · reranked"] --> generate["generate<br/>grounded + cited"]
     end
 
-    question(["question"]) --> retrieve
+    question(["question"]) --> condense
     pg --> retrieve
     es --> retrieve
     generate --> answer(["cited answer"])
@@ -180,13 +181,21 @@ flowchart LR
   pages automatically), plain text/markdown, office
   (`.docx`/`.pptx`/`.xlsx`), and web (`.html`/`.htm`); the chunking strategy
   is config-selected from five registered implementations.
-- **Query** — `embed(query) → retrieve → generate → display`. Retrieval method
-  is config-selected (`RETRIEVAL_METHOD`): `semantic` (pgvector cosine), `bm25`
-  (Elasticsearch), `hybrid` (weighted reciprocal-rank fusion of both — the
-  default), or `reranked` (a base method's candidates re-ordered by a
-  cross-encoder — see [below](#reranking-wired-in-v2)). The API front-end runs
-  the same path as a streaming flow (`query-stream`), delivering evidence and
-  answer deltas over SSE.
+- **Query** — `condense → embed(search query) → retrieve → generate →
+  display`. The condense stage is v3's **chat engine** (`CHAT_ENGINE`,
+  [ADR-011](adr/ADR-011-chat-engine-condense.md)): given the turn and its
+  conversation history it decides *what string the retriever searches with* —
+  `simple` (the default) passes the question through verbatim;
+  `condense_context` rewrites a follow-up into a standalone query. The split
+  is the invariant: the engine's `search_query` drives the query embedding
+  and BM25 while the **original** question always reaches the answer prompt.
+  Retrieval method is config-selected (`RETRIEVAL_METHOD`): `semantic`
+  (pgvector cosine), `bm25` (Elasticsearch), `hybrid` (weighted
+  reciprocal-rank fusion of both — the default), or `reranked` (a base
+  method's candidates re-ordered by a cross-encoder — see
+  [below](#reranking-wired-in-v2)). The API front-end runs the same path as a
+  streaming flow (`query-stream`), delivering evidence and answer deltas over
+  SSE.
 
 Since v2 every retrieved chunk carries an optional **`RetrievalTrace`** —
 per-arm ranks and scores, fused score and rank, rerank delta, final rank —
@@ -252,6 +261,7 @@ caller edits:
 | Parsers | `varagity/ingest/parsers/base.py` | discovery bucket | `text` (`.txt`/`.md`), `pdf` (Docling two-pass OCR), `office` (`.docx`/`.pptx`/`.xlsx`), `web` (`.html`/`.htm`) |
 | Chunking strategies | `varagity/chunking/base.py` | `CHUNKING_STRATEGY` | `recursive_character` (default — [ADR-008](adr/ADR-008-chunking-default.md)), `token_based`, `markdown_aware`, `semantic`, `docling_hybrid` |
 | Retrievers | `varagity/retrieval/base.py` | `RETRIEVAL_METHOD` | `semantic`, `bm25`, `hybrid`, `reranked` |
+| Chat engines | `varagity/chat/base.py` | `CHAT_ENGINE` | `simple` (default — [ADR-011](adr/ADR-011-chat-engine-condense.md)), `condense_context` |
 | OCR engines | `varagity/ingest/parsers/pdf.py` (a factory, deliberately not a registry) | `OCR_ENGINE` | `easyocr` (default, ADR-004), `tesseract` |
 | Model clients | `varagity/models/registry.py` | `model_type` argument | `embedding`, `rerank`, `default` (+ `reasoning`/`tool` aliases) |
 
@@ -329,11 +339,14 @@ varagity/
 │   ├── app_settings_store.py   # persisted runtime overrides + the _corpus_stale flag
 │   └── migrate.py, migrations/ # idempotent NNN_*.sql runner (runs on API startup)
 ├── retrieval/            # semantic.py, bm25.py (+ hydrate), hybrid.py, reranked.py
+├── chat/                 # chat-engine registry (ADR-011): base.py (PreparedQuery, Turn),
+│                         #   simple.py, condense.py + prompts.py
 ├── preview/              # evidence-panel page previews (ADR-010): normalize, locate
 │                         #   (pdfium, one global lock), render, source gate, pptx→pdf
 ├── generation/           # answer.py — context prompt + grounded generation + QueryState
 ├── pipeline/             # Prefect flows: ingest, query, query-stream, eval (thin @task adapters)
-├── observability/        # metrics.py — the Prometheus collector catalog (spec_v2 §6.2)
+├── observability/        # metrics.py (the Prometheus collector catalog, spec_v2 §6.2)
+│                         #   + corpus.py (store-derived corpus gauges — ADR-013)
 ├── api/                  # the FastAPI front-end (spec_v2 §4)
 │   ├── main.py           # app factory + lifespan (migrations, override replay)
 │   ├── routes/           # system, conversations, chat, settings, documents, ingest, metrics

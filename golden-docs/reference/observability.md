@@ -16,7 +16,8 @@ which question:
 Ingestion is rare and bursty, so `increase()`/`rate()` over an ingest
 counter reads `0` over *any* window — the counter's series is born at its
 full value after a restart, so Prometheus never observes the rise. Corpus
-size is therefore a gauge question, not a counter question (spec_v3 §6.1);
+size is therefore a gauge question, not a counter question (spec_v3 §6.1;
+[ADR-013](../adr/ADR-013-corpus-gauges-vs-counters.md) is the full record);
 `tests/unit/test_dashboards.py` fails the build if a panel regresses to the
 counter form.
 

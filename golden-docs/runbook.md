@@ -142,6 +142,7 @@ uv run main.py chat                # ingest, then the Q&A loop (the default)
 uv run main.py -v 2 chat           # verbose: full chunk/retrieval panels
 uv run --group eval main.py eval       # 5-config retrieval matrix + chunker sweep
 uv run --group eval main.py eval ocr   # OCR engine benchmark
+uv run --group eval main.py eval chat  # multi-turn chat-engine eval (ADR-011)
 ```
 
 **The browser flow** is the same pipeline without a terminal: at
@@ -151,6 +152,16 @@ live per-stage/per-chunk progress (`POST /api/ingest` — the same tracked
 flow on a background thread), and ask. Prefer it for ingests you want on the
 Grafana Ingestion dashboard ([per-process
 metrics](#observability-operations)).
+
+Since v3 the chat composer's **📎 attach** is the one-click door
+([ADR-012](adr/ADR-012-relative-path-uploads.md)): files *and folders*
+upload (folder structure preserved under `DOCS_PATH` — it is part of each
+document's identity), auto-ingest with a progress chip, and queue
+client-side behind an already-running ingest instead of erroring. Batch
+caps: `UPLOAD_MAX_FILES` (500) and `UPLOAD_MAX_TOTAL_MB` (2048). A composer
+upload runs `reingest=false`, so it never clears the stale-corpus flag
+([below](#runtime-settings-the-stale-corpus-flag)). `/corpus` remains the
+full management surface with its explicit two-step.
 
 Every UI in one place:
 
@@ -175,6 +186,20 @@ variant does not.
 flip it live from the GUI settings drawer, no restart. Handy for A/B-ing a
 query that one method struggles with.
 
+**Chat engine** is the same shape of toggle (v3,
+[ADR-011](adr/ADR-011-chat-engine-condense.md)):
+`CHAT_ENGINE=simple|condense_context` (default `simple` — the
+benchmark-decided call; condensing wins pronoun follow-ups decisively but
+costs a mean ~8.6 s LLM round-trip before retrieval on this stack's
+reasoning model). Under `condense_context`, follow-ups are rewritten into
+standalone search queries against the last `CONDENSE_HISTORY_TURNS` turns
+— the evidence panel shows the rewrite as "Searched for: …", and the
+answer prompt always keeps the user's original words.
+`CONDENSE_ENABLED=false` is the **kill switch, not an engine**:
+`condense_context` then degrades to `simple` behavior and logs it —
+selection and the toggle are deliberately orthogonal, exactly like
+`RERANK_ENABLED` ([below](#the-reranker-rides-the-embedding-container)).
+
 ## Runtime settings & the stale-corpus flag
 
 The GUI's settings drawer writes through `PATCH /api/settings` (spec_v2
@@ -184,8 +209,10 @@ restarts and take precedence over `.env`. `GET /api/settings` reports the
 effective values plus the stale flag.
 
 - **Query-time knobs** — `RETRIEVAL_METHOD`, `TOP_K`, the fusion weights,
-  the rerank toggles, `LLM_TEMPERATURE`, `MAX_TOKENS`, `CHAT_MODEL_TYPE` —
-  take effect on the **next question**. No restart, no reingest.
+  the rerank toggles, `LLM_TEMPERATURE`, `MAX_TOKENS`, `CHAT_MODEL_TYPE`,
+  and v3's `CHAT_ENGINE` + `CONDENSE_*` family — take effect on the
+  **next question**. No restart, no reingest (deliberately: none of the
+  chat-engine settings are reingest-affecting).
 - **Ingest-time knobs** — `CHUNKING_STRATEGY`, `CHUNK_SIZE`/`CHUNK_OVERLAP`,
   `CONTEXTUALIZE`, `OCR_ENGINE` — don't change content hashes, so changing
   one while documents are ingested flags the corpus **stale**, and the GUI

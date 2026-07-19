@@ -20,6 +20,8 @@ One page per package:
   conversation persistence, app settings, the migration runner
 - [Retrieval](retrieval.md) — semantic / bm25 / hybrid + fusion, and the
   `reranked` composition over them
+- [Chat engines](chat.md) — the `PreparedQuery` two-string split, the
+  registry, and the `simple` / `condense_context` engines
 - [Generation](generation.md) — context prompt & grounded answers
 - [Orchestration](pipeline.md) — the Prefect flows
 - [HTTP API](api.md) — the FastAPI service: SSE chat, conversations,

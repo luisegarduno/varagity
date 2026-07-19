@@ -138,7 +138,8 @@ frame. Tracking and streaming compose; there is no second pipeline.
 
 ```mermaid
 flowchart TB
-    start(["query_flow(query) · query_stream_flow(query)"]) --> embed["embed_query<br/>retriever.encode_query() — None for bm25"]
+    start(["query_flow(query, history) · query_stream_flow(query, history)"]) --> condense["condense_query<br/>chat engine: simple | condense_context — spec_v3 §4.2<br/>PreparedQuery: search_query / original_query"]
+    condense --> embed["embed_query<br/>retriever.encode_query(search_query) — None for bm25"]
     embed --> retrieve["retrieve<br/>top-k via semantic | bm25 | hybrid | reranked<br/>(reranked: over-fetch → cross-encode → cut — spec_v2 §5)"]
     retrieve -.->|on_retrieved| hook["CLI matches table ·<br/>SSE retrieval event"]
     retrieve --> generate["generate_answer<br/>grounded, cited answer — §10.2 prompt"]
@@ -150,11 +151,23 @@ flowchart TB
     class hook sidecar;
 ```
 
-Both flows share the staging — embed → retrieve → generate, with
+Both flows share the staging — condense → embed → retrieve → generate, with
 `on_retrieved` firing between retrieve and generate — and return the spec
-§10.1 state dict; `query_stream_flow` extends it as `StreamedQueryState`
-with `reasoning`, `aborted`, and `usage`.
+§10.1 state dict (which since v3 carries `prepared: PreparedQuery`);
+`query_stream_flow` extends it as `StreamedQueryState` with `reasoning`,
+`aborted`, and `usage`.
 
+- **The condense stage is always in the graph** (v3, spec_v3 §4.2;
+  [ADR-011](adr/ADR-011-chat-engine-condense.md)): `condense_query` runs the
+  configured **chat engine** over the question and its conversation history
+  and returns the `PreparedQuery` two-string split — everything downstream
+  retrieves with `search_query` while the answer prompt always gets
+  `original_query`, the user's verbatim words. Under `simple` (the default)
+  it is the identity split in ~3 ms with no LLM call; `condense_context`
+  makes one non-streaming LLM call to resolve a follow-up against history —
+  and **falls back to the raw query** on any failure (empty, over-length, or
+  a raised call — logged at `WARNING`, the turn never dies there). The first
+  turn never condenses: empty history is the identity path.
 - **Query embedding is its own tracked stage** via the retrievers'
   `encode_query()` seam; the vector is handed to `retrieve` so nothing is
   encoded twice. For `bm25` it is `None` (nothing to encode).
@@ -195,8 +208,11 @@ with `reasoning`, `aborted`, and `usage`.
   clients already retry transient HTTP failures internally, and stacked
   backoff would multiply the wait before a hard failure surfaces at the
   prompt.
+- **No Prefect-level retries on `condense_query` either** — the same
+  convention, sharpened by the fallback: a condense failure must fail fast
+  *into the raw-query fallback*, not retry into the user's latency budget.
 - **Prometheus probe points**: both flow bodies time
-  `embed`/`retrieve`/`generate` around the task calls
+  `condense`/`embed`/`retrieve`/`generate` around the task calls
   (`varagity_query_latency_seconds{stage, method}`), record the returned
   scores (`varagity_retrieval_score`), and count the outcome
   (`varagity_query_total{outcome=ok|aborted|error}`); the streaming flow
@@ -207,10 +223,10 @@ with `reasoning`, `aborted`, and `usage`.
 
 ## Evaluation flows
 
-Thin flows (`eval-matrix`, `eval-ocr`) over the spec §16 harness
-(`varagity/eval/`); each eval ingest is a tracked **subflow** with per-stage
-task runs. Both need Docker (ephemeral testcontainers stores) and the live
-GPU services.
+Thin flows (`eval-matrix`, `eval-ocr`, `eval-chat`) over the spec §16
+harness (`varagity/eval/`); each eval ingest is a tracked **subflow** with
+per-stage task runs. All need Docker (ephemeral testcontainers stores) and
+the live GPU services.
 
 - **`eval-matrix`** (`main.py eval`): recall@k / pass@k (k ∈ {5, 10, 20})
   across the five-configuration ladder — (1) semantic non-contextual,
@@ -225,6 +241,24 @@ GPU services.
   ADR-004 — per engine: CER/WER against the fixtures' known ground truth,
   pages/sec, and (supplementary) retrieval recall on the scanned-doc golden
   queries with the engine as the only variable.
+- **`eval-chat`** (`main.py eval chat`, v3 — spec_v3 §4.9,
+  [ADR-011](adr/ADR-011-chat-engine-condense.md)): the multi-turn
+  chat-engine eval that decided the shipped `CHAT_ENGINE` default. One
+  contextual ingest into ephemeral stores backs the run; every registered
+  engine (**enumerated from the registry**, like the chunker sweep) plays
+  the hand-built conversation fixtures (`tests/fixtures/conversations/` —
+  pronoun follow-ups, elliptical refinements, and topic shifts, each turn
+  tagged and fact-anchored), with **scripted assistant replies** so both
+  engines see byte-identical history and zero answer-generation calls are
+  paid. Each turn's engine-produced `search_query` is scored fact-anchored
+  under both `hybrid` and `reranked` at k ∈ {1, 3, 5} (shallow on purpose —
+  the 16-chunk corpus makes recall@20 meaningless), with condense latency
+  recorded per turn. The condense settings are pinned so a host env with
+  the kill switch off can't silently measure `condense_context` as
+  `simple`. The 2026-07-19 verdict: condensing wins the pronoun slice
+  decisively (recall@1 1.000 vs 0.600 under `reranked`) and never drags a
+  topic shift, but costs a mean 8.6 s pre-retrieval LLM call on follow-ups
+  — **the default stays `simple`**, a measured "no".
 
 How `eval-matrix` covers all five configs with only two ingests into the
 throwaway stores — and where the chunker sweep rides:
@@ -280,9 +314,10 @@ chunk id to its acceptable fact-carrying set.
 | Command | Flow(s) | Behavior |
 |---|---|---|
 | `uv run main.py ingest [--reingest]` | `ingest` | One tracked ingest run; exit 1 if any file failed |
-| `uv run main.py chat` *(default)* | `ingest`, then `query` per question | Spec §13 startup sequence: ingest first, then the Q&A loop (`:quit` exits) |
+| `uv run main.py chat` *(default)* | `ingest`, then `query` per question | Spec §13 startup sequence: ingest first, then the Q&A loop (`:quit` exits). Since v3 the loop threads an **in-memory history** into each turn (session-scoped, cleared by `:quit`, never persisted) so the configured chat engine can condense |
 | `uv run --group eval main.py eval` | `eval-matrix` (+ ingest subflows) | 5-config retrieval matrix + the chunker sweep, on ephemeral stores |
 | `uv run --group eval main.py eval ocr` | `eval-ocr` (+ ingest subflows) | OCR engine benchmark (CER/WER, pages/s, recall) |
+| `uv run --group eval main.py eval chat` | `eval-chat` (+ ingest subflow) | Multi-turn chat-engine eval over the conversation fixtures ([above](#evaluation-flows)) |
 
 The HTTP API is a **peer front-end over the same flows** (spec_v2 §4.9):
 `POST /api/chat` runs `query-stream` (in a threadpool under the async edge —

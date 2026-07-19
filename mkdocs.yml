@@ -152,6 +152,10 @@ nav:
       - ADR-008 Chunking-strategy default: adr/ADR-008-chunking-default.md
       - ADR-009 Document modality expansion: adr/ADR-009-modality-expansion.md
       - ADR-010 Document page preview: adr/ADR-010-document-page-preview.md
+      - ADR-011 Chat engine registry & condense: adr/ADR-011-chat-engine-condense.md
+      - ADR-012 Relative-path uploads: adr/ADR-012-relative-path-uploads.md
+      - ADR-013 Corpus gauges vs ingest counters: adr/ADR-013-corpus-gauges-vs-counters.md
+      - ADR-014 bun as the package manager: adr/ADR-014-bun-package-manager.md
   - API reference:
       - reference/index.md
       - Configuration & logging: reference/config.md
@@ -161,6 +165,7 @@ nav:
       - Contextual Retrieval: reference/context.md
       - Stores: reference/stores.md
       - Retrieval: reference/retrieval.md
+      - Chat engines: reference/chat.md
       - Generation: reference/generation.md
       - Orchestration: reference/pipeline.md
       - HTTP API: reference/api.md

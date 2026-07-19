@@ -14,12 +14,20 @@ migrations, a Next.js chat GUI whose evidence panel shows "how this answer was b
 inline citations, office/web document modalities, four new chunking strategies (five total)
 with a benchmark sweep, Prometheus/Grafana observability, corpus management + a live
 settings UI, the design system (a11y, ⌘K palette, opt-in Playwright e2e), and hardening
-(ADR-005…009, two-job CI with coverage floors, as-built docs refresh).
+(ADR-005…009, two-job CI with coverage floors, as-built docs refresh). v3 (complete) is
+the polish release: a **chat-engine registry** whose `condense_context` engine rewrites
+follow-ups into standalone search queries against conversation history (the shipped
+default stays `simple` — benchmark-decided, ADR-011; the original words always drive the
+answer prompt), composer 📎 uploads of files *and folders* with auto-ingest + client-side
+409 queueing (ADR-012), the observability repair (store-derived corpus gauges ADR-013,
+honest Infra empty-states, the prefect-exporter `OFFSET_MINUTES` fix), and pnpm→bun as
+package manager only (ADR-014). Page previews shipped between v2 and v3 (ADR-010).
 
 Where things live:
-- `spec.md` — the v1 design; `spec_v2.md` — the v2 design (§ references in docstrings point at both).
+- `spec.md` / `spec_v2.md` / `spec_v3.md` — the v1/v2/v3 designs (§ references in
+  docstrings point at them), untracked under `thoughts/shared/specs/`.
 - `golden-docs/` — **as-built** documentation, rendered by MkDocs (`uv run mkdocs serve`):
-  architecture, data model, pipelines, runbook, ADRs 001–009, Python API reference;
+  architecture, data model, pipelines, runbook, ADRs 001–014, Python API reference;
   `golden-docs/api.md` is the HTTP contract + SSE protocols, rendered from the
   `golden-docs/openapi.json` snapshot (regenerate via `scripts/export_openapi.py` —
   a unit test fails on drift).
@@ -79,6 +87,7 @@ uv run main.py chat                # ingest, then terminal Q&A (default command;
 uv run uvicorn varagity.api.main:create_app --factory --port 8000   # API on the host
 uv run --group eval main.py eval       # 5-config retrieval matrix + chunker sweep (needs Docker + live GPU services)
 uv run --group eval main.py eval ocr   # OCR engine benchmark
+uv run --group eval main.py eval chat  # multi-turn chat-engine eval (the ADR-011 decision harness)
 
 uv run pytest                      # unit suite incl. async API tests (coverage floor 80%)
 uv run pytest -m integration       # real Postgres/ES via testcontainers (needs Docker)
@@ -106,10 +115,12 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
 
 - **Registries for pluggable families** (spec §5.1): parsers (`pdf`, `text`, `office`,
   `web`), chunking strategies (`recursive_character`, `token_based`, `markdown_aware`,
-  `semantic`, `docling_hybrid`), and retrievers (`semantic`, `bm25`, `hybrid`, `reranked`)
-  self-register via `@register("name")` in their package; adding an implementation = one
-  new file + its import line in the package `__init__`, zero caller edits. OCR engines use
-  the same shape as a factory in `parsers/pdf.py`.
+  `semantic`, `docling_hybrid`), retrievers (`semantic`, `bm25`, `hybrid`, `reranked`),
+  and chat engines (`simple`, `condense_context`) self-register via `@register("name")`
+  in their package; adding an implementation = one new file + its import line in the
+  package `__init__`, zero caller edits. OCR engines use the same shape as a factory in
+  `parsers/pdf.py`. Registry vocabularies are **hardcoded again** in their `config.py`
+  validators (circular import), each with a tuple↔registry regression test.
 - **Configuration**: modules read the `Settings` object from `varagity/config.py`
   (`get_settings()`, cached) — never `os.getenv`. `.env` is consumed by both compose
   (lowercase interpolation vars) and pydantic-settings.
@@ -172,6 +183,14 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
 - `RERANK_ENABLED=false` is a kill switch, not a method: `RETRIEVAL_METHOD=reranked` then
   degrades to its base method (and logs it). Method selection and the toggle are
   deliberately orthogonal.
+- `CONDENSE_ENABLED=false` is likewise a kill switch, not an engine:
+  `CHAT_ENGINE=condense_context` then degrades to `simple` behavior (and logs it).
+  Engine selection and the toggle are deliberately orthogonal — and the engine name is
+  still persisted on the turn, with `condensed_query` NULL marking the degrade.
+- The condenser's output **must** pass through `clean_response()` (plus the
+  `CONDENSE_QUERY_LABEL` echo strip): llama.cpp emits `<think>` blocks and the
+  non-streaming `LLMClient.generate()` does **not** strip them — an unstripped one goes
+  straight into the embedding model as the search query and silently destroys retrieval.
 - Line-initial `[SOURCE]: …` is a CommonMark link-reference *definition* and silently
   vanishes when rendered — the web app rewrites citations to chips **before** markdown
   parsing (`web/lib/citations.ts`). Mind this when touching answer rendering.
@@ -191,15 +210,28 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
   hashes — unchanged files are skipped until `ingest --reingest`.
 - Metrics are **per-process**: CLI ingests record into the CLI's own (never-scraped)
   registry and never reach Grafana — run ingests through the API/GUI to populate the
-  Ingestion dashboard.
+  Ingestion dashboard. (The `varagity_corpus_*` gauges are the exception: they read
+  pgvector at scrape time, so they see CLI ingests too — ADR-013.)
+- `increase()`/`rate()` over the ingest counters returns **0 over any window**: a
+  labelled counter's child series is born at its full value, so Prometheus never sees the
+  rise. Corpus size is a gauge question (`varagity_corpus_*`); counters only answer
+  per-event questions — `tests/unit/test_dashboards.py` fails any panel that regresses.
+- `prefecthq/prometheus-prefect-exporter` windows flow-run metrics to the last
+  `OFFSET_MINUTES` (image default **3**) — a bursty workload reads 0; compose sets 1440.
+  And `PREFECT_API_URL` **must** keep its `/api` suffix: the exporter's healthz appends
+  `/health` and `SystemExit`s, so a wrong URL is a crash-loop, not an empty panel.
 - The stale-corpus flag is cleared only by a **completed API-driven** `reingest=true` run —
-  not by CLI `ingest --reingest`, not by patching the setting back.
+  not by CLI `ingest --reingest`, not by patching the setting back, and not by a composer
+  📎 upload (those auto-ingest with `reingest=false`, deliberately).
 - Preview endpoints degrade per-document (`available:false` + `reason`; the page GET turns
   the reason into a 404 code), never 500 — host-mode runs without LibreOffice lose only
   PPTX previews (`conversion_unavailable`). `PREVIEW_*` settings are env-only (not in the
   settings drawer); `preview_enabled` is read-only in `GET /api/config`.
 - `golden-docs/openapi.json` must be regenerated (`uv run python scripts/export_openapi.py`)
   whenever the API surface changes — a unit test fails otherwise.
+- `bun install` silently **converts** a `pnpm-lock.yaml` into `bun.lock` when no `bun.lock`
+  exists — never let both lockfiles live in the repo, or the next install re-converts a
+  stale file. (`web/` has only `bun.lock` since v3.)
 
 ## Package Management
 

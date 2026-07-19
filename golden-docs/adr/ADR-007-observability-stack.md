@@ -1,6 +1,6 @@
 # ADR-007: In-app Prometheus metrics + provisioned Grafana
 
-**Status:** Accepted (2026-07-14)
+**Status:** Accepted (2026-07-14) · Amended (2026-07-19 — [below](#amendment-2026-07-19-v3-phase-2))
 
 ## Context
 
@@ -83,3 +83,45 @@ and the dashboards must work with zero click-ops (v2 DoD).
 - Rejected: multiprocess registry (`PROMETHEUS_MULTIPROC_DIR` complexity
   for a single-user stack; scale by replicas instead), alerting and
   long-term storage tuning (out of scope until something pages a human).
+
+## Amendment (2026-07-19, v3 Phase 2)
+
+v3's observability repair (spec_v3 §6) corrected one consequence above
+and closed the exporter question this record left open.
+
+- **The per-process consequence understated the counter problem.** It is
+  not just that CLI ingests never reach Grafana — a *labelled* counter's
+  child series is **born at its full value** after a process start
+  (`…{file_type="md"}` doesn't exist until its first `.inc()`, so
+  Prometheus never observes a rise inside the series), which makes
+  `increase()`/`rate()` over the ingest counters read **0 over any
+  window**. That is why every Ingestion panel read zero against a
+  15-document corpus while the metrics themselves were correct. Corpus
+  size is now answered by **store-derived gauges** read from pgvector at
+  scrape time ([ADR-013](ADR-013-corpus-gauges-vs-counters.md)); the
+  counters stay for per-event questions; and a dashboard lint
+  (`tests/unit/test_dashboards.py`) fails the unit suite on any
+  `increase()`/`rate()` over a `varagity_ingest_*` counter.
+- **The prefect-exporter's zeros were never upstream issue #120.** Read
+  from the running `3.6.1` image's own source: the exporter windows its
+  flow-*run* queries to runs started within the last `OFFSET_MINUTES` —
+  **default 3** — so this stack's rare, bursty flows correctly read
+  `prefect_flow_runs_total = 0` between runs (the counter bug class
+  again, one layer up; the unwindowed `prefect_flows_total` was always
+  right). The compose service now sets `OFFSET_MINUTES=1440` — "did
+  anything run today?" is the question the panel exists for — verified
+  live: `prefect_info_flow_runs` 0 → 20 within one scrape.
+  [prometheus-prefect-exporter#120](https://github.com/PrefectHQ/prometheus-prefect-exporter/issues/120)
+  (open since 2026-03-06, no root cause, no maintainer response) shares
+  the symptom and is **not our bug**; `3.6.1` stays pinned.
+- Two operational facts recorded with the fix: **`PREFECT_API_URL` must
+  keep its `/api` suffix** — the exporter's healthz probe concatenates
+  `/health` with no fixup and `SystemExit`s on failure, so a wrong URL
+  is a crash-loop, not an empty panel. And **no published compatibility
+  matrix exists** between exporter and Prefect-server versions — `3.6.1`
+  working against a Prefect 3.x server is an empirically verified
+  pairing, not a supported one.
+- `prefect_deployments_total` / `prefect_work_pools_total` read **0
+  forever by design** on this stack (flows run in-process; there are no
+  deployments or workers to count) — their panel says so in its
+  description rather than being deleted.

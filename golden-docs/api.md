@@ -31,8 +31,11 @@ The code vocabulary, as built:
 |---|---|---|
 | `validation_error` | 422 | Any request-body/parameter validation failure (field errors ride in `message`). |
 | `unknown_retrieval_method` | 422 | `POST /api/chat` override naming no registered retriever. |
+| `unknown_chat_engine` | 422 | `POST /api/chat` override naming no registered chat engine. |
 | `unknown_setting` / `invalid_settings` | 422 | `PATCH /api/settings` — unknown name / value failing the `Settings` validators (linked settings validate as a merged whole). |
 | `no_file_stored` | 422 | `POST /api/documents` when every file in the batch was rejected. |
+| `paths_mismatch` | 422 | `POST /api/documents` when the `paths` form field doesn't pair 1:1 with `files` (the folder-upload positional contract is checked, not trusted). |
+| `too_many_files` / `batch_too_large` | 422 | `POST /api/documents` when the batch busts `UPLOAD_MAX_FILES` / `UPLOAD_MAX_TOTAL_MB` — rejected before any byte is written. Per-file problems (`invalid_path`, `path_too_deep`, `extension_not_allowed`, `file_too_large`, …) are **not** errors: they ride `UploadedFileOut.reason` inside the 201. |
 | `conversation_not_found` | 404 | `POST /api/chat` (pre-stream) and the conversation routes. |
 | `document_not_found` | 404 | `DELETE /api/documents/{doc_id}` and the two `…/preview/*` routes — the bulk `POST /api/documents/delete` reports unknown ids in `not_found` rather than failing the batch. |
 | `preview_disabled`, `unsupported_type`, `file_missing`, `file_changed`, `conversion_unavailable`, `conversion_failed`, `page_out_of_range` | 404 | `GET /api/documents/{doc_id}/preview/page/{page}` only — an `<img>` can't read a JSON envelope, so the page route turns each degrade reason into a 404 code. The locate route reports the same conditions inside a **200** envelope instead ([below](#the-preview-pair-degradable-by-design)). |
@@ -72,7 +75,7 @@ with zero `stats` frames, so clients must treat their absence as normal.
 
 | Event | Payload | Fields |
 |---|---|---|
-| `retrieval` | `RetrievalEvent` | `chunks` (list of `RetrievedChunk`, best first, each with metadata and — when the method fills it — a `RetrievalTrace`), `method`, `top_k`, `reranked_to` (`RERANK_TOP_N` when the `reranked` method narrowed the list, else `null`). |
+| `retrieval` | `RetrievalEvent` | `chunks` (list of `RetrievedChunk`, best first, each with metadata and — when the method fills it — a `RetrievalTrace`), `method`, `top_k`, `reranked_to` (`RERANK_TOP_N` when the `reranked` method narrowed the list, else `null`), `condensed_query` (v3 — the standalone search query the chat engine actually retrieved with, `null` whenever the turn wasn't condensed: a first turn, the `simple` engine, the kill switch, or the raw-query fallback; [ADR-011](adr/ADR-011-chat-engine-condense.md)). |
 | `reasoning` | `DeltaEvent` | `delta` — the next `<think>` fragment, stream order. |
 | `token` | `DeltaEvent` | `delta` — the next answer fragment. |
 | `stats` | `StatsEvent` | `tokens_per_second` (decode throughput so far, cumulative average — it settles rather than jitters), `completion_tokens` (tokens decoded so far). Warmup-gated (no frame before 8 decoded tokens — the model server's first readings compute absurd rates) and throttled to ≥250 ms apart. |
@@ -81,8 +84,8 @@ with zero `stats` frames, so clients must treat their absence as normal.
 
 **Failure surfaces split by stream state.** Everything detectable before
 streaming is a clean structured status, checked cheapest-first: body shape
-(422 `validation_error`) → retrieval-method resolution (422
-`unknown_retrieval_method`) → dependency preflight (503
+(422 `validation_error`) → retrieval-method / chat-engine resolution (422
+`unknown_retrieval_method` / `unknown_chat_engine`) → dependency preflight (503
 `<service>_unreachable`, probing `postgres`, `elasticsearch`, `llamacpp`,
 `infinity` — prefect is deliberately absent: without a server, flows fall
 back to an ephemeral in-process API, so chat works untracked) → conversation

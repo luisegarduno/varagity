@@ -229,8 +229,14 @@ recorded fallback if migrations ever get non-trivial —
   failure fails API startup: serving on a half-applied schema would be worse
   than not starting.
 
-Current migrations: `001_conversations.sql` and `002_app_settings.sql` — the
-next two sections.
+Current migrations: `001_conversations.sql` and `002_app_settings.sql` (the
+next two sections), plus v3's `003_condensed_query.sql` and
+`004_message_engine.sql` — two nullable `ALTER TABLE messages ADD COLUMN`s
+for the chat engine's provenance snapshot
+([below](#conversation-persistence)). `schema.sql` deliberately needed no
+edit for 003/004: it holds only the v1 chunk-side tables — `messages` exists
+solely in `001`, so both install paths (fresh volume and existing `pgdata`)
+converge through the runner alone.
 
 ## Conversation persistence
 
@@ -257,6 +263,11 @@ CREATE TABLE IF NOT EXISTS messages (
     latency_ms       JSONB,                   -- per-stage timings
     reasoning        TEXT                     -- captured <think> stream, if any
 );
+
+-- v3 (migrations 003/004): the chat-engine provenance snapshot — both
+-- nullable, both assistant-only (ADR-011):
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS condensed_query TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS chat_engine     TEXT;
 
 CREATE TABLE IF NOT EXISTS message_sources (
     message_id       TEXT NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
@@ -291,6 +302,8 @@ erDiagram
         text retrieval_method "assistant turns only"
         jsonb latency_ms "per-stage timings"
         text reasoning "captured think stream"
+        text condensed_query "v3 · the search rewrite, if any"
+        text chat_engine "v3 · engine that produced the turn"
     }
     message_sources {
         text message_id PK "composite with rank"
@@ -316,6 +329,18 @@ Notes:
 - Assistant-turn provenance rides on `messages` itself: `retrieval_method`,
   per-stage `latency_ms` (JSONB), and the captured `<think>` stream in
   `reasoning` — all `NULL` for user turns.
+- **v3 adds the chat-engine snapshot** (migrations 003/004;
+  [ADR-011](adr/ADR-011-chat-engine-condense.md)): `condensed_query` is the
+  standalone search query that actually drove retrieval — the evidence
+  panel's "Searched for: …" line, live and on reload — and `chat_engine` is
+  the registry name of the engine that produced the turn. `NULL`
+  `condensed_query` means "not condensed" (a first turn, the `simple`
+  engine, the kill switch, or the raw-query fallback); the engine name is
+  persisted **even when degraded**, mirroring how `retrieval_method`
+  persists `reranked` under `RERANK_ENABLED=false`. Same
+  snapshot-over-reference rationale as `message_sources.trace`: the columns
+  explain a historical answer, so they must outlive the settings that
+  produced it.
 - A turn is persisted in **one transaction** (`append_message`): the message,
   its `message_sources` rows (rank 1-based, best first), and the
   conversation's `updated_at` bump — a partial failure leaves no dangling
