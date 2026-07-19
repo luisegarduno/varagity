@@ -1,0 +1,27 @@
+{
+  "name": "aurora-to-tidal-shift",
+  "turns": [
+    {
+      "query": "At what depth is the Aurora research station anchored?",
+      "assistant": "Aurora is anchored to the Meridian Trench at a depth of 2,847 meters.",
+      "relevant": [
+        {"rel_source": "aurora_station.md", "chunk_index": 0, "fact": "2,847 meters"}
+      ]
+    },
+    {
+      "query": "Who runs its main project?",
+      "kind": "pronoun",
+      "assistant": "Dr. Imogen Vasquez-Thorn has led the GLASS EEL project since 2021.",
+      "relevant": [
+        {"rel_source": "aurora_station.md", "chunk_index": 2, "fact": "Imogen Vasquez-Thorn"}
+      ]
+    },
+    {
+      "query": "How many underwater turbines does the Corvo Tidal Grid consist of?",
+      "kind": "topic_shift",
+      "relevant": [
+        {"rel_source": "tidal_grid.txt", "chunk_index": 0, "fact": "87 underwater turbines"}
+      ]
+    }
+  ]
+}

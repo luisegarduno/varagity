@@ -1,0 +1,19 @@
+{
+  "name": "commissioning-dates",
+  "turns": [
+    {
+      "query": "When was the Saltmere Coastal Observatory commissioned?",
+      "assistant": "The Saltmere Coastal Observatory was commissioned in 2017.",
+      "relevant": [
+        {"rel_source": "saltmere_observatory.pdf", "chunk_index": 0, "fact": "in 2017"}
+      ]
+    },
+    {
+      "query": "And the Corvo grid?",
+      "kind": "elliptical",
+      "relevant": [
+        {"rel_source": "tidal_grid.txt", "chunk_index": 1, "fact": "14 February 2023"}
+      ]
+    }
+  ]
+}

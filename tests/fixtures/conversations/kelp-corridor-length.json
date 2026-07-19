@@ -1,0 +1,19 @@
+{
+  "name": "kelp-corridor-length",
+  "turns": [
+    {
+      "query": "What is the most unusual feature of the Corvo Tidal Grid?",
+      "assistant": "Its most unusual feature is the kelp corridor — a strip of cultivated kelp planted between two of its turbine arrays to dampen turbulence.",
+      "relevant": [
+        {"rel_source": "tidal_grid.txt", "chunk_index": 2, "fact": "kelp corridor"}
+      ]
+    },
+    {
+      "query": "How long is it?",
+      "kind": "pronoun",
+      "relevant": [
+        {"rel_source": "tidal_grid.txt", "chunk_index": 2, "fact": "1.8-kilometer"}
+      ]
+    }
+  ]
+}

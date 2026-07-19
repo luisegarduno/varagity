@@ -22,8 +22,15 @@ from varagity.config import get_settings
 # Must precede the prefect import chain below (see the module docstring).
 os.environ.setdefault("PREFECT_API_URL", get_settings().PREFECT_API_URL)
 
-from varagity.pipeline.eval_flow import eval_flow, ocr_benchmark_flow  # noqa: E402
+from varagity.pipeline.eval_flow import chat_eval_flow, eval_flow, ocr_benchmark_flow  # noqa: E402
 from varagity.pipeline.ingest_flow import ingest_flow  # noqa: E402
 from varagity.pipeline.query_flow import query_flow, query_stream_flow  # noqa: E402
 
-__all__ = ["eval_flow", "ingest_flow", "ocr_benchmark_flow", "query_flow", "query_stream_flow"]
+__all__ = [
+    "chat_eval_flow",
+    "eval_flow",
+    "ingest_flow",
+    "ocr_benchmark_flow",
+    "query_flow",
+    "query_stream_flow",
+]

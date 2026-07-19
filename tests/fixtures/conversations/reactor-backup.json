@@ -1,0 +1,19 @@
+{
+  "name": "reactor-backup",
+  "turns": [
+    {
+      "query": "What powers the Aurora station?",
+      "assistant": "Aurora is powered by a closed-loop thorium micro-reactor nicknamed Lantern.",
+      "relevant": [
+        {"rel_source": "aurora_station.md", "chunk_index": 1, "fact": "thorium micro-reactor"}
+      ]
+    },
+    {
+      "query": "How long do the backups last if it fails?",
+      "kind": "pronoun",
+      "relevant": [
+        {"rel_source": "aurora_station.md", "chunk_index": 1, "fact": "96 hours"}
+      ]
+    }
+  ]
+}

@@ -25,10 +25,17 @@ from rich.table import Table
 from varagity.chat.base import Turn
 from varagity.config import get_settings
 from varagity.debug.show import console, trace_badges
+from varagity.eval.datasets import CONVERSATION_KINDS
 from varagity.ingest.loader import IngestSummary
 from varagity.logging_setup import setup_logging
 from varagity.models.registry import get_model
-from varagity.pipeline import eval_flow, ingest_flow, ocr_benchmark_flow, query_flow
+from varagity.pipeline import (
+    chat_eval_flow,
+    eval_flow,
+    ingest_flow,
+    ocr_benchmark_flow,
+    query_flow,
+)
 from varagity.retrieval import get_retriever
 from varagity.stores.records import RetrievedChunk
 
@@ -101,7 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="measure retrieval quality (recall@k/pass@k, 5-config matrix) on ephemeral stores",
         description="Run the spec §16 evaluation harness against ephemeral testcontainers "
         "stores (Docker required) and the live GPU services. Without a target, runs the "
-        "5-configuration retrieval matrix; `eval ocr` benchmarks the OCR engines.",
+        "5-configuration retrieval matrix; `eval ocr` benchmarks the OCR engines; "
+        "`eval chat` compares the chat engines on multi-turn conversations.",
     )
     _add_verbose_option(evaluate, default=argparse.SUPPRESS)
     eval_targets = evaluate.add_subparsers(dest="eval_command", metavar="TARGET")
@@ -112,6 +120,14 @@ def build_parser() -> argparse.ArgumentParser:
         "against ground truth, and measure the retrieval impact per engine.",
     )
     _add_verbose_option(eval_ocr, default=argparse.SUPPRESS)
+    eval_chat = eval_targets.add_parser(
+        "chat",
+        help="compare the chat engines on multi-turn conversations (per-turn retrieval)",
+        description="Play every conversation fixture under each registered chat engine and "
+        "score per-turn retrieval against fact-anchored golden refs — the harness that "
+        "decides the shipped CHAT_ENGINE default (spec_v3 §4.9).",
+    )
+    _add_verbose_option(eval_chat, default=argparse.SUPPRESS)
     return parser
 
 
@@ -136,6 +152,8 @@ def run(argv: list[str] | None = None) -> int:
     if args.command == "eval":
         if getattr(args, "eval_command", None) == "ocr":
             return _run_eval_ocr(verbose)
+        if getattr(args, "eval_command", None) == "chat":
+            return _run_eval_chat(verbose)
         return _run_eval(verbose)
     # chat is the default subcommand (spec §13).
     return _run_chat(verbose)
@@ -246,6 +264,20 @@ def _run_eval_ocr(verbose: int) -> int:
     return 0
 
 
+def _run_eval_chat(verbose: int) -> int:
+    """Execute the ``eval chat`` subcommand: the chat-engine comparison.
+
+    Args:
+        verbose: Effective console verbosity.
+
+    Returns:
+        ``0`` on success (a failed run raises).
+    """
+    results = chat_eval_flow(verbose=verbose)
+    _show_chat_results(results)
+    return 0
+
+
 # Matrix config keys in ladder order, with their table labels (spec §16 +
 # spec_v2 §5.5).
 _MATRIX_CONFIG_LABELS: tuple[tuple[str, str], ...] = (
@@ -322,6 +354,119 @@ def _show_chunker_sweep(results: dict[str, Any]) -> None:
                 f"[yellow]{strategy}: {len(data['unresolved_facts'])} golden fact(s) not "
                 f"found in any chunk (guaranteed misses): {data['unresolved_facts']}[/]"
             )
+
+
+def _show_chat_results(results: dict[str, Any]) -> None:
+    """Render the chat-engine eval: slice summaries and follow-up detail.
+
+    Args:
+        results: The :func:`varagity.eval.evaluate.run_chat_eval` document.
+    """
+    k_values: list[int] = results["k_values"]
+    engines: dict[str, Any] = results["engines"]
+    engine_names = list(engines)
+
+    summary = Table(
+        title=f"Chat-engine eval — {results['n_conversations']} conversations, "
+        f"{results['n_turns']} turns ({results['n_follow_up_turns']} follow-ups), "
+        f"{results['chunks_ingested']} chunks"
+    )
+    summary.add_column("Method", style="bold")
+    summary.add_column("Turns")
+    summary.add_column("Engine", style="bold")
+    for k in k_values:
+        summary.add_column(f"recall@{k}", justify="right")
+    for k in k_values:
+        summary.add_column(f"pass@{k}", justify="right", style="dim")
+    slice_labels = [("all", "all turns"), ("follow_up", "follow-ups")] + [
+        (kind, kind) for kind in CONVERSATION_KINDS
+    ]
+    for method_row, method in enumerate(results["retrieval_configs"]):
+        for slice_row, (slice_key, label) in enumerate(slice_labels):
+            for engine_row, engine in enumerate(engine_names):
+                method_summary = engines[engine]["summary"][method]
+                scores = (
+                    method_summary["by_kind"].get(slice_key)
+                    if slice_key in CONVERSATION_KINDS
+                    else method_summary[slice_key]
+                )
+                if scores is None:
+                    continue
+                summary.add_row(
+                    method if slice_row == 0 and engine_row == 0 else "",
+                    label if engine_row == 0 else "",
+                    engine,
+                    *(f"{scores['recall'][str(k)]:.3f}" for k in k_values),
+                    *(f"{scores['pass'][str(k)]:.3f}" for k in k_values),
+                )
+        if method_row < len(results["retrieval_configs"]) - 1:
+            summary.add_section()
+    console.print(summary)
+
+    # Per-follow-up detail: every engine ran the identical fixtures, so
+    # conversation/turn positions line up across engines by construction.
+    method = (
+        "reranked"
+        if "reranked" in results["retrieval_configs"]
+        else (results["retrieval_configs"][0])
+    )
+    detail = Table(title=f"Follow-up turns — best golden rank under '{method}'")
+    detail.add_column("Conversation", style="bold")
+    detail.add_column("Kind", style="dim")
+    detail.add_column("Follow-up")
+    for engine in engine_names:
+        detail.add_column(engine, justify="right")
+    detail.add_column("Searched with")
+    reference = engines[engine_names[0]]["conversations"]
+    for conversation_index, conversation in enumerate(reference):
+        for turn_index, turn in enumerate(conversation["turns"]):
+            if turn["turn"] == 0:
+                continue
+            records = {
+                engine: engines[engine]["conversations"][conversation_index]["turns"][turn_index]
+                for engine in engine_names
+            }
+            ranks = []
+            for engine in engine_names:
+                found = [
+                    rank
+                    for rank in records[engine]["methods"][method]["golden_ranks"].values()
+                    if rank is not None
+                ]
+                ranks.append(str(min(found)) if found else "—")
+            rewrites = [
+                (engine, record["search_query"])
+                for engine, record in records.items()
+                if record["condensed"]
+            ]
+            searched = "\n".join(
+                _snippet(rewrite) if len(rewrites) == 1 else f"{engine}: {_snippet(rewrite)}"
+                for engine, rewrite in rewrites
+            )
+            detail.add_row(
+                conversation["name"],
+                str(turn["kind"]),
+                _snippet(turn["query"], limit=48),
+                *ranks,
+                searched or "—",
+            )
+    console.print(detail)
+
+    for engine in engine_names:
+        condense = engines[engine]["condense"]
+        if condense["calls"]:
+            console.print(
+                f"{engine}: {condense['calls']} condense call(s), "
+                f"mean {condense['mean_latency_s']:.3f} s, max {condense['max_latency_s']:.3f} s"
+            )
+        else:
+            console.print(f"{engine}: no condense calls")
+    if results["unresolved_facts"]:
+        console.print(
+            f"[yellow]{len(results['unresolved_facts'])} golden fact(s) not found in any "
+            f"chunk (guaranteed misses): {results['unresolved_facts']}[/]"
+        )
+    console.print(f"Results written to [bold]{results['results_path']}[/]")
 
 
 def _show_ocr_results(results: dict[str, Any]) -> None:

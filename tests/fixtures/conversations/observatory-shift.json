@@ -1,0 +1,19 @@
+{
+  "name": "observatory-shift",
+  "turns": [
+    {
+      "query": "How high can the Firefly ceilometer measure cloud-base height?",
+      "assistant": "The Firefly ceilometer at the Saltmere observatory measures cloud-base heights up to 12,400 meters.",
+      "relevant": [
+        {"rel_source": "saltmere_observatory.pdf", "chunk_index": 1, "fact": "12,400 meters"}
+      ]
+    },
+    {
+      "query": "How many anchor blocks did divers count along the north face of the Halcyon Breakwater?",
+      "kind": "topic_shift",
+      "relevant": [
+        {"rel_source": "breakwater_survey.pdf", "chunk_index": 1, "fact": "fifty eight anchor blocks"}
+      ]
+    }
+  ]
+}

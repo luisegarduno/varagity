@@ -1,0 +1,19 @@
+{
+  "name": "array-neighbours",
+  "turns": [
+    {
+      "query": "What are the three turbine arrays of the Corvo Tidal Grid called?",
+      "assistant": "The grid's three crescent-shaped arrays are named Alba, Bruma, and Cinza.",
+      "relevant": [
+        {"rel_source": "tidal_grid.txt", "chunk_index": 0, "fact": "Alba, Bruma, and Cinza"}
+      ]
+    },
+    {
+      "query": "What lies between the last two of them?",
+      "kind": "pronoun",
+      "relevant": [
+        {"rel_source": "tidal_grid.txt", "chunk_index": 2, "fact": "cultivated kelp"}
+      ]
+    }
+  ]
+}

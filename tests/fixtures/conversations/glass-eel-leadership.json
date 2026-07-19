@@ -1,0 +1,19 @@
+{
+  "name": "glass-eel-leadership",
+  "turns": [
+    {
+      "query": "What is the flagship research project at the Aurora station?",
+      "assistant": "The station's flagship project is GLASS EEL, a study of bioluminescent signalling in deep-water cephalopods.",
+      "relevant": [
+        {"rel_source": "aurora_station.md", "chunk_index": 2, "fact": "GLASS EEL"}
+      ]
+    },
+    {
+      "query": "Who's in charge of it?",
+      "kind": "pronoun",
+      "relevant": [
+        {"rel_source": "aurora_station.md", "chunk_index": 2, "fact": "Imogen Vasquez-Thorn"}
+      ]
+    }
+  ]
+}

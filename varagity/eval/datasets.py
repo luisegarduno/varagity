@@ -19,17 +19,30 @@ round-trip is needed, and the resolution is identical on every machine.
 eval pipeline settings (``recursive_character``, size 400 / overlap 50 —
 see ``varagity.eval.evaluate.PINNED_EVAL_SETTINGS``); re-author the golden
 set if those pins change.
+
+The **conversation fixtures** (``tests/fixtures/conversations/*.json``,
+spec_v3 §4.9) extend the same shape to multi-turn sequences: each turn is
+a golden entry plus a scripted ``assistant`` reply and a ``kind`` tag on
+follow-up turns (``pronoun`` / ``elliptical`` / ``topic_shift``). The
+scripted replies are what both chat engines see as history — identical by
+construction, so the chat eval compares engines, never their answers.
 """
 
 import json
 import logging
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from varagity.stores.records import content_hash, derive_doc_id
 
 logger = logging.getLogger(__name__)
+
+# The follow-up cases the chat eval discriminates between (spec_v3 §4.9):
+# pronoun follow-ups, elliptical refinements, and topic shifts (where
+# condensing must NOT drag the old topic along).
+CONVERSATION_KINDS: tuple[str, ...] = ("pronoun", "elliptical", "topic_shift")
 
 
 class GoldenChunkRef(BaseModel):
@@ -162,3 +175,119 @@ def resolve_golden(entries: list[GoldenEntry], corpus_root: Path) -> list[Resolv
             ResolvedGoldenEntry(query=entry.query, relevant=entry.relevant, chunk_ids=chunk_ids)
         )
     return resolved
+
+
+class ConversationTurn(BaseModel):
+    """One user turn of a multi-turn eval conversation (spec_v3 §4.9).
+
+    Attributes:
+        query: The user's question for this turn, exactly as typed —
+            follow-up turns deliberately keep their pronouns and ellipses;
+            resolving them is what the eval measures.
+        kind: The follow-up case this turn exercises (one of
+            :data:`CONVERSATION_KINDS`). ``None`` on a conversation's first
+            turn, which is standalone by construction; required on every
+            later turn so the by-kind report has no untagged follow-ups.
+        assistant: The scripted assistant reply appended to the history
+            after this turn. Required on every non-final turn (the
+            condenser resolves references against it); optional on the
+            final turn, whose reply nothing reads.
+        relevant: The chunks a perfect retriever would return for this
+            turn (≥ 1), in the golden set's portable ref shape.
+    """
+
+    query: str = Field(min_length=1)
+    kind: Literal["pronoun", "elliptical", "topic_shift"] | None = None
+    assistant: str | None = Field(default=None, min_length=1)
+    relevant: list[GoldenChunkRef] = Field(min_length=1)
+
+
+class ConversationFixture(BaseModel):
+    """One hand-authored multi-turn conversation over the eval corpus.
+
+    Attributes:
+        name: Unique fixture identity in reports.
+        turns: The conversation's user turns, in order (≥ 2 — a
+            single-turn conversation exercises no history).
+    """
+
+    name: str = Field(min_length=1)
+    turns: list[ConversationTurn] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _check_turn_contract(self) -> "ConversationFixture":
+        """Enforce the anchor/follow-up structure the chat eval relies on.
+
+        Returns:
+            The validated fixture.
+
+        Raises:
+            ValueError: If the first turn carries a ``kind`` (it is
+                standalone by construction — both engines behave
+                identically on it, so tagging it would dilute a follow-up
+                bucket), a later turn lacks one, or a non-final turn lacks
+                its scripted ``assistant`` reply.
+        """
+        if self.turns[0].kind is not None:
+            raise ValueError(
+                f"conversation {self.name!r}: the first turn is standalone by "
+                "construction and must not carry a kind tag"
+            )
+        for index, turn in enumerate(self.turns):
+            if index > 0 and turn.kind is None:
+                raise ValueError(
+                    f"conversation {self.name!r}: turn {index} is a follow-up and "
+                    f"needs a kind tag (one of {CONVERSATION_KINDS})"
+                )
+            if index < len(self.turns) - 1 and turn.assistant is None:
+                raise ValueError(
+                    f"conversation {self.name!r}: turn {index} has later turns and "
+                    "needs a scripted assistant reply for their history"
+                )
+        return self
+
+
+def load_conversations(directory: Path) -> list[ConversationFixture]:
+    """Load and validate every conversation fixture in a directory.
+
+    Files are read in sorted name order (the report order); any malformed
+    fixture fails the load loudly, mirroring :func:`load_golden` — a
+    silently skipped conversation would quietly inflate every score.
+
+    Args:
+        directory: The fixtures directory (one ``.json`` file per
+            conversation).
+
+    Returns:
+        The validated fixtures, in file-name order.
+
+    Raises:
+        FileNotFoundError: If ``directory`` does not exist.
+        ValueError: If it holds no ``.json`` files, a file is not valid
+            JSON, a fixture fails validation (message names the file), or
+            two fixtures share a name.
+    """
+    if not directory.is_dir():
+        raise FileNotFoundError(f"conversation fixtures directory {directory} does not exist")
+    paths = sorted(directory.glob("*.json"))
+    if not paths:
+        raise ValueError(f"{directory}: no conversation fixtures (*.json) found")
+    conversations: list[ConversationFixture] = []
+    seen: dict[str, Path] = {}
+    for path in paths:
+        try:
+            fixture = ConversationFixture.model_validate(
+                json.loads(path.read_text(encoding="utf-8"))
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path}: not valid JSON — {exc}") from exc
+        except ValidationError as exc:
+            raise ValueError(f"{path}: invalid conversation fixture — {exc}") from exc
+        if fixture.name in seen:
+            raise ValueError(
+                f"{path}: conversation name {fixture.name!r} already used by {seen[fixture.name]}"
+            )
+        seen[fixture.name] = path
+        conversations.append(fixture)
+    logger.info("loaded %d conversation fixture(s) from %s", len(conversations), directory)
+    return conversations

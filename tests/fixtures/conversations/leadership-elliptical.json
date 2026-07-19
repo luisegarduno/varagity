@@ -1,0 +1,19 @@
+{
+  "name": "leadership-elliptical",
+  "turns": [
+    {
+      "query": "Who is the chief engineer of the Corvo Tidal Grid?",
+      "assistant": "Rosa Andrade Peixoto is the grid's chief engineer; her team of 23 operates from Ponta do Baleal.",
+      "relevant": [
+        {"rel_source": "tidal_grid.txt", "chunk_index": 2, "fact": "Rosa Andrade Peixoto"}
+      ]
+    },
+    {
+      "query": "And at the Aurora station?",
+      "kind": "elliptical",
+      "relevant": [
+        {"rel_source": "aurora_station.md", "chunk_index": 2, "fact": "Imogen Vasquez-Thorn"}
+      ]
+    }
+  ]
+}

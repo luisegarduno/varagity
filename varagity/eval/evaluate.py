@@ -45,13 +45,26 @@ are applied by exporting environment variables and clearing the settings
 cache — the same mechanism the test suite uses — because deep pipeline
 code resolves ``get_settings()`` internally; the eval harness is a
 single-threaded CLI path, where this is safe.
+
+The **chat-engine eval** (spec_v3 §4.9, v3 Phase 6) is the multi-turn
+counterpart: every registered chat engine runs the hand-authored
+conversation fixtures (``tests/fixtures/conversations/``), and each turn's
+retrieval is scored fact-anchored exactly like the sweep — the engine's
+``search_query`` (the condensed rewrite, under ``condense_context``)
+drives retrieval, and a turn's ref is satisfied when any fact-carrying
+chunk lands in the top-k. Assistant replies are scripted in the fixtures,
+so both engines see byte-identical history: the comparison isolates the
+engine, never its answers. Depths are :data:`CHAT_K_VALUES`, shallower
+than the matrix's: the eval corpus ingests ~16 chunks, so recall@20 is
+1.0 by definition and k=5 is the production context cut
+(``RERANK_TOP_N``).
 """
 
 import json
 import logging
 import os
 import time
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,12 +72,23 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from varagity.chat import CHAT_ENGINE_REGISTRY
+from varagity.chat.base import ChatEngine, Turn
 from varagity.chunking import CHUNKER_REGISTRY
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
 from varagity.eval.containers import EphemeralStores, ephemeral_stores
-from varagity.eval.datasets import ResolvedGoldenEntry, load_golden, resolve_golden
+from varagity.eval.datasets import (
+    CONVERSATION_KINDS,
+    ConversationFixture,
+    GoldenEntry,
+    ResolvedGoldenEntry,
+    load_conversations,
+    load_golden,
+    resolve_golden,
+)
 from varagity.ingest.loader import IngestSummary, ingest_corpus
+from varagity.models.llm import LLMClient
 from varagity.models.registry import get_model
 from varagity.retrieval.base import Retriever
 from varagity.retrieval.bm25 import BM25Retriever
@@ -79,10 +103,17 @@ logger = logging.getLogger(__name__)
 # Retrieval depths reported by every evaluation (spec §16).
 K_VALUES: tuple[int, ...] = (5, 10, 20)
 
+# Chat-eval retrieval depths (spec_v3 §4.9). Deliberately shallower than
+# K_VALUES: the pinned eval-corpus ingest yields ~16 chunks, so recall@20
+# retrieves the whole store and discriminates nothing, while k=5 is the
+# production context cut (RERANK_TOP_N=5 — what the answer actually sees).
+CHAT_K_VALUES: tuple[int, ...] = (1, 3, 5)
+
 # Defaults for the repo-root-relative eval inputs/outputs (run from the
 # repo root, as every CLI command is).
 EVAL_CORPUS = Path("tests/fixtures/corpus")
 GOLDEN_PATH = Path("data/eval/golden_qa.jsonl")
+CONVERSATIONS_DIR = Path("tests/fixtures/conversations")
 RESULTS_DIR = Path("data/eval/results")
 
 # The pipeline settings every eval run pins (see the module docstring).
@@ -119,6 +150,22 @@ IngestCallable = Callable[..., IngestSummary]
 # and already measured by configs 1–2, so the sweep doesn't re-pay a
 # non-contextual ingest per strategy).
 SWEEP_RETRIEVAL_CONFIGS: tuple[str, ...] = ("semantic", "bm25", "hybrid", "reranked")
+
+# The retrieval configs each chat engine is measured across: the production
+# method and its base. Each turn condenses once; the same search_query is
+# scored under both, so a rerank-masks/amplifies effect stays visible.
+CHAT_EVAL_RETRIEVAL_CONFIGS: tuple[str, ...] = ("hybrid", "reranked")
+
+# Condense pins for the chat eval, alongside PINNED_EVAL_SETTINGS: the
+# engines read these via get_settings() inside prepare(), and a host env
+# with the kill switch off (or different bounds) would silently measure
+# `condense_context` as `simple`.
+PINNED_CHAT_SETTINGS: dict[str, str] = {
+    "CONDENSE_ENABLED": "true",
+    "CONDENSE_HISTORY_TURNS": "6",
+    "CONDENSE_MAX_TOKENS": "512",
+    "CONDENSE_MAX_CHARS": "512",
+}
 
 
 class FactRef(BaseModel):
@@ -345,6 +392,160 @@ def measure_retriever_facts(
         "pass": {str(k): pass_sums[k] / len(entries) for k in k_values},
     }
     return summary, golden_ranks
+
+
+def _mean_turn_scores(
+    records: Sequence[dict[str, Any]], method: str, k_values: Sequence[int]
+) -> dict[str, Any]:
+    """Average per-turn recall/pass scores over a slice of turn records.
+
+    Args:
+        records: The turn records to average (non-empty).
+        method: The retrieval config whose scores to read.
+        k_values: Depths to report.
+
+    Returns:
+        ``{"n_turns": …, "recall": {"5": …}, "pass": {"5": …}}`` averages.
+    """
+    return {
+        "n_turns": len(records),
+        "recall": {
+            str(k): sum(r["methods"][method]["recall"][str(k)] for r in records) / len(records)
+            for k in k_values
+        },
+        "pass": {
+            str(k): sum(r["methods"][method]["pass"][str(k)] for r in records) / len(records)
+            for k in k_values
+        },
+    }
+
+
+def measure_chat_engine(
+    engine: ChatEngine,
+    conversations: Sequence[ConversationFixture],
+    fact_entries: Sequence[FactResolvedEntry],
+    retrievers: Mapping[str, Retriever],
+    *,
+    llm: LLMClient | None,
+    k_values: Sequence[int] = CHAT_K_VALUES,
+) -> dict[str, Any]:
+    """Run every conversation through one chat engine and score each turn.
+
+    Per turn: the engine prepares the search query against the scripted
+    history (one condense LLM call per follow-up under
+    ``condense_context``; none under ``simple``), then that **one**
+    ``search_query`` is scored under every retrieval config by swapping it
+    into the turn's fact-resolved entry and reusing
+    :func:`measure_retriever_facts`. History threads the fixture's
+    scripted replies, so every engine sees the identical conversation —
+    the comparison isolates the engine. Engine rendering is silenced
+    (``verbose=0``): the harness reports rewrites itself, and per-turn
+    console output across engines × turns would swamp it.
+
+    Args:
+        engine: The chat engine under measurement.
+        conversations: The fixtures, in report order.
+        fact_entries: One fact-resolved entry per turn, flattened in
+            conversation order (the fixtures' turns, depth-first).
+        retrievers: Retrieval configs to score under, keyed by name.
+        llm: Chat client for engines that condense (the live service);
+            ``None`` lets them resolve one via the model registry.
+        k_values: Depths to report.
+
+    Returns:
+        The engine's results: ``"summary"`` (per retrieval config: the
+        ``"all"`` / ``"follow_up"`` / ``"by_kind"`` slice averages —
+        follow-ups are the discriminating slice, first turns being
+        identity splits under every engine), ``"condense"`` (call count
+        and latency stats), and ``"conversations"`` (per-turn detail:
+        the search query used, per-config scores, and each ref's best
+        golden rank).
+
+    Raises:
+        ValueError: If ``conversations``, ``retrievers`` or ``k_values``
+            is empty, or ``fact_entries`` doesn't match the fixtures'
+            total turn count.
+    """
+    if not conversations:
+        raise ValueError("measure_chat_engine needs at least one conversation")
+    if not retrievers:
+        raise ValueError("measure_chat_engine needs at least one retriever")
+    if not k_values:
+        raise ValueError("measure_chat_engine needs at least one k value")
+    n_turns = sum(len(conversation.turns) for conversation in conversations)
+    if len(fact_entries) != n_turns:
+        raise ValueError(
+            f"got {len(fact_entries)} fact-resolved entries for {n_turns} conversation turns"
+        )
+
+    flat_index = 0
+    conversation_results: list[dict[str, Any]] = []
+    all_records: list[dict[str, Any]] = []
+    for conversation in conversations:
+        history: list[Turn] = []
+        turn_records: list[dict[str, Any]] = []
+        for turn_index, turn in enumerate(conversation.turns):
+            entry = fact_entries[flat_index]
+            flat_index += 1
+            prepared = engine.prepare(turn.query, history=history, llm=llm, verbose=0)
+            methods: dict[str, Any] = {}
+            for name, retriever in retrievers.items():
+                scored = entry.model_copy(update={"query": prepared.search_query})
+                summary, ranks = measure_retriever_facts(retriever, [scored], k_values=k_values)
+                methods[name] = {
+                    "recall": summary["recall"],
+                    "pass": summary["pass"],
+                    "golden_ranks": ranks[0],
+                }
+            record: dict[str, Any] = {
+                "turn": turn_index,
+                "kind": turn.kind,
+                "query": turn.query,
+                "search_query": prepared.search_query,
+                "condensed": prepared.condensed,
+                "condense_latency_s": (
+                    round(prepared.condense_latency_s, 3)
+                    if prepared.condense_latency_s is not None
+                    else None
+                ),
+                "methods": methods,
+            }
+            turn_records.append(record)
+            all_records.append(record)
+            if turn_index < len(conversation.turns) - 1:
+                history.append(Turn(role="user", content=turn.query))
+                # Validation guarantees a scripted reply on non-final turns.
+                history.append(Turn(role="assistant", content=turn.assistant or ""))
+        conversation_results.append({"name": conversation.name, "turns": turn_records})
+
+    follow_ups = [record for record in all_records if record["turn"] > 0]
+    summary_by_method: dict[str, Any] = {}
+    for name in retrievers:
+        by_kind = {
+            kind: _mean_turn_scores(selected, name, k_values)
+            for kind in CONVERSATION_KINDS
+            if (selected := [r for r in follow_ups if r["kind"] == kind])
+        }
+        summary_by_method[name] = {
+            "all": _mean_turn_scores(all_records, name, k_values),
+            "follow_up": _mean_turn_scores(follow_ups, name, k_values),
+            "by_kind": by_kind,
+        }
+    latencies = [
+        record["condense_latency_s"]
+        for record in all_records
+        if record["condense_latency_s"] is not None
+    ]
+    condense = {
+        "calls": len(latencies),
+        "mean_latency_s": round(sum(latencies) / len(latencies), 3) if latencies else None,
+        "max_latency_s": max(latencies) if latencies else None,
+    }
+    return {
+        "summary": summary_by_method,
+        "condense": condense,
+        "conversations": conversation_results,
+    }
 
 
 @contextmanager
@@ -681,4 +882,124 @@ def run_matrix(
         ],
     }
     results["results_path"] = str(write_results("matrix", results, results_dir=results_dir))
+    return results
+
+
+def run_chat_eval(
+    *,
+    corpus_root: Path = EVAL_CORPUS,
+    conversations_dir: Path = CONVERSATIONS_DIR,
+    results_dir: Path = RESULTS_DIR,
+    ingest: IngestCallable = ingest_corpus,
+    verbose: int | None = None,
+) -> dict[str, Any]:
+    """Run the multi-turn chat-engine eval; persist results (spec_v3 §4.9).
+
+    One contextual ingest into ephemeral stores backs the whole run; every
+    registered chat engine (enumerated from the registry, like the chunker
+    sweep) then plays each conversation fixture, and every turn is scored
+    fact-anchored under :data:`CHAT_EVAL_RETRIEVAL_CONFIGS`. The condense
+    settings are pinned (:data:`PINNED_CHAT_SETTINGS`) so a host env with
+    the kill switch off can't silently measure ``condense_context`` as
+    ``simple``. This harness decides the shipped ``CHAT_ENGINE`` default —
+    and "the default stays ``simple``" is a valid result, not a failure.
+
+    Args:
+        corpus_root: The eval corpus (defaults to the fixtures corpus the
+            conversation refs are authored over).
+        conversations_dir: The conversation fixtures directory.
+        results_dir: Directory for the timestamped results JSON.
+        ingest: Ingest callable (``ingest_corpus``, or the Prefect
+            ``ingest_flow`` when invoked through the eval flow).
+        verbose: Console verbosity (0–2); defaults to
+            ``settings.DEFAULT_VERBOSE``.
+
+    Returns:
+        The results document (also written to ``results_dir``), with a
+        ``"results_path"`` key naming the file.
+
+    Raises:
+        ValueError: If ``verbose`` is invalid or a fixture fails
+            validation.
+        FileNotFoundError: If the fixtures directory or a referenced
+            corpus file is missing.
+        RuntimeError: If the eval ingest reports failed files (a partial
+            index would silently under-report every score).
+    """
+    verbose = check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
+    conversations = load_conversations(conversations_dir)
+    flat_golden = [
+        GoldenEntry(query=turn.query, relevant=turn.relevant)
+        for conversation in conversations
+        for turn in conversation.turns
+    ]
+    resolved = resolve_golden(flat_golden, corpus_root)
+
+    # Resolve the live model clients up front: a misconfigured endpoint
+    # should fail before containers spin, not after an ingest.
+    embeddings = get_model("embedding")
+    llm = get_model("default")
+    rerank = get_model("rerank")
+
+    with ephemeral_stores() as stores:
+        hybrid = HybridRetriever(store=stores.store, bm25=stores.bm25, embeddings=embeddings)
+        # Keyed to match CHAT_EVAL_RETRIEVAL_CONFIGS (defined together above).
+        retrievers: dict[str, Retriever] = {
+            "hybrid": hybrid,
+            "reranked": RerankedRetriever(base=hybrid, rerank=rerank),
+        }
+        with pinned_eval_settings(CONTEXTUALIZE="true", **PINNED_CHAT_SETTINGS):
+            logger.info("chat eval: contextual ingest into ephemeral stores")
+            started = time.monotonic()
+            summary = ingest(
+                str(corpus_root),
+                store=stores.store,
+                bm25=stores.bm25,
+                embeddings=embeddings,
+                llm=llm,
+                verbose=verbose,
+            )
+            ingest_seconds = round(time.monotonic() - started, 2)
+            if summary.failed:
+                raise RuntimeError(f"chat-eval ingest failed for {summary.failed} file(s)")
+            fact_entries = resolve_golden_by_fact(resolved, stores.store)
+            unresolved = [
+                ref.label for entry in fact_entries for ref in entry.refs if not ref.chunk_ids
+            ]
+            engines = {
+                name: measure_chat_engine(
+                    CHAT_ENGINE_REGISTRY[name],
+                    conversations,
+                    fact_entries,
+                    retrievers,
+                    llm=llm,
+                    k_values=CHAT_K_VALUES,
+                )
+                for name in sorted(CHAT_ENGINE_REGISTRY)
+            }
+
+    settings = get_settings()
+    results: dict[str, Any] = {
+        "kind": "chat_eval",
+        "timestamp": datetime.now(UTC).isoformat(),
+        "corpus": str(corpus_root),
+        "conversations_dir": str(conversations_dir),
+        "n_conversations": len(conversations),
+        "n_turns": len(flat_golden),
+        "n_follow_up_turns": sum(len(c.turns) - 1 for c in conversations),
+        "k_values": list(CHAT_K_VALUES),
+        "retrieval_configs": list(CHAT_EVAL_RETRIEVAL_CONFIGS),
+        "embedding_model": settings.EMBEDDING_MODEL,
+        "rerank_model": settings.RERANK_MODEL,
+        "pinned_settings": {
+            **PINNED_EVAL_SETTINGS,
+            "CONTEXTUALIZE": "true",
+            **PINNED_CHAT_SETTINGS,
+        },
+        "chunks_ingested": summary.chunks,
+        "ingest_seconds": ingest_seconds,
+        "unresolved_facts": unresolved,
+        "engines": engines,
+    }
+    results["results_path"] = str(write_results("chat", results, results_dir=results_dir))
     return results

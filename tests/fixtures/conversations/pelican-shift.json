@@ -1,0 +1,19 @@
+{
+  "name": "pelican-shift",
+  "turns": [
+    {
+      "query": "How long is the kelp corridor between the Bruma and Cinza arrays?",
+      "assistant": "The kelp corridor is a 1.8-kilometer strip of cultivated kelp planted between the Bruma and Cinza arrays.",
+      "relevant": [
+        {"rel_source": "tidal_grid.txt", "chunk_index": 2, "fact": "1.8-kilometer"}
+      ]
+    },
+    {
+      "query": "How much cargo can the Pelican-9 carry per run?",
+      "kind": "topic_shift",
+      "relevant": [
+        {"rel_source": "aurora_station.md", "chunk_index": 3, "fact": "3.5 tonnes"}
+      ]
+    }
+  ]
+}

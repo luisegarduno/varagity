@@ -1,0 +1,19 @@
+{
+  "name": "grid-power-elliptical",
+  "turns": [
+    {
+      "query": "How much power does the Lantern micro-reactor produce at peak output?",
+      "assistant": "Lantern produces 4.2 megawatts at peak output.",
+      "relevant": [
+        {"rel_source": "aurora_station.md", "chunk_index": 1, "fact": "4.2 megawatts"}
+      ]
+    },
+    {
+      "query": "And the Corvo Tidal Grid?",
+      "kind": "elliptical",
+      "relevant": [
+        {"rel_source": "tidal_grid.txt", "chunk_index": 1, "fact": "310 megawatt-hours"}
+      ]
+    }
+  ]
+}
