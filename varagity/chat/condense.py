@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from typing import cast
 
 from varagity.chat.base import PreparedQuery, Turn, register
-from varagity.chat.prompts import CONDENSE_PROMPT, format_history
+from varagity.chat.prompts import CONDENSE_PROMPT, CONDENSE_QUERY_LABEL, format_history
 from varagity.config import get_settings
 from varagity.debug.show import v_condensed
 from varagity.models.llm import LLMClient, clean_response
@@ -109,6 +109,11 @@ class CondenseContextEngine:
         # model — the single easiest way to silently destroy retrieval
         # quality in this feature (spec_v3 §4.5).
         condensed = clean_response(raw)
+        # A completion-primed model may echo the prompt's trailing label
+        # into its answer (the v3 Phase 6 eval caught it live); an echoed
+        # label would ride into the embedding model as noise.
+        if condensed.upper().startswith(CONDENSE_QUERY_LABEL):
+            condensed = condensed[len(CONDENSE_QUERY_LABEL) :].strip()
         if not condensed:
             logger.warning("condenser returned an empty query — searching with the raw query")
             return identity

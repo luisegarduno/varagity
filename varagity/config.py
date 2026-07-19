@@ -137,8 +137,14 @@ class Settings(BaseSettings):
             to the condenser (6 = three user/assistant pairs). ``0``
             disables history — every turn then takes the no-history path
             and never condenses.
-        CONDENSE_MAX_TOKENS: Generation cap for the condense call — a
-            standalone search query is a sentence, not an essay.
+        CONDENSE_MAX_TOKENS: Generation cap for the condense call — sized
+            for a reasoning preamble plus a one-sentence query, the
+            ``CONTEXTUALIZE_MAX_TOKENS`` lesson over again: a reasoning
+            model thinks before it answers, and a cap it can't finish
+            under returns empty content, silently degrading every turn to
+            the raw-query fallback (measured live in v3 Phase 6 — 128
+            starved the condenser on 11 of 11 follow-ups; a typical
+            condense spends ~215 thinking tokens first).
         CONDENSE_MAX_CHARS: Length ceiling on the cleaned condense output;
             anything longer means the condenser misbehaved, and the raw
             query is searched instead (the spec_v3 §4.6 fallback).
@@ -253,7 +259,7 @@ class Settings(BaseSettings):
     CONDENSE_ENABLED: bool = True
     CONDENSE_MODEL_TYPE: str = "default"
     CONDENSE_HISTORY_TURNS: int = 6
-    CONDENSE_MAX_TOKENS: int = 128
+    CONDENSE_MAX_TOKENS: int = 512
     CONDENSE_MAX_CHARS: int = 512
 
     POSTGRES_HOST: str = "postgres"

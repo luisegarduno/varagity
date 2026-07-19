@@ -237,7 +237,7 @@ class TestCondenseValidation:
         assert settings.CONDENSE_ENABLED is True
         assert settings.CONDENSE_MODEL_TYPE == "default"
         assert settings.CONDENSE_HISTORY_TURNS == 6
-        assert settings.CONDENSE_MAX_TOKENS == 128
+        assert settings.CONDENSE_MAX_TOKENS == 512
         assert settings.CONDENSE_MAX_CHARS == 512
 
     def test_zero_history_turns_is_valid(self) -> None:

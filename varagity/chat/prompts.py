@@ -29,6 +29,12 @@ Reply with the standalone query only — no quotes, no explanation.
 FOLLOW-UP: {query}
 STANDALONE QUERY:"""
 
+# The completion-priming label the prompt ends with. Exposed so the engine
+# can strip a model's echo of it from the answer (a v3 Phase 6 eval
+# finding); a test asserts the template still ends with it, so the two
+# can't drift apart.
+CONDENSE_QUERY_LABEL = "STANDALONE QUERY:"
+
 
 def format_history(turns: Sequence[Turn]) -> str:
     """Render conversation turns into the prompt's ``<conversation>`` block.

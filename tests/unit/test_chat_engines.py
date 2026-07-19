@@ -201,6 +201,32 @@ class TestCondenseContextEngine:
         assert "<think>" not in prepared.search_query
         assert prepared.condensed is True
 
+    def test_echoed_prompt_label_is_stripped(self) -> None:
+        """A completion-primed model echoes the prompt's trailing label.
+
+        Caught live by the v3 Phase 6 eval: the answer arrived as
+        "STANDALONE QUERY: …", and the echo would ride into the embedding
+        model as noise. Matching is case-insensitive — the echo need not
+        match the template's casing.
+        """
+        llm = ScriptedLLM(f"Standalone Query: {STANDALONE}")
+        prepared = self.prepare(llm)
+        assert prepared.search_query == STANDALONE
+        assert prepared.condensed is True
+
+    def test_label_only_response_falls_back(self) -> None:
+        """An echoed label with nothing after it is an empty condense."""
+        llm = ScriptedLLM("STANDALONE QUERY:")
+        prepared = self.prepare(llm)
+        assert prepared.condensed is False
+        assert prepared.search_query == FOLLOW_UP
+
+    def test_prompt_still_ends_with_the_strip_label(self) -> None:
+        """The template and the engine's echo-strip must not drift apart."""
+        from varagity.chat.prompts import CONDENSE_QUERY_LABEL
+
+        assert CONDENSE_PROMPT.rstrip().endswith(CONDENSE_QUERY_LABEL)
+
     def test_empty_history_makes_zero_llm_calls(self) -> None:
         """The first turn never condenses — no round-trip for nothing."""
         llm = ScriptedLLM(STANDALONE)
