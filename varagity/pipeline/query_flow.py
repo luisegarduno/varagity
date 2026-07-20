@@ -36,6 +36,7 @@ additionally counts the server-reported token usage it already returns.
 
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from prefect import flow, task
 from prefect.cache_policies import NO_CACHE
@@ -272,6 +273,118 @@ class StreamedQueryState(QueryState):
     tokens_per_second: float | None
 
 
+@dataclass(frozen=True)
+class _PreparedRetrieval:
+    """The shared pre-generation outcome both query flows build on.
+
+    Attributes:
+        method: The active retriever's low-cardinality metric label.
+        prepared: The chat engine's search/answer query split (spec_v3 §4.2).
+        query_vector: The embed stage's vector (``None`` for ``bm25``).
+        chunks: The retrieved chunks, best first.
+        formatted_context: The spec §10.2 context block for generation.
+        verbose: The validated console verbosity for the generate stage.
+    """
+
+    method: str
+    prepared: PreparedQuery
+    query_vector: list[float] | None
+    chunks: list[RetrievedChunk]
+    formatted_context: str
+    verbose: int
+
+
+def _prepare_retrieval(
+    query: str,
+    *,
+    history: Sequence[Turn],
+    engine: ChatEngine | None,
+    retriever: Retriever | None,
+    llm: LLMClient | None,
+    k: int | None,
+    verbose: int | None,
+    on_retrieved: Callable[[list[RetrievedChunk]], None] | None,
+) -> _PreparedRetrieval:
+    """Resolve the query context and run condense → embed → retrieve.
+
+    The block :func:`query_flow` and :func:`query_stream_flow` share before
+    they diverge into (non-)streaming generation: settings/retriever/engine
+    resolution, the three tracked pre-generation stages with their per-stage
+    Prometheus timings, ``observe_retrieval``, the optional ``on_retrieved``
+    hook, and the formatted context.
+
+    Resolution runs *before* the error-counting boundary, exactly as the
+    inline block did — a bad ``verbose`` or an unregistered method/engine
+    raises without recording a query error. A failure in the tracked stages
+    *is* counted here; each caller wraps its own generation stage in the same
+    ``count_query(method, "error")`` boundary, so the whole pipeline stays
+    covered (spec_v2 §6.2).
+
+    Args:
+        query: The user's question.
+        history: Prior conversation turns, oldest first.
+        engine: Chat engine; resolved from ``settings.CHAT_ENGINE`` when
+            ``None``.
+        retriever: Retrieval method; resolved from
+            ``settings.RETRIEVAL_METHOD`` when ``None``.
+        llm: Chat client; resolved via the model registry when ``None``.
+        k: Chunks to retrieve; defaults to ``settings.TOP_K``.
+        verbose: Console verbosity; defaults to ``settings.DEFAULT_VERBOSE``.
+        on_retrieved: Optional hook fired with the chunks before generation.
+
+    Returns:
+        The resolved method label and the condense → retrieve outcome the
+        callers generate their answers from.
+
+    Raises:
+        ValueError: If ``verbose`` is invalid.
+        KeyError: If ``settings.RETRIEVAL_METHOD`` or ``settings.CHAT_ENGINE``
+            names an unregistered implementation.
+    """
+    settings = get_settings()
+    verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
+    active_retriever = (
+        retriever if retriever is not None else get_retriever(settings.RETRIEVAL_METHOD)
+    )
+    active_engine = engine if engine is not None else get_chat_engine(settings.CHAT_ENGINE)
+    top_k = settings.TOP_K if k is None else k
+
+    method = _method_label(active_retriever)
+    try:
+        stage_started = time.perf_counter()
+        prepared = condense_query_task(
+            active_engine, query, history=history, llm=llm, verbose=verbose
+        )
+        metrics.observe_query_stage("condense", method, time.perf_counter() - stage_started)
+        stage_started = time.perf_counter()
+        query_vector = embed_query_task(active_retriever, prepared.search_query, verbose=verbose)
+        metrics.observe_query_stage("embed", method, time.perf_counter() - stage_started)
+        stage_started = time.perf_counter()
+        chunks = retrieve_task(
+            active_retriever,
+            prepared.search_query,
+            k=top_k,
+            query_vector=query_vector,
+            verbose=verbose,
+        )
+        metrics.observe_query_stage("retrieve", method, time.perf_counter() - stage_started)
+        metrics.observe_retrieval(method, chunks)
+        if on_retrieved is not None:
+            on_retrieved(chunks)
+        formatted_context = format_context(chunks)
+    except Exception:
+        metrics.count_query(method, "error")
+        raise
+    return _PreparedRetrieval(
+        method=method,
+        prepared=prepared,
+        query_vector=query_vector,
+        chunks=chunks,
+        formatted_context=formatted_context,
+        verbose=verbose,
+    )
+
+
 @flow(name="query-stream", validate_parameters=False)
 def query_stream_flow(
     query: str,
@@ -327,61 +440,41 @@ def query_stream_flow(
             retrieval method, or ``settings.CHAT_ENGINE`` an unregistered
             chat engine.
     """
-    settings = get_settings()
-    verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
-    active_retriever = (
-        retriever if retriever is not None else get_retriever(settings.RETRIEVAL_METHOD)
+    prep = _prepare_retrieval(
+        query,
+        history=history,
+        engine=engine,
+        retriever=retriever,
+        llm=llm,
+        k=k,
+        verbose=verbose,
+        on_retrieved=on_retrieved,
     )
-    active_engine = engine if engine is not None else get_chat_engine(settings.CHAT_ENGINE)
-    top_k = settings.TOP_K if k is None else k
-
-    method = _method_label(active_retriever)
     try:
         stage_started = time.perf_counter()
-        prepared = condense_query_task(
-            active_engine, query, history=history, llm=llm, verbose=verbose
-        )
-        metrics.observe_query_stage("condense", method, time.perf_counter() - stage_started)
-        stage_started = time.perf_counter()
-        query_vector = embed_query_task(active_retriever, prepared.search_query, verbose=verbose)
-        metrics.observe_query_stage("embed", method, time.perf_counter() - stage_started)
-        stage_started = time.perf_counter()
-        chunks = retrieve_task(
-            active_retriever,
-            prepared.search_query,
-            k=top_k,
-            query_vector=query_vector,
-            verbose=verbose,
-        )
-        metrics.observe_query_stage("retrieve", method, time.perf_counter() - stage_started)
-        metrics.observe_retrieval(method, chunks)
-        if on_retrieved is not None:
-            on_retrieved(chunks)
-        formatted_context = format_context(chunks)
-        stage_started = time.perf_counter()
         result = generate_answer_stream_task(
-            prepared.original_query,  # always the user's words (spec_v3 §4.2)
-            chunks,
+            prep.prepared.original_query,  # always the user's words (spec_v3 §4.2)
+            prep.chunks,
             llm=llm,
-            formatted_context=formatted_context,
+            formatted_context=prep.formatted_context,
             on_delta=on_delta,
             should_abort=should_abort,
             on_stats=on_stats,
-            verbose=verbose,
+            verbose=prep.verbose,
         )
-        metrics.observe_query_stage("generate", method, time.perf_counter() - stage_started)
+        metrics.observe_query_stage("generate", prep.method, time.perf_counter() - stage_started)
     except Exception:
-        metrics.count_query(method, "error")
+        metrics.count_query(prep.method, "error")
         raise
-    metrics.count_query(method, "aborted" if result["aborted"] else "ok")
+    metrics.count_query(prep.method, "aborted" if result["aborted"] else "ok")
     usage = result["usage"] or {}
     metrics.count_llm_tokens(usage.get("prompt_tokens"), usage.get("completion_tokens"))
     return StreamedQueryState(
         query=query,
-        prepared=prepared,
-        query_vector=query_vector,
-        retrieved=chunks,
-        formatted_context=formatted_context,
+        prepared=prep.prepared,
+        query_vector=prep.query_vector,
+        retrieved=prep.chunks,
+        formatted_context=prep.formatted_context,
         answer=result["answer"],
         reasoning=result["reasoning"],
         aborted=result["aborted"],
@@ -436,55 +529,35 @@ def query_flow(
             retrieval method, or ``settings.CHAT_ENGINE`` an unregistered
             chat engine.
     """
-    settings = get_settings()
-    verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
-    active_retriever = (
-        retriever if retriever is not None else get_retriever(settings.RETRIEVAL_METHOD)
+    prep = _prepare_retrieval(
+        query,
+        history=history,
+        engine=engine,
+        retriever=retriever,
+        llm=llm,
+        k=k,
+        verbose=verbose,
+        on_retrieved=on_retrieved,
     )
-    active_engine = engine if engine is not None else get_chat_engine(settings.CHAT_ENGINE)
-    top_k = settings.TOP_K if k is None else k
-
-    method = _method_label(active_retriever)
     try:
         stage_started = time.perf_counter()
-        prepared = condense_query_task(
-            active_engine, query, history=history, llm=llm, verbose=verbose
-        )
-        metrics.observe_query_stage("condense", method, time.perf_counter() - stage_started)
-        stage_started = time.perf_counter()
-        query_vector = embed_query_task(active_retriever, prepared.search_query, verbose=verbose)
-        metrics.observe_query_stage("embed", method, time.perf_counter() - stage_started)
-        stage_started = time.perf_counter()
-        chunks = retrieve_task(
-            active_retriever,
-            prepared.search_query,
-            k=top_k,
-            query_vector=query_vector,
-            verbose=verbose,
-        )
-        metrics.observe_query_stage("retrieve", method, time.perf_counter() - stage_started)
-        metrics.observe_retrieval(method, chunks)
-        if on_retrieved is not None:
-            on_retrieved(chunks)
-        formatted_context = format_context(chunks)
-        stage_started = time.perf_counter()
         answer = generate_answer_task(
-            prepared.original_query,  # always the user's words (spec_v3 §4.2)
-            chunks,
+            prep.prepared.original_query,  # always the user's words (spec_v3 §4.2)
+            prep.chunks,
             llm=llm,
-            formatted_context=formatted_context,
-            verbose=verbose,
+            formatted_context=prep.formatted_context,
+            verbose=prep.verbose,
         )
-        metrics.observe_query_stage("generate", method, time.perf_counter() - stage_started)
+        metrics.observe_query_stage("generate", prep.method, time.perf_counter() - stage_started)
     except Exception:
-        metrics.count_query(method, "error")
+        metrics.count_query(prep.method, "error")
         raise
-    metrics.count_query(method, "ok")
+    metrics.count_query(prep.method, "ok")
     return QueryState(
         query=query,
-        prepared=prepared,
-        query_vector=query_vector,
-        retrieved=chunks,
-        formatted_context=formatted_context,
+        prepared=prep.prepared,
+        query_vector=prep.query_vector,
+        retrieved=prep.chunks,
+        formatted_context=prep.formatted_context,
         answer=answer,
     )

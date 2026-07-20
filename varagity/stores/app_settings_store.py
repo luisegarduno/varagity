@@ -13,10 +13,10 @@ GUI's persistent "Re-ingest to apply" affordance.
 """
 
 import logging
-from types import TracebackType
 
 import psycopg
 
+from varagity.stores.base import ClosingContextMixin
 from varagity.stores.vector_store import default_conninfo
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
 """
 
 
-class AppSettingsStore:
+class AppSettingsStore(ClosingContextMixin):
     """Persisted key/value overrides over PostgreSQL.
 
     Owns one autocommit connection (every operation is a single statement).
@@ -54,29 +54,6 @@ class AppSettingsStore:
         """Close the underlying connection (idempotent)."""
         if not self._conn.closed:
             self._conn.close()
-
-    def __enter__(self) -> "AppSettingsStore":
-        """Enter a context that closes the connection on exit.
-
-        Returns:
-            This store.
-        """
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        """Close the connection on context exit.
-
-        Args:
-            exc_type: Exception type, if the block raised.
-            exc: Exception instance, if the block raised.
-            tb: Traceback, if the block raised.
-        """
-        self.close()
 
     def load_overrides(self) -> dict[str, str]:
         """Read every persisted setting override.

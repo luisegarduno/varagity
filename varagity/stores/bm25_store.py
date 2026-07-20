@@ -15,7 +15,6 @@ still work — just via a slower doc-values scan, which is fine at dev scale.
 
 import logging
 from collections.abc import Sequence
-from types import TracebackType
 from typing import Any
 
 from elastic_transport import ConnectionError as ESConnectionError
@@ -32,6 +31,7 @@ from tenacity import (
 
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
+from varagity.stores.base import ClosingContextMixin
 from varagity.stores.records import ChunkRecord
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,7 @@ class BM25Hit(BaseModel):
     score: float
 
 
-class ElasticsearchBM25:
+class ElasticsearchBM25(ClosingContextMixin):
     """Sparse keyword store over an Elasticsearch BM25 index.
 
     Owns one client. Use as a context manager or call :meth:`close` when
@@ -136,29 +136,6 @@ class ElasticsearchBM25:
     def close(self) -> None:
         """Close the underlying client (idempotent)."""
         self._client.close()
-
-    def __enter__(self) -> "ElasticsearchBM25":
-        """Enter a context that closes the client on exit.
-
-        Returns:
-            This store.
-        """
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        """Close the client on context exit.
-
-        Args:
-            exc_type: Exception type, if the block raised.
-            exc: Exception instance, if the block raised.
-            tb: Traceback, if the block raised.
-        """
-        self.close()
 
     @_es_retry
     def create_index(self) -> bool:

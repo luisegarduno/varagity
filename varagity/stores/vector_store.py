@@ -9,7 +9,6 @@ the postgres container on first boot).
 
 import logging
 from collections.abc import Sequence
-from types import TracebackType
 from typing import Any
 
 import psycopg
@@ -19,6 +18,7 @@ from psycopg.types.json import Json
 
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose
+from varagity.stores.base import ClosingContextMixin
 from varagity.stores.records import ChunkRecord, DocumentInfo, RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -158,7 +158,7 @@ def default_conninfo() -> str:
     )
 
 
-class ContextualVectorDB:
+class ContextualVectorDB(ClosingContextMixin):
     """Dense vector store over PostgreSQL + pgvector.
 
     Owns one connection (autocommit; per-document writes group into an
@@ -183,29 +183,6 @@ class ContextualVectorDB:
         """Close the underlying connection (idempotent)."""
         if not self._conn.closed:
             self._conn.close()
-
-    def __enter__(self) -> "ContextualVectorDB":
-        """Enter a context that closes the connection on exit.
-
-        Returns:
-            This store.
-        """
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        """Close the connection on context exit.
-
-        Args:
-            exc_type: Exception type, if the block raised.
-            exc: Exception instance, if the block raised.
-            tb: Traceback, if the block raised.
-        """
-        self.close()
 
     def document_exists(self, doc_id: str, content_hash: str) -> bool:
         """Check whether a document was already ingested (idempotency, spec §8.2).

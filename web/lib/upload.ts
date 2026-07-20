@@ -155,6 +155,13 @@ export function countSkip(skipped: SkipCounts, label: SkipLabel): void {
   skipped[label] = (skipped[label] ?? 0) + 1;
 }
 
+/** Merge every bucket of `from` into `into` (the running attach tally). */
+export function mergeSkipCounts(into: SkipCounts, from: SkipCounts): void {
+  for (const [label, count] of Object.entries(from) as [SkipLabel, number][]) {
+    into[label] = (into[label] ?? 0) + count;
+  }
+}
+
 /**
  * Filter a picked file set down to what's worth uploading (spec_v3 §5.3).
  *

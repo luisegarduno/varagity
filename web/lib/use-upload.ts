@@ -42,12 +42,12 @@ import {
 import { queryKeys } from "@/lib/queries";
 import {
   countSkip,
+  mergeSkipCounts,
   planAttachments,
   skipLabel,
   summarizeSkipped,
   validateUpload,
   type SkipCounts,
-  type SkipLabel,
 } from "@/lib/upload";
 
 /** One rendered upload outcome row (the dropzone's list). */
@@ -148,12 +148,7 @@ export function useUpload(
       );
       accepted = plan.accepted;
       paths = plan.paths;
-      for (const [label, count] of Object.entries(plan.skipped) as [
-        SkipLabel,
-        number,
-      ][]) {
-        skips[label] = (skips[label] ?? 0) + count;
-      }
+      mergeSkipCounts(skips, plan.skipped);
     } else {
       if (files.length === 0) return;
       accepted = [];
@@ -423,12 +418,7 @@ export function createAttachController(deps: AttachDeps): AttachController {
       options.config?.upload_max_mb ?? null,
       { folder: options.folder },
     );
-    for (const [label, count] of Object.entries(plan.skipped) as [
-      SkipLabel,
-      number,
-    ][]) {
-      skips[label] = (skips[label] ?? 0) + count;
-    }
+    mergeSkipCounts(skips, plan.skipped);
     if (plan.accepted.length === 0) {
       // Nothing worth sending — the summary is the whole story, and no
       // request goes out.

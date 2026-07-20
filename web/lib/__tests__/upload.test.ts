@@ -11,14 +11,9 @@ import {
   validateUpload,
 } from "@/lib/upload";
 
-const ALLOWED = [".pdf", ".txt", ".md", ".docx"];
+import { pickedFile } from "./helpers";
 
-/** Build a File with an optional folder-pick relative path. */
-function pickedFile(name: string, path?: string, sizeBytes = 8): File {
-  const file = new File([new Uint8Array(sizeBytes)], name);
-  Object.defineProperty(file, "webkitRelativePath", { value: path ?? "" });
-  return file;
-}
+const ALLOWED = [".pdf", ".txt", ".md", ".docx"];
 
 describe("safeFileName", () => {
   it("keeps a plain basename", () => {

@@ -17,16 +17,12 @@ import {
 } from "@/lib/use-upload";
 import { initialIngestView } from "@/lib/ingest-reducer";
 
+import { pickedFile } from "./helpers";
+
 const CONFIG = {
   allowed_extensions: [".md", ".txt"],
   upload_max_mb: 1,
 } as unknown as ConfigResponse;
-
-function pickedFile(name: string, path?: string, sizeBytes = 8): File {
-  const file = new File([new Uint8Array(sizeBytes)], name);
-  Object.defineProperty(file, "webkitRelativePath", { value: path ?? "" });
-  return file;
-}
 
 function makeRun(id: string, state: string, error: string | null = null): IngestRun {
   return {

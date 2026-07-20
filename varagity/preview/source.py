@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from varagity.config import Settings
+from varagity.paths import resolve_contained
 from varagity.preview.convert import ConversionFailed, ConversionUnavailable, ensure_pdf
 from varagity.stores.records import DocumentInfo, content_hash
 
@@ -59,12 +60,8 @@ def resolve_preview_source(info: DocumentInfo, settings: Settings) -> PreviewSou
     if suffix not in _PREVIEWABLE_SUFFIXES:
         return PreviewSource(pdf_path=None, reason="unsupported_type")
     docs_root = Path(settings.DOCS_PATH).resolve()
-    try:
-        resolved = source.resolve()
-        contained = resolved.is_relative_to(docs_root)
-    except OSError:  # unresolvable (dangling symlink in the prefix, …)
-        contained = False
-    if not contained or not resolved.is_file():
+    resolved = resolve_contained(source, docs_root)
+    if resolved is None or not resolved.is_file():
         return PreviewSource(pdf_path=None, reason="file_missing")
     if content_hash(resolved.read_bytes()) != info.content_hash:
         return PreviewSource(pdf_path=None, reason="file_changed")

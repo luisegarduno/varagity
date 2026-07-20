@@ -25,106 +25,140 @@ export const DENSITIES = ["comfortable", "compact"] as const;
 export type Density = (typeof DENSITIES)[number];
 export const DEFAULT_DENSITY: Density = "comfortable";
 
+/** One persisted preference's read / server-snapshot / setter triple. */
+interface Pref<T> {
+  get: () => T;
+  getServer: () => T;
+  set: (value: T) => void;
+}
+
+/**
+ * Build one preference's accessor triple over a localStorage key. `parse`
+ * maps the raw stored string (`null` when absent) to a value; `serialize`
+ * is its inverse for the setter. Every getter is storage-safe (SSR, privacy
+ * mode → the fallback) and every setter dispatches `CHANGE_EVENT`, so the
+ * five prefs below share one implementation of that contract.
+ */
+function makePref<T>(
+  key: string,
+  fallback: T,
+  parse: (raw: string | null) => T,
+  serialize: (value: T) => string,
+): Pref<T> {
+  return {
+    get() {
+      try {
+        return parse(window.localStorage.getItem(key));
+      } catch {
+        return fallback; // storage unavailable (SSR, privacy mode) — the default
+      }
+    },
+    getServer() {
+      return fallback;
+    },
+    set(value) {
+      try {
+        window.localStorage.setItem(key, serialize(value));
+      } catch {
+        // Storage unavailable — the choice simply doesn't persist.
+      }
+      window.dispatchEvent(new Event(CHANGE_EVENT));
+    },
+  };
+}
+
+/**
+ * A boolean pref stored as `"true"`/`"false"`. `defaultOn` sets both the
+ * fallback and the read polarity: default-on reads off only for the literal
+ * `"false"`; default-off reads on only for the literal `"true"`.
+ */
+function booleanPref(key: string, defaultOn: boolean): Pref<boolean> {
+  return makePref<boolean>(
+    key,
+    defaultOn,
+    defaultOn ? (raw) => raw !== "false" : (raw) => raw === "true",
+    String,
+  );
+}
+
+/** An enum pref validated against its allowed values (junk/absence → default). */
+function enumPref<T extends string>(
+  key: string,
+  allowed: readonly T[],
+  fallback: T,
+): Pref<T> {
+  return makePref<T>(
+    key,
+    fallback,
+    (raw) => ((allowed as readonly string[]).includes(raw ?? "") ? (raw as T) : fallback),
+    (value) => value,
+  );
+}
+
+const reasoning = booleanPref(REASONING_DEFAULT_OPEN_KEY, false);
+const accentPref = enumPref(ACCENT_KEY, ACCENTS, DEFAULT_ACCENT);
+const densityPref = enumPref(DENSITY_KEY, DENSITIES, DEFAULT_DENSITY);
+const evidenceRail = booleanPref(EVIDENCE_RAIL_OPEN_KEY, true);
+const developer = booleanPref(DEVELOPER_MODE_KEY, true);
+
 /** Whether finished answers' reasoning traces start expanded. */
 export function reasoningDefaultOpen(): boolean {
-  try {
-    return window.localStorage.getItem(REASONING_DEFAULT_OPEN_KEY) === "true";
-  } catch {
-    return false; // storage unavailable (SSR, privacy mode) — the default
-  }
+  return reasoning.get();
 }
 
 /** The server-render snapshot (no localStorage there). */
 export function reasoningDefaultOpenServer(): boolean {
-  return false;
+  return reasoning.getServer();
 }
 
 /** Persist the reasoning-trace default (best-effort) and notify readers. */
 export function setReasoningDefaultOpen(open: boolean): void {
-  try {
-    window.localStorage.setItem(REASONING_DEFAULT_OPEN_KEY, String(open));
-  } catch {
-    // Storage unavailable — the toggle simply doesn't persist.
-  }
-  window.dispatchEvent(new Event(CHANGE_EVENT));
+  reasoning.set(open);
 }
 
 /** The chosen accent hue (falls back to the default on junk/absence). */
 export function accent(): Accent {
-  try {
-    const raw = window.localStorage.getItem(ACCENT_KEY);
-    return (ACCENTS as readonly string[]).includes(raw ?? "")
-      ? (raw as Accent)
-      : DEFAULT_ACCENT;
-  } catch {
-    return DEFAULT_ACCENT;
-  }
+  return accentPref.get();
 }
 
 /** The server-render snapshot for the accent. */
 export function accentServer(): Accent {
-  return DEFAULT_ACCENT;
+  return accentPref.getServer();
 }
 
 /** Persist the accent (best-effort) and notify readers. */
 export function setAccent(value: Accent): void {
-  try {
-    window.localStorage.setItem(ACCENT_KEY, value);
-  } catch {
-    // Storage unavailable — the choice simply doesn't persist.
-  }
-  window.dispatchEvent(new Event(CHANGE_EVENT));
+  accentPref.set(value);
 }
 
 /** The chosen layout density (falls back to the default on junk/absence). */
 export function density(): Density {
-  try {
-    const raw = window.localStorage.getItem(DENSITY_KEY);
-    return (DENSITIES as readonly string[]).includes(raw ?? "")
-      ? (raw as Density)
-      : DEFAULT_DENSITY;
-  } catch {
-    return DEFAULT_DENSITY;
-  }
+  return densityPref.get();
 }
 
 /** The server-render snapshot for the density. */
 export function densityServer(): Density {
-  return DEFAULT_DENSITY;
+  return densityPref.getServer();
 }
 
 /** Persist the density (best-effort) and notify readers. */
 export function setDensity(value: Density): void {
-  try {
-    window.localStorage.setItem(DENSITY_KEY, value);
-  } catch {
-    // Storage unavailable — the choice simply doesn't persist.
-  }
-  window.dispatchEvent(new Event(CHANGE_EVENT));
+  densityPref.set(value);
 }
 
 /** Whether the desktop evidence rail is expanded (collapse survives reloads). */
 export function evidenceRailOpen(): boolean {
-  try {
-    return window.localStorage.getItem(EVIDENCE_RAIL_OPEN_KEY) !== "false";
-  } catch {
-    return true; // storage unavailable (SSR, privacy mode) — the default
-  }
+  return evidenceRail.get();
 }
 
 /** The server-render snapshot for the evidence rail (open). */
 export function evidenceRailOpenServer(): boolean {
-  return true;
+  return evidenceRail.getServer();
 }
 
 /** Persist the evidence-rail state (best-effort) and notify readers. */
 export function setEvidenceRailOpen(open: boolean): void {
-  try {
-    window.localStorage.setItem(EVIDENCE_RAIL_OPEN_KEY, String(open));
-  } catch {
-    // Storage unavailable — the toggle simply doesn't persist.
-  }
-  window.dispatchEvent(new Event(CHANGE_EVENT));
+  evidenceRail.set(open);
 }
 
 /**
@@ -135,26 +169,17 @@ export function setEvidenceRailOpen(open: boolean): void {
  * pref behind it.
  */
 export function developerMode(): boolean {
-  try {
-    return window.localStorage.getItem(DEVELOPER_MODE_KEY) !== "false";
-  } catch {
-    return true; // storage unavailable (SSR, privacy mode) — the default
-  }
+  return developer.get();
 }
 
 /** The server-render snapshot for developer mode (on). */
 export function developerModeServer(): boolean {
-  return true;
+  return developer.getServer();
 }
 
 /** Persist the developer-mode toggle (best-effort) and notify readers. */
 export function setDeveloperMode(on: boolean): void {
-  try {
-    window.localStorage.setItem(DEVELOPER_MODE_KEY, String(on));
-  } catch {
-    // Storage unavailable — the toggle simply doesn't persist.
-  }
-  window.dispatchEvent(new Event(CHANGE_EVENT));
+  developer.set(on);
 }
 
 /** Subscribe to preference changes (this tab + other tabs' storage events). */

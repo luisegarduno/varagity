@@ -16,7 +16,6 @@ import logging
 import uuid
 from collections.abc import Sequence
 from datetime import datetime
-from types import TracebackType
 from typing import Any
 
 import psycopg
@@ -24,6 +23,7 @@ from psycopg.types.json import Json
 from pydantic import BaseModel
 
 from varagity.models.llm import LLMClient, clean_response
+from varagity.stores.base import ClosingContextMixin
 from varagity.stores.records import RetrievedChunk
 from varagity.stores.vector_store import default_conninfo
 
@@ -189,7 +189,7 @@ def _source_snapshot(chunk: RetrievedChunk) -> dict[str, Any]:
     }
 
 
-class ConversationStore:
+class ConversationStore(ClosingContextMixin):
     """Conversation CRUD over PostgreSQL.
 
     Owns one autocommit connection (per-turn writes group into explicit
@@ -214,29 +214,6 @@ class ConversationStore:
         """Close the underlying connection (idempotent)."""
         if not self._conn.closed:
             self._conn.close()
-
-    def __enter__(self) -> "ConversationStore":
-        """Enter a context that closes the connection on exit.
-
-        Returns:
-            This store.
-        """
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        """Close the connection on context exit.
-
-        Args:
-            exc_type: Exception type, if the block raised.
-            exc: Exception instance, if the block raised.
-            tb: Traceback, if the block raised.
-        """
-        self.close()
 
     def create_conversation(self, title: str | None = None) -> ConversationSummary:
         """Insert a new conversation.

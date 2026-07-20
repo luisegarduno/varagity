@@ -52,6 +52,7 @@ from varagity.api.schemas import (
     UploadResponse,
 )
 from varagity.config import get_settings
+from varagity.paths import resolve_contained
 from varagity.preview import locate, render_page_png, resolve_preview_source
 from varagity.stores.bm25_store import ElasticsearchBM25
 from varagity.stores.records import DocumentInfo
@@ -236,13 +237,9 @@ def _store_upload(
         # 1–5 had a hole, or a symlink inside the corpus points out of it,
         # nothing is written outside DOCS_PATH. Mirrors the delete route's
         # check; OSError (a dangling symlink in the prefix) counts as
-        # outside.
-        try:
-            resolved = target.resolve()
-            contained = resolved.is_relative_to(docs_root.resolve())
-        except OSError:
-            contained = False
-        if not contained:
+        # outside. docs_root is resolved at the call site, as it was inline.
+        resolved = resolve_contained(target, docs_root.resolve())
+        if resolved is None:
             return UploadedFileOut(
                 file_name=raw_path or name, size_bytes=0, stored=False, reason="invalid_path"
             )
@@ -407,11 +404,8 @@ def _relative_to_corpus(source: str, docs_root: Path) -> str | None:
         doesn't resolve inside the corpus directory (ingested from
         elsewhere — such documents simply list flat).
     """
-    try:
-        resolved = Path(source).resolve()
-        if not resolved.is_relative_to(docs_root):
-            return None
-    except OSError:  # unresolvable (symlink loop, …)
+    resolved = resolve_contained(Path(source), docs_root)
+    if resolved is None:
         return None
     return resolved.relative_to(docs_root).as_posix()
 
@@ -485,12 +479,8 @@ def _remove_source_file(info: DocumentInfo) -> bool:
     """
     docs_root = Path(get_settings().DOCS_PATH).resolve()
     source = Path(info.source)
-    try:
-        resolved = source.resolve()
-        inside_corpus = resolved.is_relative_to(docs_root)
-    except OSError:  # unresolvable (dangling symlink target, …)
-        inside_corpus = False
-    if not inside_corpus:
+    resolved = resolve_contained(source, docs_root)
+    if resolved is None:
         logger.warning(
             "not removing %s — outside DOCS_PATH (%s); the next ingest will re-add it",
             info.source,
