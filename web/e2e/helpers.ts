@@ -3,6 +3,9 @@ import { expect, type Page, type TestInfo } from "@playwright/test";
 /** The two themes the a11y criterion covers. */
 export type ThemeName = "light" | "dark";
 
+/** The two layout densities (mirrors `lib/display-prefs.ts` DENSITIES). */
+export type DensityName = "comfortable" | "compact";
+
 /** Matches the conversation route the app redirects to (unhyphenated UUID hex). */
 export const CONVERSATION_URL = /\/c\/[0-9a-f-]{32,36}/;
 
@@ -12,17 +15,44 @@ export const CONVERSATION_URL = /\/c\/[0-9a-f-]{32,36}/;
  *
  * - `theme`: next-themes' key — forces light/dark deterministically
  *   (unset ⇒ "system", which follows the browser's emulated color scheme).
+ * - `density`: the display pref (`varagity:density`) — set to exercise the
+ *   map's density-sensitive layout; unset leaves the "comfortable" default.
+ * - `developerMode`: the cosmetic gate (`varagity:developer-mode`) — set
+ *   `false` to hide the Map sidebar button and the ⌘K command; unset leaves
+ *   the default-on behavior (`getItem() !== "false"`).
  * - The evidence rail pref is pinned open so desktop runs are deterministic
  *   regardless of what a previous session collapsed.
  */
 export async function primeAppState(
   page: Page,
-  opts: { theme?: ThemeName } = {},
+  opts: {
+    theme?: ThemeName;
+    density?: DensityName;
+    developerMode?: boolean;
+  } = {},
 ): Promise<void> {
-  await page.addInitScript((theme) => {
-    if (theme) window.localStorage.setItem("theme", theme);
-    window.localStorage.setItem("varagity:evidence-rail-open", "true");
-  }, opts.theme ?? null);
+  await page.addInitScript(
+    (state: {
+      theme: string | null;
+      density: string | null;
+      developerMode: boolean | null;
+    }) => {
+      if (state.theme) window.localStorage.setItem("theme", state.theme);
+      if (state.density)
+        window.localStorage.setItem("varagity:density", state.density);
+      if (state.developerMode !== null)
+        window.localStorage.setItem(
+          "varagity:developer-mode",
+          String(state.developerMode),
+        );
+      window.localStorage.setItem("varagity:evidence-rail-open", "true");
+    },
+    {
+      theme: opts.theme ?? null,
+      density: opts.density ?? null,
+      developerMode: opts.developerMode ?? null,
+    },
+  );
 }
 
 /** True when running under the mobile project (390×844 + touch). */

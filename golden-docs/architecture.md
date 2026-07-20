@@ -314,6 +314,32 @@ the method. Operational notes on serving the reranker and the embedder from
 one 8 GB GPU are in the
 [runbook](runbook.md#the-reranker-rides-the-embedding-container).
 
+## The codebase map
+
+This page explains Varagity in prose and Mermaid fragments; the web GUI also
+ships the whole system as one interactive graph at **`/map`** — entry points,
+the Prefect flows, the chat engines, the three models, the pluggable
+registries, and the datastores, rendered on a hand-rolled SVG canvas with
+pan/zoom and click-to-trace of downstream flows
+([ADR-015](adr/ADR-015-codebase-map.md)). It complements this document by
+putting the *relational* facts on the edges where they belong ("`reranked`
+composes a base retriever", "condense calls the same llama.cpp server the
+answer generator does"). It is reachable from the sidebar and the ⌘K palette
+when **developer mode** (default on) is enabled, and by URL regardless — the
+gate is cosmetic (single-user local app).
+
+The map is a **curated artifact**, not generated: its graph lives in
+`web/lib/codebase-map.data.ts`. **Update rule** — edit that file when the
+architecture changes, the same discipline as regenerating
+`golden-docs/openapi.json` after an API-surface change. A Vitest drift guard
+(`web/lib/__tests__/codebase-map.test.ts`) resolves every node's `sourceRef`
+against the repo root and fails CI when a referenced file is renamed or
+truncated past its pinned line — the mirror of the drift-guarded
+`openapi.json` snapshot. What it **cannot** guard is edge
+*semantics*: whether an arrow still tells the truth is the human's job, so an
+architectural change that leaves the referenced files in place still needs the
+map edited by hand.
+
 ## Module map
 
 ```

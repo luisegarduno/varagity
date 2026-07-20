@@ -156,6 +156,7 @@ nav:
       - ADR-012 Relative-path uploads: adr/ADR-012-relative-path-uploads.md
       - ADR-013 Corpus gauges vs ingest counters: adr/ADR-013-corpus-gauges-vs-counters.md
       - ADR-014 bun as the package manager: adr/ADR-014-bun-package-manager.md
+      - ADR-015 In-app codebase map: adr/ADR-015-codebase-map.md
   - API reference:
       - reference/index.md
       - Configuration & logging: reference/config.md
