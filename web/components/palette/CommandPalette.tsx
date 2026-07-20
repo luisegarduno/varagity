@@ -13,6 +13,11 @@ import { useMountEffect } from "@/hooks/use-mount-effect";
 import { createConversation, type ConversationSummary } from "@/lib/api";
 import { notifyConversationsChanged } from "@/lib/conversations-bus";
 import {
+  developerMode,
+  developerModeServer,
+  subscribeDisplayPrefs,
+} from "@/lib/display-prefs";
+import {
   filterCommands,
   groupCommands,
   type PaletteCommand,
@@ -56,6 +61,12 @@ const STATIC_COMMANDS: PaletteCommand[] = [
     label: "Corpus",
     group: "Navigate",
     keywords: ["documents", "files", "upload", "ingest"],
+  },
+  {
+    id: "navigate:map",
+    label: "Codebase Map",
+    group: "Navigate",
+    keywords: ["architecture", "graph", "diagram", "developer", "system"],
   },
   {
     id: "navigate:settings",
@@ -129,6 +140,11 @@ export function CommandPalette() {
   const router = useRouter();
   const { setTheme } = useTheme();
   const hintsId = React.useId();
+  const devMode = React.useSyncExternalStore(
+    subscribeDisplayPrefs,
+    developerMode,
+    developerModeServer,
+  );
 
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
@@ -188,6 +204,8 @@ export function CommandPalette() {
         case "navigate":
           if (argument === "corpus") {
             router.push("/corpus");
+          } else if (argument === "map") {
+            router.push("/map");
           } else if (argument === "settings") {
             notifyOpenSettings();
           }
@@ -237,26 +255,38 @@ export function CommandPalette() {
     [conversations],
   );
 
+  // Developer mode (default on) hides the Codebase Map command. It must drop
+  // from *both* memos below — Base UI keeps its own item registry from
+  // `items`, so filtering only `filteredItems` would leave the hidden command
+  // matchable via the autocomplete.
+  const staticCommands = React.useMemo(
+    () =>
+      devMode
+        ? STATIC_COMMANDS
+        : STATIC_COMMANDS.filter((command) => command.id !== "navigate:map"),
+    [devMode],
+  );
+
   // The full universe (for Base UI's `items`) and the query-filtered view
   // (`filteredItems`). Un-queried, the Conversations group is capped to the
   // most recent few; a query searches everything fetched.
   const allGroups = React.useMemo(
-    () => groupCommands([...STATIC_COMMANDS, ...conversationCommands]),
-    [conversationCommands],
+    () => groupCommands([...staticCommands, ...conversationCommands]),
+    [staticCommands, conversationCommands],
   );
   const visibleGroups = React.useMemo(() => {
     const visible =
       query.trim() === ""
         ? [
-            ...STATIC_COMMANDS,
+            ...staticCommands,
             ...conversationCommands.slice(0, RECENT_CONVERSATIONS_LIMIT),
           ]
         : filterCommands(
-            [...STATIC_COMMANDS, ...conversationCommands],
+            [...staticCommands, ...conversationCommands],
             query,
           );
     return groupCommands(visible);
-  }, [conversationCommands, query]);
+  }, [staticCommands, conversationCommands, query]);
 
   return (
     <DialogPrimitive.Root

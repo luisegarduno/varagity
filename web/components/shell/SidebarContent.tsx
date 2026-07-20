@@ -1,9 +1,9 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { DatabaseIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { DatabaseIcon, NetworkIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import { SettingsDrawer } from "@/components/settings/SettingsDrawer";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -24,6 +24,11 @@ import {
   type ConversationSummary,
 } from "@/lib/api";
 import { notifyConversationsChanged } from "@/lib/conversations-bus";
+import {
+  developerMode,
+  developerModeServer,
+  subscribeDisplayPrefs,
+} from "@/lib/display-prefs";
 import { conversationsQuery } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -42,6 +47,13 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const router = useRouter();
   const pathname = usePathname();
   const { data: conversations = [], isError } = useQuery(conversationsQuery());
+  // Developer mode (default on) cosmetically gates the Map entry point; the
+  // drawer's switch and this button share the store, so they toggle in sync.
+  const devMode = useSyncExternalStore(
+    subscribeDisplayPrefs,
+    developerMode,
+    developerModeServer,
+  );
   // "Is the stack up?" is one question, so a failure from either the list or
   // a new-chat POST raises the same banner. Each new-chat attempt starts
   // from a clean slate; the list clears itself on any successful refetch.
@@ -168,6 +180,21 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             <DatabaseIcon aria-hidden />
             Corpus
           </Button>
+          {devMode && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "justify-start",
+                pathname === "/map" &&
+                  "bg-sidebar-accent text-sidebar-accent-foreground",
+              )}
+              onClick={() => go("/map")}
+            >
+              <NetworkIcon aria-hidden />
+              Map
+            </Button>
+          )}
           {/* Only the always-mounted desktop instance answers the ⌘K palette,
               so a palette open never raises two dialogs. */}
           <SettingsDrawer openOnBusEvent={onNavigate === undefined} />

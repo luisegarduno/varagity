@@ -37,10 +37,13 @@ import {
   accentServer,
   density,
   densityServer,
+  developerMode,
+  developerModeServer,
   reasoningDefaultOpen,
   reasoningDefaultOpenServer,
   setAccent,
   setDensity,
+  setDeveloperMode,
   setReasoningDefaultOpen,
   subscribeDisplayPrefs,
   type Accent,
@@ -445,6 +448,11 @@ function DisplaySection() {
     density,
     densityServer,
   );
+  const devMode = useSyncExternalStore(
+    subscribeDisplayPrefs,
+    developerMode,
+    developerModeServer,
+  );
   const mounted = useSyncExternalStore(
     subscribeNever,
     () => true,
@@ -552,6 +560,17 @@ function DisplaySection() {
           id="setting-reasoning-open"
           checked={reasoningOpen}
           onCheckedChange={(checked) => setReasoningDefaultOpen(checked)}
+        />
+      </div>
+
+      <div className="flex items-center justify-between gap-3">
+        <label htmlFor="setting-developer-mode" className="font-mono text-xs">
+          developer mode
+        </label>
+        <Switch
+          id="setting-developer-mode"
+          checked={devMode}
+          onCheckedChange={setDeveloperMode}
         />
       </div>
     </fieldset>

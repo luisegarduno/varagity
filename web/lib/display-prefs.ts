@@ -12,6 +12,7 @@ const REASONING_DEFAULT_OPEN_KEY = "varagity:reasoning-default-open";
 const ACCENT_KEY = "varagity:accent";
 const DENSITY_KEY = "varagity:density";
 const EVIDENCE_RAIL_OPEN_KEY = "varagity:evidence-rail-open";
+const DEVELOPER_MODE_KEY = "varagity:developer-mode";
 const CHANGE_EVENT = "varagity:display-prefs-changed";
 
 /** The curated accent hues (spec_v2 §4.7 Display "accent"); CSS owns the colors. */
@@ -120,6 +121,36 @@ export function evidenceRailOpenServer(): boolean {
 export function setEvidenceRailOpen(open: boolean): void {
   try {
     window.localStorage.setItem(EVIDENCE_RAIL_OPEN_KEY, String(open));
+  } catch {
+    // Storage unavailable — the toggle simply doesn't persist.
+  }
+  window.dispatchEvent(new Event(CHANGE_EVENT));
+}
+
+/**
+ * Whether developer mode is on (default on). A *cosmetic* gate (ADR-015 /
+ * D7): it only shows or hides the sidebar Map button and the ⌘K "Codebase
+ * Map" command — `/map` stays reachable by URL even when it is off. That is
+ * fine for a single-user local app; there is no route guard and no server
+ * pref behind it.
+ */
+export function developerMode(): boolean {
+  try {
+    return window.localStorage.getItem(DEVELOPER_MODE_KEY) !== "false";
+  } catch {
+    return true; // storage unavailable (SSR, privacy mode) — the default
+  }
+}
+
+/** The server-render snapshot for developer mode (on). */
+export function developerModeServer(): boolean {
+  return true;
+}
+
+/** Persist the developer-mode toggle (best-effort) and notify readers. */
+export function setDeveloperMode(on: boolean): void {
+  try {
+    window.localStorage.setItem(DEVELOPER_MODE_KEY, String(on));
   } catch {
     // Storage unavailable — the toggle simply doesn't persist.
   }
