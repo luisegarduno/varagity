@@ -1,6 +1,8 @@
 # ADR-015: In-app codebase map (`/map` + developer mode)
 
-**Status:** Accepted (2026-07-19)
+**Status:** Accepted (2026-07-19) · Amended twice (2026-07-20 — see
+[the canvas amendment](#amendment-2026-07-20-the-condensed-foglamp-style-canvas)
+and [the layout-engine amendment](#amendment-2026-07-20-elk-layout-precomputed-beams))
 
 ## Context
 
@@ -117,3 +119,99 @@ this size). This is the first ADR scoped to the frontend (`web/`).
 - **Developer mode is a seam for future developer surfaces**, not just the map
   — the generic `developer mode` toggle and its default-on stance leave room to
   gate more behind it without a new preference.
+
+## Amendment (2026-07-20): the condensed, foglamp-style canvas
+
+The first shipped canvas was correct but **noisy**: 41 fully-drawn nodes and
+59 edges — model fan-in arrows above all — read as a wiring diagram rather
+than a map. A foglamp.dev scan of this repo rendered the same system far more
+legibly, so the map was rebuilt to that standard. What changed, and why:
+
+- **The data is now the condensed scan graph** (26 nodes / 38 edges, from
+  `.foglamp/scan.json` 2026-07-20): one node per moving part instead of one
+  per registry entry, with `Ingestion` / `Query path` / `Observability` as the
+  three groups. Same schema discipline (`satisfies CodebaseMap`, validator,
+  drift-guarded `sourceRef`s — all 15 verified against the tree); the `top*`
+  callouts became standalone `{id, label, domain}` rows feeding the new side
+  panel rather than node references.
+
+- **Sink `model` nodes fold into chips.** The layout removes each model that
+  has no outgoing edges and re-expresses every edge into it as a favicon chip
+  on the calling card ("Retriever registry" carries `multilingual-e5-large` +
+  `bge-reranker-v2-m3`). This is the single change that removes most of the
+  visual noise — model usage reads as a badge, not as six arrows converging on
+  three boxes. A model with outgoing edges would stay a card, so nothing can
+  silently disappear.
+
+- **HTML cards over one SVG edge underlay** replace the all-SVG canvas: nodes
+  are real absolutely-positioned `<button>` cards inside a single transformed
+  "world" div (native focus/activation — the SVG `role="button"` workarounds
+  are gone), while edges stay SVG: rounded-orthogonal polylines with chevron
+  arrowheads, routed through corridor channels and free horizontal bands so
+  long edges travel open air instead of slicing through groups. Groups render
+  as containers with an internal top-down mini-layout (no longer bands behind
+  columns — the global pass treats each group as one super-node).
+
+- **Favicons are vendored, not fetched.** The original "favicons omitted"
+  stance protected the no-phone-home rule at the cost of the look. The
+  amendment keeps the rule and the look: the eleven integration/model icons
+  were fetched once at authoring time into `web/public/map-icons/` and served
+  same-origin, with the kind glyph as the on-error fallback (the
+  privacy-plugin-self-hosts-fonts precedent from the docs site).
+
+- **Kind identity follows the reference design**: colored icon-badge squircles
+  (bolt / ghost / hexagon / database / world — Tabler's MIT filled glyphs,
+  inlined) plus a floating Models/Integrations panel, a bottom legend pill bar
+  whose entries spotlight their kind on hover, an anchored detail popover, and
+  a slow "beam" border on agent cards (static under reduced motion).
+
+Unchanged: the route + developer-mode gating, the curated-data stance and
+update rule, the Vitest/Playwright testing split, the drift guard, and the
+DAG invariant. The counts in the Consequences above describe the original
+graph; the shipped graph is 26/38 with the same 60/120 caps.
+
+## Amendment (2026-07-20): ELK layout, precomputed; beams
+
+The first amendment's hand-rolled router got the vocabulary right but not
+the composition: the reference (foglamp.dev's scan viewer) reads better
+because of *placement* decisions no reasonable hand-rolled pass reproduces.
+Its actual renderer (foglamp-labs/foglamp, Apache-2.0) was reviewed and
+ported:
+
+- **ELK's layered algorithm replaces the hand-rolled layout** — reversing
+  this ADR's "no graph library" decision, with its premise changed: the
+  requirement moved from "a deterministic layered layout" to "*this exact*
+  layout". Two passes (each group top-to-bottom in isolation, then the root
+  graph left-to-right over group boxes with `BRANDES_KOEPF`/`BALANCED`
+  placement and orthogonal routing), ELK-reserved inline edge labels (they
+  can never collide), cross-group edges attached to the group container and
+  deduped per endpoint pair (`orig` indices keep the originals for
+  trace/dim), then a row snap and an empty-band squeeze
+  (`web/lib/map-layout.ts`, ported with attribution).
+
+- **elkjs never ships to the browser.** The layout of a static input is
+  itself static, so the ELK pass runs at authoring time into a checked-in
+  snapshot (`web/lib/codebase-map.layout.json`) that the page imports
+  synchronously — the `openapi.json` pattern again: a Vitest guard re-runs
+  ELK and fails CI on drift; `bun run test -u` regenerates. This also fixed
+  a real defect of the first attempt at runtime ELK (`use()` + Suspense):
+  the server-rendered map was *visible* before the client had fetched the
+  elk chunk and hydrated, so a fast first click landed on a dead card.
+  Instant hydration closed that window (and Playwright's activation tests
+  are what caught it).
+
+- **The traveling beams** are the reference's signature liveliness and are
+  now ported: per edge, a comet (gradient pill on a CSS `offset-path`,
+  WAAPI-animated at constant speed) occasionally runs the route and flashes
+  the target card's ring in the source kind's color — sparse by design (one
+  run, ~30–55 s rest, staggered starts), compositor-friendly, skipped
+  entirely under reduced motion. Entrance choreography (cards spring in
+  along the flow direction, edges draw themselves) rides plain CSS
+  keyframes with `animation-fill-mode: backwards`, so the stagger can never
+  fight the spotlight's dim classes. Wheel now pans (pinch/ctrl zooms),
+  matching the reference's map-app gesture model; keyboard zoom stays.
+
+Consequences: elkjs is a dependency but a build/test-time one in practice
+(its dynamic-import chunk is unreachable from page code); the layout module
+is a port, so upstream improvements are easy to re-take; and the map gains a
+second generated artifact whose regeneration command sits next to its guard.

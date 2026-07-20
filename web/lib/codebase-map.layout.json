@@ -1,0 +1,1637 @@
+{
+  "nodes": [
+    {
+      "id": "web",
+      "label": "Next.js chat GUI",
+      "kind": "entry",
+      "sub": "web/ · :3000",
+      "sourceRef": "web/app/page.tsx",
+      "detail": "SSE chat with an evidence panel showing how each answer was built, corpus manager, live settings drawer, command palette, and a /map architecture map behind developer mode."
+    },
+    {
+      "id": "cli",
+      "label": "CLI",
+      "kind": "entry",
+      "sub": "main.py · ingest/chat/eval",
+      "sourceRef": "varagity/cli/app.py",
+      "detail": "ingest / chat / eval entry point; runs the same Prefect flows in-process as the API."
+    },
+    {
+      "id": "api",
+      "label": "FastAPI backend",
+      "kind": "service",
+      "sub": ":8000 · SSE + CRUD",
+      "sourceRef": "varagity/api/main.py",
+      "detail": "Async edge over sync Prefect flows (threadpool). SSE per turn: retrieval → reasoning → token → done — evidence before prose. Applies idempotent SQL migrations on startup."
+    },
+    {
+      "id": "corpus",
+      "label": "Corpus manager",
+      "kind": "service",
+      "sub": "upload · ingest · delete",
+      "group": "Ingestion",
+      "sourceRef": "varagity/api/routes/documents.py",
+      "detail": "Composer uploads of files and folders (client-side 409 queueing), per-doc and folder delete, stale-corpus flag; uploads auto-ingest with reingest=false."
+    },
+    {
+      "id": "ingest",
+      "label": "Ingestion flow",
+      "kind": "service",
+      "sub": "Prefect · parse→embed→index",
+      "group": "Ingestion",
+      "sourceRef": "varagity/pipeline/ingest_flow.py:235",
+      "detail": "Every stage a tracked Prefect task. doc_id hashes the DOCS_PATH-relative path + file bytes, so unchanged files skip until --reingest."
+    },
+    {
+      "id": "parsers",
+      "label": "Parser registry",
+      "kind": "service",
+      "sub": "pdf · text · office · web",
+      "group": "Ingestion",
+      "sourceRef": "varagity/ingest/parsers/pdf.py:190",
+      "detail": "Docling-based PDF, office and web parsing with a two-pass OCR fallback for scanned or textless PDFs (ADR-004)."
+    },
+    {
+      "id": "chunkers",
+      "label": "Chunker registry",
+      "kind": "service",
+      "sub": "5 strategies",
+      "group": "Ingestion",
+      "sourceRef": "varagity/chunking/recursive_character.py:19",
+      "detail": "recursive_character (default), token_based, markdown_aware, semantic, docling_hybrid — default decided by a fact-anchored benchmark sweep; CHUNK_SIZE unit is per-strategy."
+    },
+    {
+      "id": "contextualizer",
+      "label": "Contextualizer",
+      "kind": "agent",
+      "sub": "LLM blurb per chunk",
+      "group": "Ingestion",
+      "sourceRef": "varagity/context/contextual.py:75",
+      "detail": "Anthropic-style contextual retrieval: an LLM situating blurb per chunk, prepended before embedding and BM25 indexing. Overruns degrade to no-context, never a failed ingest."
+    },
+    {
+      "id": "qflow",
+      "label": "Query flow",
+      "kind": "service",
+      "sub": "Prefect · retrieve→answer",
+      "group": "Query path",
+      "sourceRef": "varagity/pipeline/query_flow.py:276",
+      "detail": "Retrieve → (rerank) → answer, streaming. Every RetrievedChunk carries a RetrievalTrace — per-arm ranks, fused score, rerank delta — rendered identically by CLI, GUI and history."
+    },
+    {
+      "id": "condenser",
+      "label": "Condense engine",
+      "kind": "agent",
+      "sub": "chat: condense_context",
+      "group": "Query path",
+      "sourceRef": "varagity/chat/condense.py:33",
+      "detail": "Rewrites follow-ups into standalone search queries from recent history; output scrubbed of <think> blocks with raw-query fallback. Benchmarks kept simple the default (ADR-011)."
+    },
+    {
+      "id": "retrievers",
+      "label": "Retriever registry",
+      "kind": "service",
+      "sub": "semantic·bm25·hybrid·reranked",
+      "group": "Query path",
+      "sourceRef": "varagity/retrieval/hybrid.py:125",
+      "detail": "hybrid fuses both arms (0.8 dense / 0.2 BM25) and hydrates rows from pgvector; reranked composes a base retriever (over-fetch, cross-encode, keep 5) rather than forking fusion."
+    },
+    {
+      "id": "answerer",
+      "label": "Answer generator",
+      "kind": "agent",
+      "sub": "grounded + cited",
+      "group": "Query path",
+      "sourceRef": "varagity/generation/answer.py:162",
+      "detail": "Streams an answer grounded strictly in retrieved context with [SOURCE] citations; the web app rewrites those to chips before markdown parsing."
+    },
+    {
+      "id": "preview",
+      "label": "Page previews",
+      "kind": "service",
+      "sub": "PDFium · LibreOffice",
+      "sourceRef": "varagity/preview/render.py",
+      "detail": "Locates a chunk's page and renders it for the evidence panel; PPTX converts via LibreOffice first. Degrades per-document (available:false + reason), never 500."
+    },
+    {
+      "id": "eval",
+      "label": "Eval harness",
+      "kind": "service",
+      "sub": "retrieval · ocr · chat",
+      "sourceRef": "varagity/eval/evaluate.py",
+      "detail": "Retrieval matrix, chunker sweep, OCR benchmark and multi-turn chat eval against golden datasets — defaults here are benchmark-decided (ADR-004, ADR-011)."
+    },
+    {
+      "id": "pg",
+      "label": "Postgres + pgvector",
+      "kind": "store",
+      "domain": "postgresql.org",
+      "sub": ":5432 · chunks + convos",
+      "detail": "Canonical chunk metadata + dense vectors, plus conversations whose message_sources snapshot evidence and trace — history survives reingests (soft chunk refs)."
+    },
+    {
+      "id": "es",
+      "label": "Elasticsearch",
+      "kind": "store",
+      "domain": "elastic.co",
+      "sub": ":9200 · contextual BM25",
+      "detail": "Contextual BM25 index over situated chunks; single-node, so yellow cluster health is healthy."
+    },
+    {
+      "id": "docsdir",
+      "label": "docs/ corpus",
+      "kind": "store",
+      "sub": "gitignored ingest input",
+      "detail": "The gitignored RAG input corpus on disk — a bind mount shared by CLI and API so both agree on the corpus."
+    },
+    {
+      "id": "docling",
+      "label": "Docling",
+      "kind": "external",
+      "domain": "github.com",
+      "sub": "layout-aware conversion",
+      "detail": "IBM's layout-aware document converter (PDF, office, HTML); also backs the docling_hybrid chunker. Layout/table models download on first use."
+    },
+    {
+      "id": "ocr",
+      "label": "OCR engines",
+      "kind": "external",
+      "sub": "EasyOCR · Tesseract",
+      "sourceRef": "varagity/ingest/parsers/pdf.py:104",
+      "detail": "Factory in the PDF parser; EasyOCR is the benchmark-decided default (error-free where Tesseract drops words), Tesseract trades accuracy for ~5x speed."
+    },
+    {
+      "id": "prefect",
+      "label": "Prefect server",
+      "kind": "external",
+      "domain": "prefect.io",
+      "sub": ":4200 · run tracking",
+      "detail": "Tracks every flow/task run; flows execute in-process from CLI and API (no workers), every task NO_CACHE."
+    },
+    {
+      "id": "prom",
+      "label": "Prometheus",
+      "kind": "external",
+      "domain": "prometheus.io",
+      "sub": ":9090 · 15s scrape",
+      "group": "Observability",
+      "detail": "Scrapes the API's /metrics every 15s; optional exporter targets ride compose profiles."
+    },
+    {
+      "id": "graf",
+      "label": "Grafana",
+      "kind": "external",
+      "domain": "grafana.com",
+      "sub": ":3001 · 3 dashboards",
+      "group": "Observability",
+      "detail": "Provisioned Query / Ingestion / Infra dashboards, anonymous viewer. Corpus gauges read pgvector at scrape time, so CLI ingests count too (ADR-013)."
+    },
+    {
+      "id": "pexp",
+      "label": "prefect-exporter",
+      "kind": "external",
+      "domain": "prefect.io",
+      "sub": "--profile · 24h window",
+      "group": "Observability",
+      "detail": "Optional profile. OFFSET_MINUTES=1440 — the image's 3-minute default reads 0 on bursty flows; PREFECT_API_URL must keep its /api suffix or it crash-loops."
+    }
+  ],
+  "foldedEdges": [
+    {
+      "from": "web",
+      "to": "api",
+      "kind": "triggers",
+      "label": "chat (SSE)"
+    },
+    {
+      "from": "cli",
+      "to": "qflow",
+      "kind": "triggers",
+      "label": "terminal Q&A"
+    },
+    {
+      "from": "cli",
+      "to": "ingest",
+      "kind": "triggers",
+      "label": "ingest"
+    },
+    {
+      "from": "cli",
+      "to": "eval",
+      "kind": "triggers",
+      "label": "eval suite"
+    },
+    {
+      "from": "api",
+      "to": "condenser",
+      "kind": "calls",
+      "label": "condense_context"
+    },
+    {
+      "from": "api",
+      "to": "qflow",
+      "kind": "triggers",
+      "label": "simple (default)"
+    },
+    {
+      "from": "condenser",
+      "to": "qflow",
+      "kind": "triggers",
+      "label": "standalone query"
+    },
+    {
+      "from": "qflow",
+      "to": "retrievers",
+      "kind": "calls"
+    },
+    {
+      "from": "retrievers",
+      "to": "pg",
+      "kind": "reads",
+      "label": "dense kNN"
+    },
+    {
+      "from": "retrievers",
+      "to": "es",
+      "kind": "reads",
+      "label": "BM25 search"
+    },
+    {
+      "from": "qflow",
+      "to": "answerer",
+      "kind": "calls"
+    },
+    {
+      "from": "api",
+      "to": "pg",
+      "kind": "writes",
+      "label": "turns + trace snapshots"
+    },
+    {
+      "from": "qflow",
+      "to": "prefect",
+      "kind": "writes",
+      "label": "task runs"
+    },
+    {
+      "from": "web",
+      "to": "corpus",
+      "kind": "triggers",
+      "label": "📎 files & folders"
+    },
+    {
+      "from": "corpus",
+      "to": "docsdir",
+      "kind": "writes",
+      "label": "saves uploads"
+    },
+    {
+      "from": "corpus",
+      "to": "ingest",
+      "kind": "triggers",
+      "label": "auto-ingest"
+    },
+    {
+      "from": "ingest",
+      "to": "docsdir",
+      "kind": "reads",
+      "label": "changed files only"
+    },
+    {
+      "from": "ingest",
+      "to": "parsers",
+      "kind": "calls"
+    },
+    {
+      "from": "parsers",
+      "to": "docling",
+      "kind": "calls",
+      "label": "convert + layout"
+    },
+    {
+      "from": "parsers",
+      "to": "ocr",
+      "kind": "calls",
+      "label": "scanned pages"
+    },
+    {
+      "from": "ingest",
+      "to": "chunkers",
+      "kind": "calls"
+    },
+    {
+      "from": "ingest",
+      "to": "contextualizer",
+      "kind": "calls",
+      "label": "per chunk"
+    },
+    {
+      "from": "ingest",
+      "to": "pg",
+      "kind": "writes",
+      "label": "chunks + vectors"
+    },
+    {
+      "from": "ingest",
+      "to": "es",
+      "kind": "writes",
+      "label": "contextual BM25 docs"
+    },
+    {
+      "from": "ingest",
+      "to": "prefect",
+      "kind": "writes",
+      "label": "task runs"
+    },
+    {
+      "from": "web",
+      "to": "preview",
+      "kind": "triggers",
+      "label": "evidence page peek"
+    },
+    {
+      "from": "preview",
+      "to": "docsdir",
+      "kind": "reads",
+      "label": "renders source page"
+    },
+    {
+      "from": "eval",
+      "to": "qflow",
+      "kind": "calls",
+      "label": "5-config matrix"
+    },
+    {
+      "from": "prom",
+      "to": "api",
+      "kind": "reads",
+      "label": "/metrics 15s"
+    },
+    {
+      "from": "graf",
+      "to": "prom",
+      "kind": "reads"
+    },
+    {
+      "from": "prom",
+      "to": "pexp",
+      "kind": "reads",
+      "label": "--profile"
+    },
+    {
+      "from": "pexp",
+      "to": "prefect",
+      "kind": "reads",
+      "label": "flow runs (24h)"
+    }
+  ],
+  "positions": [
+    [
+      "web",
+      {
+        "x": 22,
+        "y": 978,
+        "w": 229,
+        "h": 56
+      }
+    ],
+    [
+      "cli",
+      {
+        "x": 60,
+        "y": 579.5,
+        "w": 229,
+        "h": 56
+      }
+    ],
+    [
+      "api",
+      {
+        "x": 475,
+        "y": 242.5,
+        "w": 243,
+        "h": 56
+      }
+    ],
+    [
+      "preview",
+      {
+        "x": 775,
+        "y": 1149.5,
+        "w": 222,
+        "h": 56
+      }
+    ],
+    [
+      "eval",
+      {
+        "x": 475,
+        "y": 516.5,
+        "w": 222,
+        "h": 56
+      }
+    ],
+    [
+      "pg",
+      {
+        "x": 1811,
+        "y": 462,
+        "w": 229,
+        "h": 56
+      }
+    ],
+    [
+      "es",
+      {
+        "x": 1795,
+        "y": 388,
+        "w": 222,
+        "h": 56
+      }
+    ],
+    [
+      "docsdir",
+      {
+        "x": 1237,
+        "y": 1128.5,
+        "w": 229,
+        "h": 56
+      }
+    ],
+    [
+      "docling",
+      {
+        "x": 1291,
+        "y": 978,
+        "w": 215,
+        "h": 56
+      }
+    ],
+    [
+      "ocr",
+      {
+        "x": 1273,
+        "y": 789,
+        "w": 215,
+        "h": 56
+      }
+    ],
+    [
+      "prefect",
+      {
+        "x": 1799,
+        "y": 314,
+        "w": 229,
+        "h": 56
+      }
+    ],
+    [
+      "corpus",
+      {
+        "x": 520.5,
+        "y": 649.5,
+        "w": 229,
+        "h": 56
+      }
+    ],
+    [
+      "ingest",
+      {
+        "x": 510,
+        "y": 787.5,
+        "w": 250,
+        "h": 92
+      }
+    ],
+    [
+      "parsers",
+      {
+        "x": 698,
+        "y": 909.5,
+        "w": 229,
+        "h": 56
+      }
+    ],
+    [
+      "chunkers",
+      {
+        "x": 465,
+        "y": 909.5,
+        "w": 215,
+        "h": 56
+      }
+    ],
+    [
+      "contextualizer",
+      {
+        "x": 837.5,
+        "y": 995.5,
+        "w": 215,
+        "h": 92
+      }
+    ],
+    [
+      "qflow",
+      {
+        "x": 1172.1666666666667,
+        "y": 440.5,
+        "w": 250,
+        "h": 56
+      }
+    ],
+    [
+      "condenser",
+      {
+        "x": 1186.1666666666667,
+        "y": 266.5,
+        "w": 222,
+        "h": 92
+      }
+    ],
+    [
+      "retrievers",
+      {
+        "x": 1141,
+        "y": 526.5,
+        "w": 229,
+        "h": 116
+      }
+    ],
+    [
+      "answerer",
+      {
+        "x": 1388,
+        "y": 526.5,
+        "w": 215,
+        "h": 92
+      }
+    ],
+    [
+      "prom",
+      {
+        "x": 32,
+        "y": 148,
+        "w": 229,
+        "h": 56
+      }
+    ],
+    [
+      "graf",
+      {
+        "x": 39,
+        "y": 62,
+        "w": 215,
+        "h": 56
+      }
+    ],
+    [
+      "pexp",
+      {
+        "x": 35.5,
+        "y": 286,
+        "w": 222,
+        "h": 56
+      }
+    ]
+  ],
+  "groupBands": [
+    {
+      "id": "group:0",
+      "group": "Ingestion",
+      "x": 449,
+      "y": 603.5,
+      "w": 619.5,
+      "h": 500
+    },
+    {
+      "id": "group:1",
+      "group": "Query path",
+      "x": 1125,
+      "y": 220.5,
+      "w": 494,
+      "h": 438
+    },
+    {
+      "id": "group:2",
+      "group": "Observability",
+      "x": 16,
+      "y": 16,
+      "w": 261,
+      "h": 342
+    }
+  ],
+  "edges": [
+    {
+      "from": "corpus",
+      "to": "ingest",
+      "label": "auto-ingest",
+      "orig": [
+        15
+      ],
+      "points": [
+        {
+          "x": 635,
+          "y": 705.5
+        },
+        {
+          "x": 635,
+          "y": 787.5
+        }
+      ],
+      "labelPos": {
+        "x": 591,
+        "y": 746.5
+      }
+    },
+    {
+      "from": "ingest",
+      "to": "parsers",
+      "orig": [
+        17
+      ],
+      "points": [
+        {
+          "x": 635,
+          "y": 879.5
+        },
+        {
+          "x": 635,
+          "y": 899.5
+        },
+        {
+          "x": 812.5,
+          "y": 899.5
+        },
+        {
+          "x": 812.5,
+          "y": 909.5
+        }
+      ]
+    },
+    {
+      "from": "ingest",
+      "to": "chunkers",
+      "orig": [
+        20
+      ],
+      "points": [
+        {
+          "x": 572.5,
+          "y": 879.5
+        },
+        {
+          "x": 572.5,
+          "y": 909.5
+        }
+      ]
+    },
+    {
+      "from": "ingest",
+      "to": "contextualizer",
+      "label": "per chunk",
+      "orig": [
+        21
+      ],
+      "points": [
+        {
+          "x": 697.5,
+          "y": 879.5
+        },
+        {
+          "x": 697.5,
+          "y": 889.5
+        },
+        {
+          "x": 945,
+          "y": 889.5
+        },
+        {
+          "x": 945,
+          "y": 995.5
+        }
+      ],
+      "labelPos": {
+        "x": 984,
+        "y": 937.5
+      }
+    },
+    {
+      "from": "condenser",
+      "to": "qflow",
+      "label": "standalone query",
+      "orig": [
+        6
+      ],
+      "points": [
+        {
+          "x": 1297.1666666666667,
+          "y": 358.5
+        },
+        {
+          "x": 1297.1666666666667,
+          "y": 440.5
+        }
+      ],
+      "labelPos": {
+        "x": 1238.1666666666667,
+        "y": 399.5
+      }
+    },
+    {
+      "from": "qflow",
+      "to": "retrievers",
+      "orig": [
+        7
+      ],
+      "points": [
+        {
+          "x": 1255.5,
+          "y": 496.5
+        },
+        {
+          "x": 1255.5,
+          "y": 526.5
+        }
+      ]
+    },
+    {
+      "from": "qflow",
+      "to": "answerer",
+      "orig": [
+        10
+      ],
+      "points": [
+        {
+          "x": 1338.8333333333333,
+          "y": 496.5
+        },
+        {
+          "x": 1338.8333333333333,
+          "y": 506.5
+        },
+        {
+          "x": 1495.5,
+          "y": 506.5
+        },
+        {
+          "x": 1495.5,
+          "y": 526.5
+        }
+      ]
+    },
+    {
+      "from": "graf",
+      "to": "prom",
+      "orig": [
+        29
+      ],
+      "points": [
+        {
+          "x": 146.5,
+          "y": 118
+        },
+        {
+          "x": 146.5,
+          "y": 148
+        }
+      ]
+    },
+    {
+      "from": "prom",
+      "to": "pexp",
+      "label": "--profile",
+      "orig": [
+        30
+      ],
+      "points": [
+        {
+          "x": 146.5,
+          "y": 204
+        },
+        {
+          "x": 146.5,
+          "y": 286
+        }
+      ],
+      "labelPos": {
+        "x": 108.5,
+        "y": 245
+      }
+    },
+    {
+      "from": "web",
+      "to": "api",
+      "label": "chat (SSE)",
+      "orig": [
+        0
+      ],
+      "points": [
+        {
+          "x": 251,
+          "y": 1006
+        },
+        {
+          "x": 261,
+          "y": 1006
+        },
+        {
+          "x": 261,
+          "y": 853.5
+        },
+        {
+          "x": 429,
+          "y": 853.5
+        },
+        {
+          "x": 429,
+          "y": 270.5
+        },
+        {
+          "x": 475,
+          "y": 270.5
+        }
+      ],
+      "labelPos": {
+        "x": 356,
+        "y": 870.75
+      }
+    },
+    {
+      "from": "cli",
+      "to": "group:1",
+      "label": "terminal Q&A",
+      "orig": [
+        1
+      ],
+      "points": [
+        {
+          "x": 289,
+          "y": 607.5
+        },
+        {
+          "x": 333,
+          "y": 607.5
+        },
+        {
+          "x": 333,
+          "y": 411
+        },
+        {
+          "x": 894,
+          "y": 411
+        },
+        {
+          "x": 894,
+          "y": 439.5
+        },
+        {
+          "x": 1125,
+          "y": 439.5
+        }
+      ],
+      "labelPos": {
+        "x": 841,
+        "y": 427
+      }
+    },
+    {
+      "from": "cli",
+      "to": "group:0",
+      "label": "ingest",
+      "orig": [
+        2
+      ],
+      "points": [
+        {
+          "x": 289,
+          "y": 607.5
+        },
+        {
+          "x": 333,
+          "y": 607.5
+        },
+        {
+          "x": 333,
+          "y": 811.5
+        },
+        {
+          "x": 439,
+          "y": 811.5
+        },
+        {
+          "x": 439,
+          "y": 853.5
+        },
+        {
+          "x": 449,
+          "y": 853.5
+        }
+      ],
+      "labelPos": {
+        "x": 368,
+        "y": 827.5
+      }
+    },
+    {
+      "from": "cli",
+      "to": "eval",
+      "label": "eval suite",
+      "orig": [
+        3
+      ],
+      "points": [
+        {
+          "x": 289,
+          "y": 607.5
+        },
+        {
+          "x": 333,
+          "y": 607.5
+        },
+        {
+          "x": 333,
+          "y": 544.5
+        },
+        {
+          "x": 475,
+          "y": 544.5
+        }
+      ],
+      "labelPos": {
+        "x": 382,
+        "y": 560.5
+      }
+    },
+    {
+      "from": "api",
+      "to": "group:1",
+      "label": "condense_context",
+      "orig": [
+        4,
+        5
+      ],
+      "points": [
+        {
+          "x": 718,
+          "y": 270.5
+        },
+        {
+          "x": 894,
+          "y": 270.5
+        },
+        {
+          "x": 894,
+          "y": 439.5
+        },
+        {
+          "x": 1125,
+          "y": 439.5
+        }
+      ],
+      "labelPos": {
+        "x": 829,
+        "y": 286.5
+      }
+    },
+    {
+      "from": "group:1",
+      "to": "pg",
+      "label": "dense kNN",
+      "orig": [
+        8
+      ],
+      "points": [
+        {
+          "x": 1619,
+          "y": 439.5
+        },
+        {
+          "x": 1665,
+          "y": 439.5
+        },
+        {
+          "x": 1665,
+          "y": 608.5
+        },
+        {
+          "x": 1785,
+          "y": 608.5
+        },
+        {
+          "x": 1785,
+          "y": 490
+        },
+        {
+          "x": 1811,
+          "y": 490
+        }
+      ],
+      "labelPos": {
+        "x": 1709,
+        "y": 624.5
+      }
+    },
+    {
+      "from": "group:1",
+      "to": "es",
+      "label": "BM25 search",
+      "orig": [
+        9
+      ],
+      "points": [
+        {
+          "x": 1619,
+          "y": 439.5
+        },
+        {
+          "x": 1665,
+          "y": 439.5
+        },
+        {
+          "x": 1665,
+          "y": 476.5
+        },
+        {
+          "x": 1775,
+          "y": 476.5
+        },
+        {
+          "x": 1775,
+          "y": 416
+        },
+        {
+          "x": 1795,
+          "y": 416
+        }
+      ],
+      "labelPos": {
+        "x": 1715,
+        "y": 492.5
+      }
+    },
+    {
+      "from": "api",
+      "to": "pg",
+      "label": "turns + trace snapshots",
+      "orig": [
+        11
+      ],
+      "points": [
+        {
+          "x": 718,
+          "y": 270.5
+        },
+        {
+          "x": 728,
+          "y": 270.5
+        },
+        {
+          "x": 728,
+          "y": 174.5
+        },
+        {
+          "x": 1785,
+          "y": 174.5
+        },
+        {
+          "x": 1785,
+          "y": 490
+        },
+        {
+          "x": 1811,
+          "y": 490
+        }
+      ],
+      "labelPos": {
+        "x": 814,
+        "y": 190.5
+      }
+    },
+    {
+      "from": "group:1",
+      "to": "prefect",
+      "label": "task runs",
+      "orig": [
+        12
+      ],
+      "points": [
+        {
+          "x": 1619,
+          "y": 439.5
+        },
+        {
+          "x": 1665,
+          "y": 439.5
+        },
+        {
+          "x": 1665,
+          "y": 346
+        },
+        {
+          "x": 1765,
+          "y": 346
+        },
+        {
+          "x": 1765,
+          "y": 342
+        },
+        {
+          "x": 1799,
+          "y": 342
+        }
+      ],
+      "labelPos": {
+        "x": 1709,
+        "y": 362
+      }
+    },
+    {
+      "from": "web",
+      "to": "group:0",
+      "label": "📎 files & folders",
+      "orig": [
+        13
+      ],
+      "points": [
+        {
+          "x": 251,
+          "y": 1006
+        },
+        {
+          "x": 261,
+          "y": 1006
+        },
+        {
+          "x": 261,
+          "y": 895.5
+        },
+        {
+          "x": 439,
+          "y": 895.5
+        },
+        {
+          "x": 439,
+          "y": 853.5
+        },
+        {
+          "x": 449,
+          "y": 853.5
+        }
+      ],
+      "labelPos": {
+        "x": 332,
+        "y": 912.75
+      }
+    },
+    {
+      "from": "group:0",
+      "to": "docsdir",
+      "label": "saves uploads",
+      "orig": [
+        14,
+        16
+      ],
+      "points": [
+        {
+          "x": 1068.5,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 1135.5
+        },
+        {
+          "x": 1191,
+          "y": 1135.5
+        },
+        {
+          "x": 1191,
+          "y": 1156.5
+        },
+        {
+          "x": 1237,
+          "y": 1156.5
+        }
+      ],
+      "labelPos": {
+        "x": 1135,
+        "y": 1151.5
+      }
+    },
+    {
+      "from": "group:0",
+      "to": "docling",
+      "label": "convert + layout",
+      "orig": [
+        18
+      ],
+      "points": [
+        {
+          "x": 1068.5,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 1006
+        },
+        {
+          "x": 1291,
+          "y": 1006
+        }
+      ],
+      "labelPos": {
+        "x": 1180,
+        "y": 1023.25
+      }
+    },
+    {
+      "from": "group:0",
+      "to": "ocr",
+      "label": "scanned pages",
+      "orig": [
+        19
+      ],
+      "points": [
+        {
+          "x": 1068.5,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 817
+        },
+        {
+          "x": 1273,
+          "y": 817
+        }
+      ],
+      "labelPos": {
+        "x": 1171,
+        "y": 833
+      }
+    },
+    {
+      "from": "group:0",
+      "to": "pg",
+      "label": "chunks + vectors",
+      "orig": [
+        22
+      ],
+      "points": [
+        {
+          "x": 1068.5,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 927
+        },
+        {
+          "x": 1621,
+          "y": 927
+        },
+        {
+          "x": 1621,
+          "y": 934.5
+        },
+        {
+          "x": 1785,
+          "y": 934.5
+        },
+        {
+          "x": 1785,
+          "y": 490
+        },
+        {
+          "x": 1811,
+          "y": 490
+        }
+      ],
+      "labelPos": {
+        "x": 1686,
+        "y": 950.5
+      }
+    },
+    {
+      "from": "group:0",
+      "to": "es",
+      "label": "contextual BM25 docs",
+      "orig": [
+        23
+      ],
+      "points": [
+        {
+          "x": 1068.5,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 927
+        },
+        {
+          "x": 1621,
+          "y": 927
+        },
+        {
+          "x": 1621,
+          "y": 890
+        },
+        {
+          "x": 1775,
+          "y": 890
+        },
+        {
+          "x": 1775,
+          "y": 416
+        },
+        {
+          "x": 1795,
+          "y": 416
+        }
+      ],
+      "labelPos": {
+        "x": 1698,
+        "y": 874
+      }
+    },
+    {
+      "from": "group:0",
+      "to": "prefect",
+      "label": "task runs",
+      "orig": [
+        24
+      ],
+      "points": [
+        {
+          "x": 1068.5,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 853.5
+        },
+        {
+          "x": 1079,
+          "y": 728
+        },
+        {
+          "x": 1765,
+          "y": 728
+        },
+        {
+          "x": 1765,
+          "y": 342
+        },
+        {
+          "x": 1799,
+          "y": 342
+        }
+      ],
+      "labelPos": {
+        "x": 1159,
+        "y": 744
+      }
+    },
+    {
+      "from": "web",
+      "to": "preview",
+      "label": "evidence page peek",
+      "orig": [
+        25
+      ],
+      "points": [
+        {
+          "x": 251,
+          "y": 1006
+        },
+        {
+          "x": 261,
+          "y": 1006
+        },
+        {
+          "x": 261,
+          "y": 1177.5
+        },
+        {
+          "x": 775,
+          "y": 1177.5
+        }
+      ],
+      "labelPos": {
+        "x": 658,
+        "y": 1194.75
+      }
+    },
+    {
+      "from": "preview",
+      "to": "docsdir",
+      "label": "renders source page",
+      "orig": [
+        26
+      ],
+      "points": [
+        {
+          "x": 997,
+          "y": 1177.5
+        },
+        {
+          "x": 1191,
+          "y": 1177.5
+        },
+        {
+          "x": 1191,
+          "y": 1156.5
+        },
+        {
+          "x": 1237,
+          "y": 1156.5
+        }
+      ],
+      "labelPos": {
+        "x": 1117,
+        "y": 1193.5
+      }
+    },
+    {
+      "from": "eval",
+      "to": "group:1",
+      "label": "5-config matrix",
+      "orig": [
+        27
+      ],
+      "points": [
+        {
+          "x": 697,
+          "y": 544.5
+        },
+        {
+          "x": 894,
+          "y": 544.5
+        },
+        {
+          "x": 894,
+          "y": 439.5
+        },
+        {
+          "x": 1125,
+          "y": 439.5
+        }
+      ],
+      "labelPos": {
+        "x": 832,
+        "y": 560.5
+      }
+    },
+    {
+      "from": "group:2",
+      "to": "api",
+      "label": "/metrics 15s",
+      "orig": [
+        28
+      ],
+      "points": [
+        {
+          "x": 277,
+          "y": 187
+        },
+        {
+          "x": 323,
+          "y": 187
+        },
+        {
+          "x": 323,
+          "y": 255.5
+        },
+        {
+          "x": 429,
+          "y": 255.5
+        },
+        {
+          "x": 429,
+          "y": 270.5
+        },
+        {
+          "x": 475,
+          "y": 270.5
+        }
+      ],
+      "labelPos": {
+        "x": 376,
+        "y": 271.5
+      }
+    },
+    {
+      "from": "group:2",
+      "to": "prefect",
+      "label": "flow runs (24h)",
+      "orig": [
+        31
+      ],
+      "points": [
+        {
+          "x": 277,
+          "y": 187
+        },
+        {
+          "x": 323,
+          "y": 187
+        },
+        {
+          "x": 323,
+          "y": 101.5
+        },
+        {
+          "x": 1765,
+          "y": 101.5
+        },
+        {
+          "x": 1765,
+          "y": 342
+        },
+        {
+          "x": 1799,
+          "y": 342
+        }
+      ],
+      "labelPos": {
+        "x": 385,
+        "y": 117.5
+      }
+    }
+  ],
+  "chips": [
+    [
+      "condenser",
+      [
+        {
+          "label": "Qwythos-9B (llama.cpp)",
+          "domain": "huggingface.co"
+        }
+      ]
+    ],
+    [
+      "retrievers",
+      [
+        {
+          "label": "multilingual-e5-large",
+          "domain": "huggingface.co"
+        },
+        {
+          "label": "bge-reranker-v2-m3",
+          "domain": "huggingface.co"
+        }
+      ]
+    ],
+    [
+      "answerer",
+      [
+        {
+          "label": "Qwythos-9B (llama.cpp)",
+          "domain": "huggingface.co"
+        }
+      ]
+    ],
+    [
+      "contextualizer",
+      [
+        {
+          "label": "Qwythos-9B (llama.cpp)",
+          "domain": "huggingface.co"
+        }
+      ]
+    ],
+    [
+      "ingest",
+      [
+        {
+          "label": "multilingual-e5-large",
+          "domain": "huggingface.co"
+        }
+      ]
+    ]
+  ],
+  "bounds": {
+    "w": 2056,
+    "h": 1221.5
+  }
+}

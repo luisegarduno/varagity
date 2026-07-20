@@ -19,4 +19,4 @@ conversation that produced it. Format: Context → Decision → Consequences.
 | [ADR-012](ADR-012-relative-path-uploads.md) | Relative-path uploads + the composer's client-side ingest queue | Accepted |
 | [ADR-013](ADR-013-corpus-gauges-vs-counters.md) | Store-derived corpus gauges over ingest-counter arithmetic | Accepted |
 | [ADR-014](ADR-014-bun-package-manager.md) | bun as the package manager, Node as the runtime | Accepted |
-| [ADR-015](ADR-015-codebase-map.md) | In-app codebase map (`/map` + developer mode) — curated TS data, hand-rolled SVG | Accepted |
+| [ADR-015](ADR-015-codebase-map.md) | In-app codebase map (`/map` + developer mode) — curated TS data, condensed foglamp-style canvas | Accepted (amended) |

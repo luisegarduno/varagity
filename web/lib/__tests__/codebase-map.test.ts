@@ -35,42 +35,40 @@ describe("CODEBASE_MAP shape", () => {
     expect(validateMap(CODEBASE_MAP)).toEqual([]);
   });
 
-  it("matches the corrected Phase 1 totals", () => {
+  it("matches the adopted scan totals", () => {
     const { nodes, edges } = CODEBASE_MAP.graph;
-    expect(nodes).toHaveLength(41);
-    expect(edges).toHaveLength(59);
+    expect(nodes).toHaveLength(26);
+    expect(edges).toHaveLength(38);
     expect(CODEBASE_MAP.topModels).toHaveLength(3);
-    expect(CODEBASE_MAP.topTools).toHaveLength(8);
-    expect(CODEBASE_MAP.topIntegrations).toHaveLength(7);
+    expect(CODEBASE_MAP.topTools).toHaveLength(0);
+    expect(CODEBASE_MAP.topIntegrations).toHaveLength(10);
 
     const groups = new Map<string, number>();
     for (const node of nodes) {
       if (node.group) groups.set(node.group, (groups.get(node.group) ?? 0) + 1);
     }
     expect([...groups.entries()].sort()).toEqual([
-      ["Chat engines", 3],
       ["Ingestion", 5],
-      ["Web app", 4],
+      ["Observability", 3],
+      ["Query path", 4],
     ]);
   });
 
-  it("pins web-map to its page and keeps store-corpus sourceRef-free", () => {
+  it("pins the web entry to its page and keeps docsdir sourceRef-free", () => {
     const byId = new Map(CODEBASE_MAP.graph.nodes.map((node) => [node.id, node]));
-    // Phase 3 created web/app/map/page.tsx, so the map now pins itself to it
-    // (guard and artifact land together); store-corpus stays sourceRef-free
-    // because DOCS_PATH is gitignored and could never resolve on a CI checkout.
-    expect(byId.get("web-map")?.sourceRef).toBe("web/app/map/page.tsx");
-    expect(byId.get("store-corpus")?.sourceRef).toBeUndefined();
+    // docs/ is gitignored, so its node could never resolve on a CI checkout.
+    expect(byId.get("web")?.sourceRef).toBe("web/app/page.tsx");
+    expect(byId.get("docsdir")?.sourceRef).toBeUndefined();
   });
 
   // The test_dashboards.py:111 idiom: assert a floor of real data so the drift
   // guard below cannot pass vacuously on an empty or gutted map.
   it("carries enough data that the drift guard can't pass vacuously", () => {
     const { nodes, edges } = CODEBASE_MAP.graph;
-    expect(nodes.length).toBeGreaterThanOrEqual(40);
-    expect(edges.length).toBeGreaterThanOrEqual(55);
+    expect(nodes.length).toBeGreaterThanOrEqual(20);
+    expect(edges.length).toBeGreaterThanOrEqual(30);
     const withSourceRef = nodes.filter((node) => node.sourceRef).length;
-    expect(withSourceRef).toBeGreaterThanOrEqual(25);
+    expect(withSourceRef).toBeGreaterThanOrEqual(12);
   });
 });
 
@@ -107,19 +105,19 @@ describe("validateMap catches violations", () => {
 
   it("flags an edge with an unknown 'from' node", () => {
     const map = clone();
-    map.graph.edges.push({ from: "ghost", to: "web-chat" });
+    map.graph.edges.push({ from: "ghost", to: "web" });
     expect(validateMap(map).some((e) => e.includes('unknown "from" node'))).toBe(true);
   });
 
   it("flags an edge with an unknown 'to' node", () => {
     const map = clone();
-    map.graph.edges.push({ from: "web-chat", to: "ghost" });
+    map.graph.edges.push({ from: "web", to: "ghost" });
     expect(validateMap(map).some((e) => e.includes('unknown "to" node'))).toBe(true);
   });
 
   it("flags a self-edge", () => {
     const map = clone();
-    map.graph.edges.push({ from: "web-chat", to: "web-chat" });
+    map.graph.edges.push({ from: "web", to: "web" });
     expect(validateMap(map).some((e) => e.includes("self-edge"))).toBe(true);
   });
 
@@ -134,24 +132,56 @@ describe("validateMap catches violations", () => {
   it("flags too many edges", () => {
     const map = clone();
     for (let i = 0; i < 121; i += 1) {
-      map.graph.edges.push({ from: "web-chat", to: "api-chat" });
+      map.graph.edges.push({ from: "web", to: "api" });
     }
     expect(validateMap(map).some((e) => e.includes("too many edges"))).toBe(true);
   });
 
   it("flags an oversized top* list", () => {
+    const item = { id: "extra", label: "Extra" };
+
     const model = clone();
-    model.topModels = ["llm-chat", "model-embed", "model-rerank", "llm-chat"];
+    model.topModels = [item, item, item, item];
     expect(validateMap(model).some((e) => e.includes("too many topModels"))).toBe(true);
 
     const tools = clone();
-    tools.topTools = Array<string>(11).fill("retriever-hybrid");
+    tools.topTools = Array(11).fill(item);
     expect(validateMap(tools).some((e) => e.includes("too many topTools"))).toBe(true);
 
     const integrations = clone();
-    integrations.topIntegrations = Array<string>(11).fill("store-postgres");
+    integrations.topIntegrations = Array(11).fill(item);
     expect(
       validateMap(integrations).some((e) => e.includes("too many topIntegrations")),
+    ).toBe(true);
+  });
+
+  it("flags malformed top* rows", () => {
+    const kebab = clone();
+    kebab.topModels[0] = { id: "Not_Kebab", label: "x" };
+    expect(
+      validateMap(kebab).some((e) => e.includes("topModels id is not kebab-case")),
+    ).toBe(true);
+
+    const dupe = clone();
+    dupe.topIntegrations[1] = { ...dupe.topIntegrations[0] };
+    expect(
+      validateMap(dupe).some((e) => e.includes("topIntegrations has a duplicate id")),
+    ).toBe(true);
+
+    const label = clone();
+    label.topModels[0] = { id: "extra", label: "x".repeat(41) };
+    expect(
+      validateMap(label).some((e) => e.includes("label must be 1–40 chars")),
+    ).toBe(true);
+
+    const domain = clone();
+    domain.topIntegrations[0] = {
+      id: "extra",
+      label: "Extra",
+      domain: "https://nextjs.org",
+    };
+    expect(
+      validateMap(domain).some((e) => e.includes("must have no scheme or path")),
     ).toBe(true);
   });
 
@@ -181,14 +211,6 @@ describe("validateMap catches violations", () => {
     expect(validateMap(edgeLabel).some((e) => e.includes("label > 24"))).toBe(true);
   });
 
-  it("flags a top* id that is not a node", () => {
-    const map = clone();
-    map.topModels[0] = "ghost-model";
-    expect(
-      validateMap(map).some((e) => e.includes("topModels references unknown node")),
-    ).toBe(true);
-  });
-
   it("flags too many distinct groups", () => {
     const map = clone();
     for (let i = 0; i < 3; i += 1) {
@@ -202,9 +224,16 @@ describe("validateMap catches violations", () => {
   it("flags a group outside the 3–6 member range", () => {
     const map = clone();
     for (let i = 0; i < 4; i += 1) {
-      map.graph.nodes.push({ id: `wa-${i}`, label: "x", kind: "tool", group: "Web app" });
+      map.graph.nodes.push({
+        id: `obs-${i}`,
+        label: "x",
+        kind: "tool",
+        group: "Observability",
+      });
     }
-    expect(validateMap(map).some((e) => e.includes('group "Web app" holds 8'))).toBe(true);
+    expect(
+      validateMap(map).some((e) => e.includes('group "Observability" holds 7')),
+    ).toBe(true);
   });
 
   it("flags a domain that carries a scheme or path", () => {
@@ -217,8 +246,8 @@ describe("validateMap catches violations", () => {
 
   it("flags a cycle (not a DAG)", () => {
     const map = clone();
-    // api-chat -> flow-query already exists; close the loop.
-    map.graph.edges.push({ from: "flow-query", to: "api-chat" });
+    // api -> qflow already exists; close the loop.
+    map.graph.edges.push({ from: "qflow", to: "api" });
     expect(validateMap(map).some((e) => e.includes("not a DAG"))).toBe(true);
   });
 });

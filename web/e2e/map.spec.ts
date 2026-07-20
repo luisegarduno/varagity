@@ -2,6 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 import { CODEBASE_MAP } from "../lib/codebase-map.data";
+import { condense } from "../lib/map-layout";
 import {
   gotoApp,
   isMobileProject,
@@ -11,10 +12,10 @@ import {
 } from "./helpers";
 
 /**
- * The codebase map's e2e coverage (map Phase 5). It absorbs the two component
- * tests the spec sketched (`CodebaseMap.test.tsx` + `SidebarContent.test.tsx`)
- * per owner decision #2 — Vitest stays lib-only pure logic, so everything that
- * actually renders is asserted here against the live stack.
+ * The codebase map's e2e coverage (map Phase 5, updated for the
+ * foglamp-style canvas). It absorbs the two component tests the spec
+ * sketched per owner decision #2 — Vitest stays lib-only pure logic, so
+ * everything that actually renders is asserted here against the live stack.
  *
  * The map itself needs no API (it renders a static import), but the discovery
  * paths — sidebar button and ⌘K command — bootstrap through the app shell, so
@@ -22,15 +23,18 @@ import {
  */
 
 // Scan the settled design, not a transition frame (the a11y.spec rationale):
-// reduced motion also makes the trace opacity flip instant, so the CSS
+// reduced motion also makes the spotlight opacity flip instant, so the CSS
 // assertions below never race a 300ms fade.
 test.use({ contextOptions: { reducedMotion: "reduce" } });
 
 const THEMES: readonly ThemeName[] = ["light", "dark"];
 const DENSITIES: readonly DensityName[] = ["comfortable", "compact"];
 
-/** The SVG canvas — `role="application"`, `aria-label="Codebase map"`. */
-const CANVAS = 'svg[aria-label="Codebase map"]';
+/** The canvas region — `aria-label="Codebase map"` on the map `<section>`. */
+const CANVAS = 'section[aria-label="Codebase map"]';
+
+/** The nodes that render as cards (sink models fold into chips). */
+const RENDERED_NODES = condense(CODEBASE_MAP).nodes;
 
 /** Escape a node label for use inside a `^label,` accessible-name regex. */
 function escapeRegExp(value: string): string {
@@ -63,7 +67,7 @@ async function expectNoCriticalA11y(
   ).toEqual([]);
 }
 
-test("URL: /map renders every node in the graph", async ({ page }) => {
+test("URL: /map renders every card in the condensed graph", async ({ page }) => {
   await primeAppState(page);
   await page.goto("/map");
 
@@ -71,19 +75,24 @@ test("URL: /map renders every node in the graph", async ({ page }) => {
   await expect(canvas).toBeVisible();
   await expect(page.getByRole("heading", { name: /codebase map/i })).toBeVisible();
 
-  // One interactive node per graph node — the count stays in lock-step with
-  // the Phase 1 data because it is derived from the same import.
-  const nodes = canvas.locator('[role="button"]');
-  await expect(nodes).toHaveCount(CODEBASE_MAP.graph.nodes.length);
+  // One card per rendered node — the count stays in lock-step with the data
+  // because it is derived from the same import (models fold into chips).
+  const nodes = canvas.locator("[data-map-node]");
+  await expect(nodes).toHaveCount(RENDERED_NODES.length);
 
   // …and each carries its own label ("{label}, {kind}").
-  for (const node of CODEBASE_MAP.graph.nodes) {
+  for (const node of RENDERED_NODES) {
     await expect(
       canvas.getByRole("button", {
         name: new RegExp(`^${escapeRegExp(node.label)},`),
       }),
     ).toBeAttached();
   }
+
+  // The folded models surface as chips on their calling cards instead.
+  await expect(
+    canvas.getByRole("button", { name: /^Retriever registry,/ }),
+  ).toContainText("bge-reranker-v2-m3");
 });
 
 test("desktop: the sidebar Map button opens /map", async ({
@@ -134,7 +143,7 @@ test("palette: the Codebase Map command opens /map", async ({ page }) => {
   await expect(page.locator(CANVAS)).toBeVisible();
 });
 
-test("tracing a node dims unrelated nodes and shows its detail; Escape clears", async ({
+test("spotlighting a card dims unrelated cards and shows its detail; Escape clears", async ({
   page,
 }) => {
   await primeAppState(page);
@@ -143,40 +152,41 @@ test("tracing a node dims unrelated nodes and shows its detail; Escape clears", 
   const canvas = page.locator(CANVAS);
   await expect(canvas).toBeVisible();
 
-  // api-chat has a rich downstream closure; web-corpus is not in it.
+  // The FastAPI backend has a rich downstream closure; the Corpus manager
+  // (reached only from the GUI entry) is not in it.
   const source = canvas.getByRole("button", {
-    name: new RegExp("^POST /api/chat,"),
+    name: new RegExp("^FastAPI backend,"),
   });
   const unrelated = canvas.getByRole("button", {
-    name: new RegExp("^Corpus page,"),
+    name: new RegExp("^Corpus manager,"),
   });
 
-  // Focus first (SVG nodes can sit under the absolutely-positioned legend/
-  // detail overlays, so focus-then-dispatch avoids a flaky actionability wait
-  // while still driving the node's real onClick), then fire the trace.
+  // Focus first (cards can sit under the floating panel/legend overlays, so
+  // focus-then-dispatch avoids a flaky actionability wait while still driving
+  // the card's real onClick), then fire the spotlight.
   await source.focus();
   await expect(source).toBeFocused();
   await source.dispatchEvent("click");
 
-  // The detail panel renders the node's `detail` + monospace `sourceRef`.
+  // The detail popover renders the node's `detail` + monospace `sourceRef`.
   await expect(
-    page.getByRole("heading", { name: "POST /api/chat" }),
+    page.getByRole("heading", { name: "FastAPI backend" }),
   ).toBeVisible();
-  await expect(page.getByText("varagity/api/routes/chat.py:290")).toBeVisible();
-  await expect(page.getByText(/Evidence is streamed before prose/)).toBeVisible();
+  await expect(page.getByText("varagity/api/main.py")).toBeVisible();
+  await expect(
+    page.getByText(/Async edge over sync Prefect flows/),
+  ).toBeVisible();
 
-  // An unrelated node drops to the traced-out opacity; the rest brighten.
-  await expect(unrelated).toHaveCSS("opacity", "0.15");
-
-  // Escape (the node is focused) clears the trace and closes the panel.
+  // An unrelated card drops to the spotlight-out opacity; Escape restores it.
+  await expect(unrelated).toHaveCSS("opacity", "0.25");
   await page.keyboard.press("Escape");
   await expect(
-    page.getByRole("heading", { name: "POST /api/chat" }),
+    page.getByRole("heading", { name: "FastAPI backend" }),
   ).toBeHidden();
   await expect(unrelated).toHaveCSS("opacity", "1");
 });
 
-test("keyboard: Tab reaches nodes in reading order and Enter traces", async ({
+test("keyboard: Tab reaches cards in reading order and Enter spotlights", async ({
   page,
 }) => {
   await primeAppState(page);
@@ -185,25 +195,29 @@ test("keyboard: Tab reaches nodes in reading order and Enter traces", async ({
   const canvas = page.locator(CANVAS);
   await expect(canvas).toBeVisible();
 
-  // Nodes render in declaration (reading) order, so the first two graph nodes
-  // are consecutive in the tab order.
+  // Cards render in declaration (reading) order, so the first two rendered
+  // nodes are consecutive in the tab order.
   const first = canvas.getByRole("button", {
-    name: new RegExp("^Chat GUI,"),
+    name: new RegExp("^Next\\.js chat GUI,"),
   });
   const second = canvas.getByRole("button", {
-    name: new RegExp("^Corpus page,"),
+    name: new RegExp("^CLI,"),
   });
 
   await first.focus();
   await expect(first).toBeFocused();
 
-  // Enter selects (traces) the focused node.
+  // Enter activates (spotlights) the focused card — a native button.
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "Chat GUI" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Next.js chat GUI" }),
+  ).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("heading", { name: "Chat GUI" })).toBeHidden();
+  await expect(
+    page.getByRole("heading", { name: "Next.js chat GUI" }),
+  ).toBeHidden();
 
-  // Tab moves focus to the next node.
+  // Tab moves focus to the next card.
   await first.focus();
   await page.keyboard.press("Tab");
   await expect(second).toBeFocused();
@@ -249,8 +263,8 @@ for (const theme of THEMES) {
 
       const canvas = page.locator(CANVAS);
       await expect(canvas).toBeVisible();
-      await expect(canvas.locator('[role="button"]')).toHaveCount(
-        CODEBASE_MAP.graph.nodes.length,
+      await expect(canvas.locator("[data-map-node]")).toHaveCount(
+        RENDERED_NODES.length,
       );
 
       await expectNoCriticalA11y(
