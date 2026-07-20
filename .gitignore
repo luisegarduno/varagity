@@ -10,6 +10,9 @@
 # Timestamped eval results (the golden set and OCR ground truth ARE tracked)
 /data/eval/results/
 
+# foglamp codebase-scan artifacts (scan.lock.json holds the edit token — a secret)
+/.foglamp/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
