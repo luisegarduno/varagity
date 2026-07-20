@@ -185,11 +185,6 @@ export function iconSrc(domain: string): string {
   return `/map-icons/${domain}.png`;
 }
 
-/** Claude-family model names get the Anthropic mark instead of the hub icon. */
-export function modelIconDomain(label: string, domain?: string): string | undefined {
-  return /claude/i.test(label) ? "anthropic.com" : domain;
-}
-
 /** A vendored favicon that falls back to the kind glyph if the asset 404s. */
 function Favicon({
   domain,
@@ -216,7 +211,7 @@ function Favicon({
 
 /** One model chip row inside a card. */
 function Chip({ chip }: { chip: ModelChip }) {
-  const domain = modelIconDomain(chip.label, chip.domain);
+  const domain = chip.domain;
   return (
     <span className="flex max-w-full items-center gap-1.5">
       {domain ? (
