@@ -1,14 +1,14 @@
 """End-to-end pipeline tests: ingest → retrieve (3 methods) → answer.
 
-Since Phase 8 the pipelines run through the Prefect flows
+The pipelines run through the Prefect flows
 (``varagity.pipeline``) under ``prefect_test_harness`` — every stage below
 is a tracked task run against an ephemeral API, exactly the production
 composition. Real pgvector Postgres **and** Elasticsearch via
 testcontainers (spec §15.1 "e2e" row: real stores); deterministic fake
 embeddings (hashed bag-of-words, so lexically similar texts land near each
 other) and a scripted fake LLM stand in for the GPU services. PDF parsing
-runs for real (Docling + OCR on CPU — the corpus includes the Phase 7
-fixture PDFs), so the first run downloads Docling/EasyOCR models.
+runs for real (Docling + OCR on CPU — the corpus includes the fixture
+PDFs), so the first run downloads Docling/EasyOCR models.
 
 Select with ``pytest -m e2e`` (needs Docker).
 """
@@ -152,7 +152,7 @@ def pinned_settings(settings_env: Callable[..., None]) -> None:
 def test_walking_skeleton_ingest_to_grounded_answer(
     pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25, es_url: str
 ) -> None:
-    """★ The Phase-4 milestone, automated: fixtures → both stores → Q&A state."""
+    """★ The walking-skeleton milestone, automated: fixtures → both stores → Q&A state."""
     embeddings = FakeEmbeddings()
     llm = ScriptedLLM(f"<think>scanning the context…</think>{SCRIPTED_ANSWER}")
 
@@ -163,7 +163,7 @@ def test_walking_skeleton_ingest_to_grounded_answer(
         summary = ingest_flow(
             str(CORPUS_PATH), store=store, bm25=bm25_store, embeddings=embeddings, verbose=0
         )
-        assert summary.discovered == 7  # 3 text/md + 4 PDFs (Phase 7)
+        assert summary.discovered == 7  # 3 text/md + 4 PDFs
         assert summary.ingested == 6
         assert summary.no_text == 1  # blank_pages.pdf: nothing recoverable, 0-chunk row
         assert summary.failed == 0
@@ -202,7 +202,7 @@ def test_walking_skeleton_ingest_to_grounded_answer(
 
 
 class ContextualizingLLM:
-    """Fake LLM for ingest-time contextualization (Phase 5 e2e variant).
+    """Fake LLM for ingest-time contextualization.
 
     Extracts the chunk from the spec §11.1 prompt and returns a blurb built
     from it, wrapped in a ``<think>`` stage to prove stripping end-to-end.
@@ -234,7 +234,7 @@ def test_contextualized_ingest_stores_blurbs_and_still_answers(
     pg_conninfo: str,
     bm25_store: ElasticsearchBM25,
 ) -> None:
-    """Phase-5/6 e2e variant: CONTEXTUALIZE on with a fake LLM.
+    """Contextualized-ingest e2e variant: CONTEXTUALIZE on with a fake LLM.
 
     Asserts the plan's psql criteria in-container — every chunk's ``context``
     is non-null and ``contextualized_content`` starts with the blurb — and
@@ -331,7 +331,7 @@ def test_second_run_is_idempotent_and_still_answers(
 def test_rare_keyword_retrieved_via_bm25_and_hybrid(
     pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25
 ) -> None:
-    """★ The Phase-6 milestone: an exact rare term reaches the top via BM25.
+    """★ An exact rare term reaches the top via BM25.
 
     "Pelican-9" appears in exactly one fixture chunk; the keyword arm must
     surface it through both the ``bm25`` and ``hybrid`` retrievers, with the
@@ -365,7 +365,7 @@ def test_rare_keyword_retrieved_via_bm25_and_hybrid(
 def test_pdf_facts_are_retrievable_and_answerable(
     pinned_settings: None, pg_conninfo: str, bm25_store: ElasticsearchBM25
 ) -> None:
-    """★ The Phase-7 milestone: PDF-only facts reach grounded answers.
+    """★ PDF-only facts reach grounded answers.
 
     A digital-PDF-only fact and a scanned-PDF-only fact both flow through
     ingest → hybrid retrieval → grounded answer, with ``extraction``
@@ -423,7 +423,7 @@ def test_office_web_facts_are_retrievable_and_answerable(
     pg_conninfo: str,
     bm25_store: ElasticsearchBM25,
 ) -> None:
-    """★ The Phase-5 (v2) milestone: office/web-only facts reach grounded answers.
+    """★ Office/web-only facts reach grounded answers.
 
     With the widened whitelist, a fact answerable **only** from each new
     format (``.docx``/``.pptx``/``.xlsx``/``.html``) flows through ingest →
@@ -497,7 +497,7 @@ def test_every_chunking_strategy_answers_a_planted_fact(
     bm25_store: ElasticsearchBM25,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """★ The Phase-6 (v2) milestone: every registered strategy answers end-to-end.
+    """★ Every registered chunking strategy answers end-to-end.
 
     A corpus ingested under each new chunking strategy flows through ingest →
     hybrid retrieval → grounded answer on the planted kelp-corridor fact, with
@@ -592,7 +592,7 @@ def test_pronoun_follow_up_discriminates_condense_from_simple(
     pg_conninfo: str,
     bm25_store: ElasticsearchBM25,
 ) -> None:
-    """★ The v3 Phase 5 milestone: the chat remembers (spec_v3 §4).
+    """★ The chat remembers (spec_v3 §4).
 
     Turn 2 is a pronoun follow-up whose words alone name nothing: under
     ``simple`` it retrieves the wrong chunks, under ``condense_context``

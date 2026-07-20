@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
 /**
  * The model's `<think>` stream, collapsible (spec_v2 §4.6): auto-open
  * while the reasoning is streaming in, collapsed once the turn finishes
- * — unless the user toggled it (which wins) or the Phase 8 display
+ * — unless the user toggled it (which wins) or the display
  * setting keeps finished traces expanded by default.
  */
 export function ReasoningTrace({

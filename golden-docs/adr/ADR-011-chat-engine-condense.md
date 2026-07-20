@@ -89,8 +89,8 @@ tracked Prefect task.
   name every client must learn. Reusing `reasoning` was rejected — that
   event means "`<think>` content from the *answer* call", an unrelated
   trace.
-- **The eval decided the default** (Phase 6;
-  `data/eval/results/20260719T081214Z-chat.json` — 10 hand-built
+- **The eval decided the default**
+  (`data/eval/results/20260719T081214Z-chat.json` — 10 hand-built
   multi-turn fixtures, 21 turns, 11 follow-ups; scripted assistant
   replies so both engines see byte-identical history; each turn's
   `search_query` scored fact-anchored under `hybrid` and `reranked` at
@@ -117,7 +117,7 @@ tracked Prefect task.
       one served LLM today), so pointing the condenser at a small
       non-thinking model when one lands is a setting, not a code change.
 - **The eval caught two engine bugs** — the reason a discriminating
-  fixture set was the phase's actual deliverable: (1)
+  fixture set was the eval's actual deliverable: (1)
   `CONDENSE_MAX_TOKENS=128` starved the reasoning model — every call hit
   `finish_reason: "length"` with the entire budget inside `<think>` and
   `content: ""`, so 0/11 follow-ups condensed and every turn silently

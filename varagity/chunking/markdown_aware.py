@@ -10,7 +10,7 @@ migration and the evidence panel can surface it as breadcrumb context.
 
 This is the from-scratch header splitter the v2 plan benchmarks against
 Docling's ``HybridChunker`` (shipped alongside as ``docling_hybrid``; the
-Phase 6 sweep decides the default — ADR-008). Behavior notes:
+chunker sweep decides the default — ADR-008). Behavior notes:
 
 * Headings inside fenced code blocks (three-plus backticks or tildes) are
   content, not structure.

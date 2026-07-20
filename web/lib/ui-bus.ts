@@ -1,5 +1,5 @@
 /**
- * The Phase 9 keyboard/palette seam: a tiny window-event bus connecting
+ * The keyboard/palette seam: a tiny window-event bus connecting
  * global input surfaces (keyboard shortcuts, later the command palette) to
  * the components that own the corresponding UI state — the settings drawer,
  * the evidence rail, the composer. Emitters fire `notify*()`; the owning

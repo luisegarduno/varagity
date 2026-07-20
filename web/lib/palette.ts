@@ -1,5 +1,5 @@
 /**
- * Pure command-palette logic (Phase 9): the serializable command shape plus
+ * Pure command-palette logic: the serializable command shape plus
  * the filter/rank and regroup helpers the palette component renders from.
  * Deliberately React-free and handler-free — commands carry only data, and
  * the component maps command ids onto the actions they trigger.

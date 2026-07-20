@@ -8,8 +8,8 @@ the CLI's ``rich`` display. This module owns both halves:
 * **One run at a time.** :class:`IngestRunner` executes
   :func:`~varagity.pipeline.ingest_flow.ingest_flow` on a daemon thread —
   the same tracked Prefect flow the CLI runs (and, since it runs in the API
-  process, the ingest Prometheus counters finally reach the scrape — the
-  Phase 7 note #4 gap). A second start while one is running raises
+  process, the ingest Prometheus counters finally reach the scrape).
+  A second start while one is running raises
   :class:`IngestAlreadyRunning` (the route's structured ``409``).
 * **Progress without pipeline edits.** The runner wraps the flow's
   ``@task``-wrapped stages (:data:`~varagity.pipeline.ingest_flow.TASK_STAGES`)

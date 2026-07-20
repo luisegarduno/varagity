@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 E5_QUERY_TASK = "Given a web search query, retrieve relevant passages that answer the query"
 
 # e5 truncates at 512 tokens; warn near the limit so config drift (bigger
-# chunks, long Phase-5 context blurbs) is visible at ingest time.
+# chunks, long context blurbs) is visible at ingest time.
 TOKEN_WARN_THRESHOLD = 480
 
 # Transient failures worth retrying: connection/timeout trouble, 5xx, and 429.

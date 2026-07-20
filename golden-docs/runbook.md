@@ -313,7 +313,7 @@ bun version pin lives in two places: the `web/Dockerfile` base stage
 a fresh-cache `bun install --frozen-lockfile` measured ~3.2 s for 779
 packages (bun 1.3.14, 2026-07-15), versus tens of seconds under the
 previous package manager
-([ADR-005 amendment](adr/ADR-005-web-stack-and-api.md#amendment-2026-07-15-v3-phase-1)).
+([ADR-005 amendment](adr/ADR-005-web-stack-and-api.md#amendment-2026-07-15-pnpm-bun)).
 
 ## The opt-in e2e harness
 

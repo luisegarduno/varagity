@@ -49,7 +49,7 @@ class TestConfig:
     async def test_llm_model_types_and_upload_constraints(
         self, app: FastAPI, settings_env: Any
     ) -> None:
-        """The composer's model-type vocabulary + the dropzone's limits (Phase 8)."""
+        """The composer's model-type vocabulary + the dropzone's limits."""
         settings_env(UPLOAD_MAX_MB=7, ALLOWED_EXTENSIONS=".md,txt")
         data = (await get(app, "/api/config")).json()
         assert data["llm_model_types"] == ["default", "reasoning", "tool"]
@@ -150,7 +150,7 @@ class TestErrorEnvelope:
 
         Without CORS headers on the 500, a cross-origin fetch can only
         report "TypeError: Failed to fetch" and the real error is
-        invisible (the Phase 8 upload-permission bug's shape).
+        invisible (the upload-permission bug's shape).
         """
 
         @app.get("/api/boom")

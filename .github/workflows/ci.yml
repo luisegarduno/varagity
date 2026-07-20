@@ -1,4 +1,4 @@
-# Two parallel jobs on every push (spec §15.3 / plan Phase 10), plus a
+# Two parallel jobs on every push (spec §15.3), plus a
 # main-only publish:
 #   checks — Python gates: ruff lint/format, mypy, unit tests (coverage
 #            floor 80%), strict mkdocs build.

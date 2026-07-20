@@ -3,8 +3,8 @@
 Importing this package imports every implementation module so each
 ``@register``-decorated strategy self-registers (spec §5.1). Adding a
 strategy means adding the module and its import line here — no caller
-edits (proven by the v2 Phase 6 additions: ``token_based``,
-``markdown_aware``, ``docling_hybrid``, ``semantic``).
+edits (proven by the ``token_based``, ``markdown_aware``,
+``docling_hybrid``, and ``semantic`` additions).
 """
 
 from varagity.chunking import docling_hybrid as _docling_hybrid  # noqa: F401

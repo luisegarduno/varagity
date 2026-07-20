@@ -1,6 +1,6 @@
 # ADR-004: EasyOCR as the shipped OCR fallback engine
 
-**Status:** Accepted (decided by the Phase 9 benchmark, 2026-07-11)
+**Status:** Accepted (decided by the OCR benchmark, 2026-07-11)
 
 ## Context
 

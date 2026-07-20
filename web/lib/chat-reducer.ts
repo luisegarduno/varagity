@@ -4,8 +4,7 @@
  *
  * Pure and synchronous so it is trivially unit-testable; the `useChat`
  * hook owns the async loop and calls this per event. The `retrieval`
- * payload is stashed but not yet rendered — the evidence panel consumes it
- * in Phase 4.
+ * payload is stashed for the evidence panel to consume.
  */
 import type {
   ChatErrorEvent,
@@ -22,7 +21,7 @@ export interface StreamingTurn {
   reasoning: string;
   /** Concatenated `token` deltas; replaced by `done`'s authoritative answer. */
   answer: string;
-  /** The `retrieval` event payload, stashed for the Phase 4 evidence panel. */
+  /** The `retrieval` event payload, stashed for the evidence panel. */
   retrieval: RetrievalEvent | null;
   /**
    * Live decode throughput from the newest `stats` frame — the readings

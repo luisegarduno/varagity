@@ -68,7 +68,7 @@ class TestChunkRecordCreate:
         assert record.chunk_id == f"{record.doc_id}::{record.chunk_index}"
 
     def test_identity_composition_without_context(self) -> None:
-        """Pre-Phase-5 skeleton invariant (plan decision #1)."""
+        """The no-context identity invariant (plan decision #1)."""
         record = _record(context=None)
         assert record.context is None
         assert record.contextualized_content == record.content

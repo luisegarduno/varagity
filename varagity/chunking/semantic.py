@@ -21,7 +21,7 @@ Two guarantees bound the output:
 
 This strategy embeds at **ingest time** — one passage request per segment
 window, batched by ``EMBEDDING_BATCH_SIZE`` — an added ingest cost the
-Phase 6 sweep measures before any default changes (ADR-008). The client
+chunker sweep measures before any default changes (ADR-008). The client
 resolves lazily via ``get_model("embedding")`` per split, so the registry's
 import-time instantiation performs no I/O; tests inject a deterministic
 fake instead.

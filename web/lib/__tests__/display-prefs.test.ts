@@ -55,7 +55,7 @@ afterEach(() => {
 // developerMode and evidenceRailOpen share the "default-on" idiom
 // (`getItem(...) !== "false"`, `catch → true`, server snapshot true), so the
 // same matrix pins both — the second happens to be the file's previously
-// untested existing pref (plan Phase 4 §2).
+// untested existing pref.
 const defaultOnPrefs = [
   {
     name: "developerMode",

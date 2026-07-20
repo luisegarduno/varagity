@@ -5,7 +5,7 @@ Ported near-verbatim from the Anthropic cookbook's ``ElasticsearchBM25``
 ``contextualized_content`` analyzed with the built-in ``english`` analyzer
 under BM25 similarity, identity fields stored but not indexed — plus bulk
 indexing and a ``multi_match`` search over both text fields. Because chunks
-are contextualized before they reach this store (Phase 5 precedes Phase 6),
+are contextualized before they reach this store,
 the BM25 index is *contextual* from its first document.
 
 Identity fields are mapped ``"index": false`` but keep doc values, so

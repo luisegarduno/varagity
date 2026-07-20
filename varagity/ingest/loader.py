@@ -1,6 +1,6 @@
 r"""Ingestion orchestrator: parse → chunk → contextualize → embed → store (spec §9).
 
-Contextualization (spec §9.4, Phase 5): when ``settings.CONTEXTUALIZE`` is
+Contextualization (spec §9.4): when ``settings.CONTEXTUALIZE`` is
 on, each chunk gets an LLM-generated situating blurb and
 ``contextualized_content = context + "\n\n" + content`` is what gets
 embedded; when off, the identity path (``context = None``,
@@ -9,7 +9,7 @@ baseline (plan decision #2). A document's chunks are contextualized
 sequentially, in order, so llama.cpp can reuse its prompt cache across the
 shared document preamble.
 
-Dual-write (spec §9.6, Phase 6): every chunk lands in **both** stores —
+Dual-write (spec §9.6): every chunk lands in **both** stores —
 Elasticsearch (contextual BM25) first, pgvector second — within the same
 per-file boundary; a store failure after client-level retries fails that
 file's ingest loudly. The ordering is deliberate: the pgvector ``documents``
@@ -26,7 +26,7 @@ each discovered document from both stores before ingesting it fresh. A file
 with no extractable text is never silently dropped: it gets a ``documents``
 row with ``n_chunks = 0``, a warning, and a dedicated summary count.
 
-Orchestration seam (Phase 8): each spec §9 stage is a named module function
+Orchestration seam: each spec §9 stage is a named module function
 (:func:`parse_document`, :func:`chunk_document`, :func:`contextualize_chunks`,
 :func:`embed_chunks`, :func:`store_chunks`), and the run loop invokes them
 through an :class:`IngestStages` bundle. By default the bundle holds the
@@ -320,7 +320,7 @@ def ingest_corpus(
     buckets = stages.discover(str(root), verbose=verbose)
     summary = IngestSummary(discovered=buckets.total)
 
-    # Resolve parsers up front; a bucket without one (PDF until Phase 7) is
+    # Resolve parsers up front; a bucket without one is
     # counted and skipped loudly, never silently dropped.
     work: list[tuple[Parser, Path]] = []
     for bucket_name, parser_name in _BUCKET_PARSERS:
@@ -331,8 +331,7 @@ def ingest_corpus(
             parser = get_parser(parser_name)
         except KeyError:
             logger.warning(
-                "no parser registered for %r — skipping %d file(s); the parser lands "
-                "in a later phase",
+                "no parser registered for %r — skipping %d file(s)",
                 parser_name,
                 len(paths),
             )

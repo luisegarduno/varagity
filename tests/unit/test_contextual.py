@@ -1,4 +1,4 @@
-"""Unit tests for the contextualizer (spec §9.4, §11.1; plan Phase 5)."""
+"""Unit tests for the contextualizer (spec §9.4, §11.1)."""
 
 import logging
 from collections.abc import Sequence

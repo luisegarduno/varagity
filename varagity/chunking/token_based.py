@@ -10,8 +10,8 @@ Token counting uses tiktoken's ``cl100k_base`` — the codebase-wide
 *documented approximation* of e5's actual XLM-RoBERTa vocabulary (see
 ``varagity.tokens``). An exact counter (the e5 HF tokenizer as a custom
 ``length_function``) plugs into the ``__init__`` seam without touching the
-registry; it was evaluated against the approximation in the Phase 6 chunker
-sweep rather than shipped (an extra ``transformers`` hot path + first-run
+registry; it was evaluated against the approximation in the chunker sweep
+rather than shipped (an extra ``transformers`` hot path + first-run
 tokenizer download for a small counting delta — ADR-008).
 
 Note the langchain merge nuance: the splitter sizes chunks by summing piece

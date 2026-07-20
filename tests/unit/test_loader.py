@@ -338,7 +338,7 @@ def test_known_empty_file_rewarns_without_reparsing(
 def test_pdfs_route_to_the_registered_parser_with_provenance(
     pinned_settings: None, corpus: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """PDFs are parsed since Phase 7, with provenance threaded to records.
+    """PDFs are parsed with provenance threaded to records.
 
     The pdf bucket resolves a real parser (docling stubbed here), and its
     ``extraction`` metadata reaches the stored ``ChunkRecord``s.
@@ -390,7 +390,7 @@ def test_invalid_verbose_raises(pinned_settings: None, corpus: Path) -> None:
 
 
 class TestOnFileObserver:
-    """The per-file outcome seam the API's progress stream rides (v2 Phase 8)."""
+    """The per-file outcome seam the API's progress stream rides."""
 
     def test_observer_sees_every_outcome(self, pinned_settings: None, corpus: Path) -> None:
         (corpus / "broken.txt").write_bytes(b"\xff\xfe\x00 not utf-8 at all \xff" * 20)
@@ -445,7 +445,7 @@ class TestOnFileObserver:
 
 
 class TestContextualization:
-    """The Phase-5 contextual path (spec §9.4; plan decision #2)."""
+    """The contextual path (spec §9.4; plan decision #2)."""
 
     def test_blurb_lands_in_context_with_composition(
         self, contextual_settings: None, corpus: Path
@@ -559,7 +559,7 @@ class TestReingest:
     def test_reingest_upgrades_identity_ingest_to_contextual(
         self, pinned_settings: None, settings_env: Callable[..., None], corpus: Path
     ) -> None:
-        """The Phase-5 migration path: baseline corpus → --reingest → blurbs."""
+        """The contextualize migration path: baseline corpus → --reingest → blurbs."""
         store = FakeStore()
         ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
         assert all(record.context is None for record in store.records)
@@ -579,7 +579,7 @@ class TestReingest:
 
 
 class TestDualWrite:
-    """Spec §9.6 (Phase 6): every chunk lands in both stores, or the file fails."""
+    """Spec §9.6: every chunk lands in both stores, or the file fails."""
 
     def test_both_stores_receive_the_same_chunks(self, pinned_settings: None, corpus: Path) -> None:
         store, bm25 = FakeStore(), FakeBM25()

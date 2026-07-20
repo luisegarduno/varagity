@@ -86,7 +86,7 @@ class FakeBM25:
 
 class TestRegistry:
     def test_all_three_methods_registered(self) -> None:
-        """The full spec §10.1 vocabulary resolves (Phase 6 complete)."""
+        """The full spec §10.1 vocabulary resolves."""
         assert {"semantic", "bm25", "hybrid"} <= set(RETRIEVER_REGISTRY)
         assert isinstance(get_retriever("semantic"), SemanticRetriever)
         assert isinstance(get_retriever("bm25"), BM25Retriever)

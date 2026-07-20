@@ -8,7 +8,7 @@ v1 shipped at the Anthropic ladder's ≈49% tier (contextual embeddings +
 contextual BM25 + hybrid fusion) with reranking *staged*: the cross-encoder
 (`bge-reranker-v2-m3`) was already served by the infinity container
 ([ADR-002](ADR-002-infinity-over-fastembed.md)) and `.env.example` carried
-`RERANK_ENABLED=false`. v2 Phase 1 wires it in — sequenced first in the v2
+`RERANK_ENABLED=false`. v2 wires it in — sequenced first in the v2
 build because it also produces the per-chunk rank provenance the evidence
 panel ([ADR-005 §3](ADR-005-web-stack-and-api.md)) is designed to display.
 
@@ -53,7 +53,7 @@ recall@10/20 stay meaningful; the production default keeps 5):
   repaired the sweep's only hybrid slip — `docling_hybrid` hybrid 0.975 →
   reranked 1.000 at k=5. Small, but the right direction everywhere.
 - Latency ≈ **0.66 s per 40-document pool** on the RTX 5060, stable over
-  three runs (v2 plan Phase 1 verification) — timed as its own `rerank`
+  three runs (verified at implementation) — timed as its own `rerank`
   sub-stage metric ([ADR-007](ADR-007-observability-stack.md)).
 
 ## Rationale

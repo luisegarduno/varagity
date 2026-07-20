@@ -1,10 +1,10 @@
 # ADR-008: `recursive_character` stays the chunking default
 
-**Status:** Accepted (decided by the Phase 6 chunker sweep, 2026-07-12; owner-confirmed)
+**Status:** Accepted (decided by the chunker sweep, 2026-07-12; owner-confirmed)
 
 ## Context
 
-The chunker registry carried one strategy since v1; v2 Phase 6 added four
+The chunker registry carried one strategy since v1; v2 added four
 (`token_based`, `markdown_aware`, `semantic`, `docling_hybrid`), each a
 registry file, with the shipped default to be **benchmark-decided, not
 preference-decided** (v2 plan decision #14 — the same rule that produced

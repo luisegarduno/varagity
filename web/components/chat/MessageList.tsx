@@ -246,7 +246,7 @@ function EmptyConversation() {
 
 /**
  * One answer's markdown with its `[SOURCE]` markers rendered as citation
- * chips (Phase 4), plus the "N sources" affordance that points the
+ * chips, plus the "N sources" affordance that points the
  * evidence panel at this answer.
  */
 function AssistantAnswer({

@@ -48,7 +48,7 @@ class StubLLM:
 
 class TestFormatContext:
     def test_null_context_renders_empty(self) -> None:
-        """The [CONTEXT] line is present but empty until Phase 5 (stable format)."""
+        """The [CONTEXT] line is present but empty when no blurb exists (stable format)."""
         block = format_context([_chunk(0, "some content")])
         assert block == "[SOURCE]:  /abs/corpus/a.md\n[CONTEXT]: \n[CONTENT]: some content"
 
@@ -159,7 +159,7 @@ class TestAnswerQuery:
 
         assert retriever.calls == [("the question?", 4)]
         assert state["query"] == "the question?"
-        assert state["query_vector"] is None  # encapsulated by the retrieval seam in Phase 4
+        assert state["query_vector"] is None  # encapsulated by the retrieval seam
         assert state["retrieved"] == chunks
         assert state["formatted_context"] == format_context(chunks)
         assert state["answer"] == "The answer."

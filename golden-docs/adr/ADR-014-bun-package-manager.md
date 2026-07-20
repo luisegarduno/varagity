@@ -10,8 +10,8 @@ in one binary: a package manager and a JavaScript runtime/test runner.
 The decision that needed recording is where the line sits, because "use
 bun" without a scope line invites `bun --bun next build` and `bun test`
 by drift, and those change what executes in production and what gates
-coverage. [ADR-005's amendment](ADR-005-web-stack-and-api.md#amendment-2026-07-15-v3-phase-1)
-records *that* the migration happened (v3 Phase 1); this ADR records the
+coverage. [ADR-005's amendment](ADR-005-web-stack-and-api.md#amendment-2026-07-15-pnpm-bun)
+records *that* the migration happened; this ADR records the
 scope line and why it sits where it does.
 
 ## Decision

@@ -1,4 +1,4 @@
-"""Unit tests for the Prefect flow adapters (spec §9/§10, Phase 8).
+"""Unit tests for the Prefect flow adapters (spec §9/§10).
 
 Flows execute for real under ``prefect_test_harness`` — an ephemeral API
 with a temporary database — with every service seam stubbed (no Docker, no
@@ -102,7 +102,7 @@ def _task_run_names(flow_run_id: UUID) -> list[str]:
 
 class TestIngestFlow:
     def test_every_stage_is_a_tracked_task_run(self, pinned_settings: None, corpus: Path) -> None:
-        """★ The phase's DoD row: each §9 stage of each file → a task run."""
+        """★ Each §9 stage of each file → a task run."""
         store, bm25 = FakeStore(), FakeBM25()
         state = ingest_flow(
             str(corpus),
@@ -285,7 +285,7 @@ class TestQueryFlow:
         assert "Lantern produces 4.2 megawatts." in llm.prompts[0]
 
         assert state["query"] == "What powers Aurora?"
-        assert state["query_vector"] == vector  # filled since Phase 8
+        assert state["query_vector"] == vector  # the flow records it
         assert state["retrieved"] == retriever.chunks
         assert state["formatted_context"] in llm.prompts[0]
         assert state["answer"] == "Lantern powers Aurora. [SOURCE]: a.md"  # think-stripped
@@ -384,7 +384,7 @@ def _sample(name: str, labels: dict[str, str] | None = None) -> float:
 
 
 class TestFlowMetrics:
-    """The flows are Prometheus probe points (spec_v2 §6.2, v2 Phase 7).
+    """The flows are Prometheus probe points (spec_v2 §6.2).
 
     Injected fakes aren't registry members, so the method label is
     ``custom`` — the low-cardinality fallback — which conveniently keeps
@@ -473,7 +473,7 @@ class TestFlowMetrics:
 
 
 class TestEvalFlows:
-    """The Phase 9 eval flows delegate to the harness with the tracked ingest."""
+    """The eval flows delegate to the harness with the tracked ingest."""
 
     def test_eval_flow_passes_the_tracked_ingest_seam(
         self, monkeypatch: pytest.MonkeyPatch

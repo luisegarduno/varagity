@@ -21,8 +21,8 @@ const THEMES: readonly ThemeName[] = ["light", "dark"];
 test.use({ contextOptions: { reducedMotion: "reduce" } });
 
 /**
- * Scan the page's current state with axe and gate on CRITICAL violations
- * (the Phase 9 criterion). Serious/moderate counts are logged per state
+ * Scan the page's current state with axe and gate on CRITICAL violations.
+ * Serious/moderate counts are logged per state
  * for the report, and the full violation JSON is attached whenever any
  * violation (of any impact) fires.
  */

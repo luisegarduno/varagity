@@ -45,8 +45,6 @@ class ErrorResponse(BaseModel):
 class ChatOverrides(BaseModel):
     """Per-request overrides of query-time settings (spec_v2 §4.2).
 
-    Phase 2 honors the two knobs the thin client needs; the persisted
-    runtime-override layer (spec_v2 §4.7) lands with its GUI in Phase 8.
     Unknown fields are rejected so a typo'd override fails loudly instead
     of silently running with defaults.
 

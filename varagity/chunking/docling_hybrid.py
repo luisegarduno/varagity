@@ -2,7 +2,7 @@
 
 The alternative ``markdown_aware`` implementation the v2 plan benchmarks:
 Docling's tokenization- *and* structure-aware chunker, shipped as its own
-registry entry so the Phase 6 eval sweep compares the two head-to-head and
+registry entry so the chunker eval sweep compares the two head-to-head and
 the default is benchmark-decided (ADR-008), not hand-picked.
 
 The strategy re-parses the parser's markdown into a ``DoclingDocument``

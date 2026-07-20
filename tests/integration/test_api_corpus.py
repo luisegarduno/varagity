@@ -1,8 +1,8 @@
-"""Integration tests for the Phase 8 corpus + settings surfaces.
+"""Integration tests for the corpus + settings surfaces.
 
 The real app over httpx's ASGI transport, pointed at real testcontainers
 (pgvector Postgres + single-node Elasticsearch) via the same ``settings_env``
-mechanism host-mode runs use. Covers the plan's Phase 8 integration
+mechanism host-mode runs use. Covers the integration
 criteria: ``PATCH /api/settings`` persists + clears the cache + flags
 stale (surviving a simulated api restart), migration ``002`` idempotency
 rides the runner suite, document upload validation over the real multipart

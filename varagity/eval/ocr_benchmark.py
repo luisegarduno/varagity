@@ -1,6 +1,6 @@
 """OCR engine benchmark: EasyOCR vs Tesseract (plan decision #10, spec §16).
 
-Phase 7 shipped EasyOCR as a *provisional* fallback engine behind the
+EasyOCR shipped as a *provisional* fallback engine behind the
 pluggable ``OCR_ENGINE`` factory; this benchmark supplies the data that
 picks the shipped default (recorded in ADR-004). Two measurements per
 engine:

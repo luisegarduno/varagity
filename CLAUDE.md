@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Varagity is a full-stack RAG application implementing Anthropic-style **Contextual Retrieval**
 (contextual embeddings + contextual BM25 + hybrid rank fusion + cross-encoder reranking),
 self-hosted on local GPUs. v1 (complete) is the terminal system: Q&A over a `docs/` corpus,
-grounded and cited answers, every pipeline stage a tracked Prefect task. v2 (complete —
-all ten phases shipped) adds: reranking wired into the query path with a per-chunk
+grounded and cited answers, every pipeline stage a tracked Prefect task. v2 (complete)
+adds: reranking wired into the query path with a per-chunk
 `RetrievalTrace` (the ≈67% tier), a FastAPI SSE backend with conversation persistence +
 migrations, a Next.js chat GUI whose evidence panel shows "how this answer was built" with
 inline citations, office/web document modalities, four new chunking strategies (five total)

@@ -168,12 +168,12 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Uploads land here via POST /api/documents (v2 Phase 8); mounted now so
+      # Uploads land here via POST /api/documents; mounted now so
       # the API and the CLI app agree on the corpus from day one. The image's
       # user uid defaults to 1000 to match the host owner of ./docs — writes
       # (uploads, per-doc delete) need it (see Dockerfile.api).
       - ./docs:/app/docs
-      # POST /api/ingest runs the same parsers as the CLI (v2 Phase 8), so the
+      # POST /api/ingest runs the same parsers as the CLI, so the
       # API shares the model cache: Docling layout/table models and EasyOCR
       # weights download once and survive container recreation.
       - model_cache:/home/user/.cache
@@ -344,7 +344,7 @@ services:
       # Model cache for PDF parsing, surviving rebuilds (one-time downloads):
       # Docling's layout/table models land in ~/.cache/huggingface, EasyOCR
       # weights are pinned under ~/.cache/docling/models/EasyOcr — one volume
-      # over ~/.cache covers both (verified at implementation, plan Phase 7).
+      # over ~/.cache covers both (verified at implementation).
       - model_cache:/home/user/.cache
     depends_on:
       postgres:

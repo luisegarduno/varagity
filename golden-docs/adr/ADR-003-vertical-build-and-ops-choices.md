@@ -11,17 +11,17 @@ how the system was built and runs.
 **Context.** Spec §19.2 sketched a horizontal order: build every component,
 wire them at the end. Nothing would have run end-to-end until step ~10.
 
-**Decision.** Build in ten vertical slices: a working Q&A system by Phase 4
-(vanilla RAG), then one independently-testable capability per phase
+**Decision.** Build in ten vertical slices: a working Q&A system by the fourth slice
+(vanilla RAG), then one independently-testable capability per slice
 (contextual embeddings → contextual BM25 → PDF/OCR → Prefect → eval →
-hardening), with services and dependencies added only in the phase that
+hardening), with services and dependencies added only in the slice that
 first uses them.
 
 **Consequences.** `docker compose up` was never broken; every infra addition
 was smoke-tested by code using it; the Anthropic quality ladder mapped 1:1
-onto phases and the Phase 9 eval measures exactly those configurations.
-Prefect arrived in Phase 8 as thin adapters over functions built in Phases
-3–7 — the `IngestStages` seam keeps one orchestration loop for both plain
+onto slices and the eval measures exactly those configurations.
+Prefect arrived late as thin adapters over functions built in the earlier
+slices — the `IngestStages` seam keeps one orchestration loop for both plain
 and tracked execution.
 
 ## 2. Prefect server on its default SQLite
@@ -102,4 +102,4 @@ instead; see [ADR-009](ADR-009-modality-expansion.md).)*
   (e5 truncates at 512), not billing.
 - **Unique index on `(doc_id, original_index)`** — the fusion identity is
   load-bearing; corrupt it loudly at write time, not silently at query time.
-- **Coverage floor 80%** (Phase 10), ratcheting up as the suite grows.
+- **Coverage floor 80%**, ratcheting up as the suite grows.

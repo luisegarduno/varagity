@@ -357,7 +357,7 @@ async def test_existing_conversation_is_reused(app: FastAPI, store_state: dict[s
 async def test_history_loaded_for_an_existing_conversation(
     app: FastAPI, store_state: dict[str, Any]
 ) -> None:
-    """The plan loads the newest turns (v3 Phase 4 plumbing — simple ignores them)."""
+    """The route loads the newest turns (simple ignores them)."""
     store_state["conversations"]["known"] = "Existing"
     store_state["messages"] = [
         {"conversation_id": "known", "role": "user", "content": "q0"},
@@ -497,7 +497,7 @@ async def test_typoed_override_field_422(app: FastAPI) -> None:
 async def test_history_limit_reads_condense_history_turns(
     app: FastAPI, store_state: dict[str, Any], settings_env: Callable[..., None]
 ) -> None:
-    """The v3 Phase 4 literal is gone: the load bound is the setting."""
+    """The hardcoded history-turns literal is gone: the load bound is the setting."""
     settings_env(CONDENSE_HISTORY_TURNS="2")
     store_state["conversations"]["known"] = "Existing"
     await post_chat(app, {"query": "q", "conversation_id": "known"})

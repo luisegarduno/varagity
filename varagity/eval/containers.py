@@ -11,7 +11,7 @@ the dev group, or via ``uv run --group eval``); its import is deferred to
 call time so importing this module — which the CLI does on every start via
 the eval wiring — never requires it.
 
-Operational notes baked in from Phases 6/8:
+Operational notes baked in:
 
 - The Elasticsearch container disables the disk-watermark allocation
   checks: on a host whose disk is >90% full, the default *percentage*

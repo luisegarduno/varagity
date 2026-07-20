@@ -1,6 +1,6 @@
 # ADR-005: The v2 web GUI + HTTP API stack
 
-**Status:** Accepted (2026-07-14) · Amended (2026-07-15 — [below](#amendment-2026-07-15-v3-phase-1))
+**Status:** Accepted (2026-07-14) · Amended (2026-07-15 — [below](#amendment-2026-07-15-pnpm-bun))
 
 One record for the cluster of stack decisions behind the v2 centerpiece —
 the browser chat surface and the HTTP API underneath it (spec_v2 §4, §14).
@@ -142,7 +142,7 @@ loudly. Revisit Alembic if migrations grow branches or destructive changes.
 - **Auto-titling is fire-and-forget** — the first-question title LLM call
   runs after `done` is queued and can never block the stream.
 
-## Amendment (2026-07-15, v3 Phase 1)
+## Amendment (2026-07-15): pnpm → bun
 
 The JS **package manager** migrated pnpm@10.24.0 → **bun 1.3.14**
 (spec_v3 §7). The scope is dependency management only: **Node remains the

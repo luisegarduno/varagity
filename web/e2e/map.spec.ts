@@ -12,7 +12,7 @@ import {
 } from "./helpers";
 
 /**
- * The codebase map's e2e coverage (map Phase 5, updated for the
+ * The codebase map's e2e coverage (updated for the
  * foglamp-style canvas). It absorbs the two component tests the spec
  * sketched per owner decision #2 — Vitest stays lib-only pure logic, so
  * everything that actually renders is asserted here against the live stack.

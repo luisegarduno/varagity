@@ -126,7 +126,7 @@ function toConversationCommand(
 }
 
 /**
- * The ⌘K command palette (Phase 9): a top-aligned Dialog hosting an inline
+ * The ⌘K command palette: a top-aligned Dialog hosting an inline
  * Autocomplete over actions, navigation, appearance, and recent
  * conversations — the Base UI "command palette" recipe in house styling.
  *

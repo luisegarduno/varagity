@@ -1,13 +1,13 @@
 """CLI argument parsing, subcommand dispatch, and the terminal Q&A loop.
 
-Subcommands land with their vertical slices: ``ingest`` (Phase 3), ``chat``
-(Phase 4 — the default when no subcommand is given), ``eval`` / ``eval
-ocr`` (Phase 9). ``chat`` follows the spec §13 startup sequence: ingest the
+Subcommands: ``ingest``, ``chat`` (the default when no subcommand is
+given), and ``eval`` / ``eval ocr``. ``chat`` follows the spec §13
+startup sequence: ingest the
 corpus first, then loop — prompt → retrieve → show matches → grounded
 answer — until ``:quit`` (or end-of-input, e.g. in a non-interactive
 container).
 
-Since Phase 8 every subcommand runs through the Prefect flows
+Every subcommand runs through the Prefect flows
 (``varagity.pipeline``), invoked directly in-process — no worker or
 deployment (spec §21 #8) — so every ingest stage and every question is a
 tracked run at the Prefect UI (``:4200``).

@@ -28,7 +28,7 @@ the prompt. Result caching is disabled (``NO_CACHE``) for the same reasons
 as the ingestion tasks: live-service calls with unhashable client/retriever
 inputs.
 
-Both flows are Prometheus probe points (spec_v2 §6.2, v2 Phase 7): they
+Both flows are Prometheus probe points (spec_v2 §6.2): they
 time each stage around its task call, record the retrieved chunks' scores
 (+ rerank movement), and count the flow's outcome — the streaming flow
 additionally counts the server-reported token usage it already returns.

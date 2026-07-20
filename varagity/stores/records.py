@@ -75,7 +75,7 @@ class ChunkRecord(BaseModel):
         content_hash: The parent document's :func:`content_hash`.
         created_at: Ingestion timestamp (UTC).
         extraction: How text was extracted: ``"text"`` (default) or
-            ``"ocr_fallback"`` (set by Phase 7's OCR pass) — retrieval-quality
+            ``"ocr_fallback"`` (set by the OCR fallback pass) — retrieval-quality
             provenance beyond spec §8.1.
         heading_path: The chunk's markdown heading breadcrumb (e.g.
             ``"Operations > Dredging"``), set by the heading-aware chunkers

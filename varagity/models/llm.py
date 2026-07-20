@@ -3,7 +3,7 @@
 The llama.cpp server speaks the OpenAI ``/v1`` surface, so the ``openai`` SDK
 pointed at ``BASE_MODEL_API_URL`` is the client. Responses from reasoning
 models carry ``<think>…</think>`` blocks; callers strip them with
-:func:`clean_response` (answers in Phase 4, context blurbs in Phase 5) or,
+:func:`clean_response` (answers and context blurbs) or,
 on the streaming path (spec_v2 §4.3), classify them delta-by-delta with
 :class:`varagity.models.stream.ThinkStreamSplitter`.
 """

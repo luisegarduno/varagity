@@ -1,8 +1,7 @@
 /**
- * A tiny window-event bus so the sidebar can refetch its conversation list
- * when any component mutates conversations (new chat, turn persisted,
- * delete) without prop-drilling or a data library — enough for the thin
- * slice; Phase 8+ can move to a fetch cache if the surfaces multiply.
+ * A tiny window-event bus announcing conversation-list changes (new chat,
+ * turn persisted, delete); only `QueryBusBridge` subscribes, turning each
+ * event into `invalidateQueries`.
  */
 const EVENT_NAME = "varagity:conversations-changed";
 

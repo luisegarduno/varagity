@@ -24,7 +24,7 @@ for, dropped.
   the `ChunkRecord` JSONB, the typed columns, and the vector in one row.
   The hybrid/BM25 retrievers hydrate full records from pg by
   `(doc_id, original_index)` — that join is plain SQL.
-- **SQL inspectability is a debugging feature.** Every phase's verification
+- **SQL inspectability is a debugging feature.** Verification at every step
   ran psql queries against live rows (`context IS NULL` invariants, chunk
   counts, `extraction` provenance). A dedicated vector DB makes each of
   those a bespoke API call.

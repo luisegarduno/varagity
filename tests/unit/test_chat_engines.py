@@ -204,7 +204,7 @@ class TestCondenseContextEngine:
     def test_echoed_prompt_label_is_stripped(self) -> None:
         """A completion-primed model echoes the prompt's trailing label.
 
-        Caught live by the v3 Phase 6 eval: the answer arrived as
+        Caught live by the chat-engine eval: the answer arrived as
         "STANDALONE QUERY: …", and the echo would ride into the embedding
         model as noise. Matching is case-insensitive — the echo need not
         match the template's casing.

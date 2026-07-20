@@ -7,7 +7,7 @@ templating engine — sent as a single user message via the non-streaming
 
 The topic-shift instruction is the prompt's load-bearing line: dragging the
 old topic into a question that changed the subject is the failure mode that
-matters most for a naive condenser (spec_v3 §13.4), and the v3 Phase 6 eval
+matters most for a naive condenser (spec_v3 §13.4), and the chat-engine eval
 fixtures test for it explicitly.
 """
 
@@ -30,7 +30,7 @@ FOLLOW-UP: {query}
 STANDALONE QUERY:"""
 
 # The completion-priming label the prompt ends with. Exposed so the engine
-# can strip a model's echo of it from the answer (a v3 Phase 6 eval
+# can strip a model's echo of it from the answer (a chat-engine eval
 # finding); a test asserts the template still ends with it, so the two
 # can't drift apart.
 CONDENSE_QUERY_LABEL = "STANDALONE QUERY:"

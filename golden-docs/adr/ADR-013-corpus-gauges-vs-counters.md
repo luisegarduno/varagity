@@ -99,5 +99,5 @@ histogram increase divided by a labelled counter's zero).
   failure message explaining why.
 - Shipped in `9406c6a` (before the v3 plan was even final) with the
   Ingestion rewrite; the Infra enrichment and the exporter-window fix
-  ([ADR-007's amendment](ADR-007-observability-stack.md#amendment-2026-07-19-v3-phase-2))
+  ([ADR-007's amendment](ADR-007-observability-stack.md#amendment-2026-07-19-the-observability-repair))
   completed the observability repair.

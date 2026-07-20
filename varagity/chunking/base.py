@@ -61,8 +61,8 @@ def warn_near_token_ceiling(chunks: Sequence[Document], *, strategy: str) -> Non
     """Warn for chunks whose content nears e5's 512-token ceiling (research Q6).
 
     The ingest-time warning :class:`~varagity.models.embeddings.EmbeddingsClient`
-    fires per *contextualized* passage, carried forward to chunking time (v2
-    plan Phase 6): a chunk already ≥ the threshold **before** its situating
+    fires per *contextualized* passage, carried forward to chunking time:
+    a chunk already ≥ the threshold **before** its situating
     blurb is prepended is guaranteed to truncate at embedding time, and the
     strategy's sizing knobs — not the blurb length — are what to fix.
 

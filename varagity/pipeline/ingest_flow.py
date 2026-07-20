@@ -22,7 +22,7 @@ that make Prefect's default input-hash cache policy log an error per run —
 a cache hit could never be correct here anyway.
 
 The contextualize and store tasks are Prometheus probe points (spec_v2
-§6.2, v2 Phase 7): blurb latency per document, plus document/chunk
+§6.2): blurb latency per document, plus document/chunk
 counters at the moment a document actually lands in both stores.
 """
 
@@ -250,7 +250,7 @@ def ingest_flow(
     (same parameters, same behavior — one file failing is counted, logged,
     and visible as a failed task run, never aborting the corpus).
 
-    Parameter validation is off because callers (tests, the Phase 9 eval
+    Parameter validation is off because callers (tests, the eval
     harness) inject duck-typed store/client fakes that pydantic would
     reject; the flow's inputs are already-validated internals.
 

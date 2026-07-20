@@ -1,11 +1,11 @@
 # ADR-007: In-app Prometheus metrics + provisioned Grafana
 
-**Status:** Accepted (2026-07-14) · Amended (2026-07-19 — [below](#amendment-2026-07-19-v3-phase-2))
+**Status:** Accepted (2026-07-14) · Amended (2026-07-19 — [below](#amendment-2026-07-19-the-observability-repair))
 
 ## Context
 
 v1 built its three output channels and Prefect seams explicitly "so that
-metrics can be layered on without refactoring" (spec §14); v2 Phase 7
+metrics can be layered on without refactoring" (spec §14); v2
 collects that debt. Two candidate sources existed for pipeline metrics:
 direct `prometheus_client` instrumentation inside the flows, or scraping the
 Prefect server through a community exporter. The flows run **in-process**
@@ -39,7 +39,7 @@ and the dashboards must work with zero click-ops (v2 DoD).
   [security posture](../runbook.md#security-posture-dev-only)).
 - **`GET /metrics` is a plain FastAPI route, not a mounted
   `make_asgi_app()`**: Starlette mounts 307-redirect the bare `/metrics`
-  path (verified empirically in Phase 7), and `generate_latest(REGISTRY)`
+  path (verified empirically at implementation), and `generate_latest(REGISTRY)`
   is exactly what that ASGI app would serve for a **single-process
   registry** — which the single-uvicorn-worker decision
   ([ADR-005 §7](ADR-005-web-stack-and-api.md)) guarantees.
@@ -64,7 +64,7 @@ and the dashboards must work with zero click-ops (v2 DoD).
 - **Metrics are per-process** — the honest cost of in-app collectors:
   Prometheus scrapes only the API process, so a **CLI ingest records into
   its own short-lived process and never reaches Grafana**. The Ingestion
-  dashboard populates from API-driven ingests; Phase 8's `POST /api/ingest`
+  dashboard populates from API-driven ingests; `POST /api/ingest`
   closed that gap. (Query metrics were never affected — the GUI path runs
   in the API process.)
 - **`varagity_rerank_delta` exposes no `_sum` sample**: the histogram has
@@ -75,7 +75,7 @@ and the dashboards must work with zero click-ops (v2 DoD).
 - `METRICS_ENABLED` gates only the route (off → structured 404); collectors
   always record. `dependency_up` refreshes inside the health check the api
   container already probes every 15 s — no poller.
-- Live-validated end-to-end (Phase 7 notes): three hybrid queries through
+- Live-validated end-to-end at implementation: three hybrid queries through
   `POST /api/chat` yielded p95 by stage embed 0.098 s / retrieve 0.098 s /
   generate 19.5 s, `varagity_query_total{method="hybrid",outcome="ok"} = 3`,
   and mean retrieval score decaying 1.0 → 0.08 across ranks 1–10 — the
@@ -84,7 +84,7 @@ and the dashboards must work with zero click-ops (v2 DoD).
   for a single-user stack; scale by replicas instead), alerting and
   long-term storage tuning (out of scope until something pages a human).
 
-## Amendment (2026-07-19, v3 Phase 2)
+## Amendment (2026-07-19): the observability repair
 
 v3's observability repair (spec_v3 §6) corrected one consequence above
 and closed the exporter question this record left open.

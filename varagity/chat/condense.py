@@ -110,7 +110,7 @@ class CondenseContextEngine:
         # quality in this feature (spec_v3 §4.5).
         condensed = clean_response(raw)
         # A completion-primed model may echo the prompt's trailing label
-        # into its answer (the v3 Phase 6 eval caught it live); an echoed
+        # into its answer (the chat-engine eval caught it live); an echoed
         # label would ride into the embedding model as noise.
         if condensed.upper().startswith(CONDENSE_QUERY_LABEL):
             condensed = condensed[len(CONDENSE_QUERY_LABEL) :].strip()

@@ -22,12 +22,12 @@ dependencies = [
     # both are already in the resolved set transitively (no image growth).
     "pillow>=11",
     "prefect>=3,<4",
-    # In-app pipeline metrics exposed at GET /metrics (spec_v2 §6, v2 Phase 7).
+    # In-app pipeline metrics exposed at GET /metrics (spec_v2 §6).
     "prometheus-client>=0.21",
     "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.14.2",
     "pypdfium2>=5.11,<6",  # page-preview locate/render (see the pillow note above)
-    # Multipart form parsing for the Phase 8 upload route (FastAPI requires it
+    # Multipart form parsing for the upload route (FastAPI requires it
     # at import time for File/UploadFile parameters).
     "python-multipart>=0.0.20",
     "rich>=15.0.0",
@@ -56,7 +56,7 @@ dev = [
     "ruff>=0.15.21",
     { include-group = "eval" },
 ]
-# What `main.py eval` needs beyond the runtime deps (Phase 9): ephemeral
+# What `main.py eval` needs beyond the runtime deps: ephemeral
 # stores + OCR error metrics. Shared into dev (tests use the same
 # containers); `uv run --group eval main.py eval` works without dev.
 eval = [

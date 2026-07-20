@@ -3,14 +3,14 @@
 Quantifies the retrieval-quality ladder, on the golden set over
 ``tests/fixtures/corpus``:
 
-1. ``semantic_noncontextual`` — the v1 Phase 4 baseline,
+1. ``semantic_noncontextual`` — the vanilla-RAG v1 baseline,
 2. ``semantic_contextual`` — contextual embeddings (≈35% tier),
 3. ``bm25_contextual`` — contextual BM25,
 4. ``hybrid_contextual`` — rank fusion (≈49% tier, the default),
 5. ``hybrid_rerank_contextual`` — + cross-encoder re-ranking (≈67% tier,
    spec_v2 §5.5).
 
-The **chunker sweep** (spec_v2 §7.4, v2 Phase 6) follows the matrix: every
+The **chunker sweep** (spec_v2 §7.4) follows the matrix: every
 registered chunking strategy gets its own contextual ingest over the same
 ephemeral stores and is measured across the contextual retrieval configs.
 Because the golden set's ``chunk_index`` refs are authored against the
@@ -46,7 +46,7 @@ cache — the same mechanism the test suite uses — because deep pipeline
 code resolves ``get_settings()`` internally; the eval harness is a
 single-threaded CLI path, where this is safe.
 
-The **chat-engine eval** (spec_v3 §4.9, v3 Phase 6) is the multi-turn
+The **chat-engine eval** (spec_v3 §4.9) is the multi-turn
 counterpart: every registered chat engine runs the hand-authored
 conversation fixtures (``tests/fixtures/conversations/``), and each turn's
 retrieval is scored fact-anchored exactly like the sweep — the engine's

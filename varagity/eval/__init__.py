@@ -1,4 +1,4 @@
-"""Offline evaluation harness (spec §16, Phase 9).
+"""Offline evaluation harness (spec §16).
 
 Measures retrieval quality — recall@k / pass@k over a hand-authored golden
 set — across the four Contextual Retrieval configurations, benchmarks the
