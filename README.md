@@ -13,47 +13,6 @@ evidence panel: per-chunk semantic/BM25/fusion/re-rank provenance, the
 situating blurb, and inline `[SOURCE]` citation chips that link into it.
 Every pipeline stage is a tracked Prefect task.
 
-> 📄 **Design**: [`spec.md`](spec.md) (v1) · `spec_v2.md` (v2) · **As-built docs**:
-> [`golden-docs/`](golden-docs/index.md) (`uv run mkdocs serve`) — architecture,
-> data model, pipelines, runbook, ADRs, the HTTP API contract, Python API reference.
-
-
-## Status
-
-**v1 — complete.** Terminal Contextual-Retrieval Q&A: ingestion with OCR
-fallback, contextual embeddings + contextual BM25, hybrid rank fusion,
-recall@k/pass@k eval matrix + OCR benchmark, Prefect tracking, golden-docs.
-
-**v2 — complete** (all ten phases shipped):
-
-- [x] **Re-ranking** wired into the query path (`RETRIEVAL_METHOD=reranked`,
-  `bge-reranker-v2-m3`) + a per-chunk `RetrievalTrace` (semantic/BM25/fusion
-  ranks, re-rank delta); eval matrix extended to 5 configs
-- [x] **HTTP API** (FastAPI): SSE streaming chat, conversation persistence,
-  idempotent schema migrations
-- [x] **Web GUI** (Next.js + TypeScript + Tailwind + shadcn/ui): streamed
-  markdown chat, conversation sidebar, reasoning trace, light/dark themes
-- [x] **Evidence panel + citations**: the "How this answer was built" rail;
-  inline `[SOURCE]` chips scroll to their chunk card; citations not backed by
-  retrieved evidence are flagged
-- [x] **More modalities**: `.docx` / `.pptx` / `.xlsx` / `.html` via a
-  generalized Docling parser (slides/sheets carry page-level provenance)
-- [x] **More chunking strategies**: `token_based`, `markdown_aware`,
-  `semantic`, `docling_hybrid` — benchmark sweep in the eval harness
-  (default stays `recursive_character`)
-- [x] **Observability**: Prometheus + provisioned Grafana dashboards
-  (Query / Ingestion / Infra) at :3001, no login needed; optional
-  Prefect-exporter and DCGM GPU-metrics compose profiles
-- [x] **Corpus management + live settings UI**: drag-and-drop upload with
-  live ingest progress, per-document listing/delete, runtime setting
-  overrides with stale-corpus flagging
-- [x] **Design-system polish**: design tokens (accent/density), responsive
-  and mobile layouts, a11y pass, ⌘K command palette, opt-in Playwright e2e
-- [x] **Hardening**: ADR-005…009, a top-level HTTP API docs page
-  (drift-guarded OpenAPI snapshot), a web CI job + coverage floors,
-  as-built docs refresh
-
-
 -----------------------------
 
 # Instructions
