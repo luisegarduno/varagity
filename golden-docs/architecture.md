@@ -318,10 +318,12 @@ one 8 GB GPU are in the
 
 This page explains Varagity in prose and Mermaid fragments; the web GUI also
 ships the whole system as one interactive graph at **`/map`** — entry points,
-the Prefect flows, the chat engines, the three models, the pluggable
-registries, and the datastores, rendered on a hand-rolled SVG canvas with
-pan/zoom and click-to-trace of downstream flows
-([ADR-015](adr/ADR-015-codebase-map.md)). It complements this document by
+the Prefect flows, the chat engines, the pluggable registries, and the
+datastores as cards on a pan/zoom canvas (HTML cards over one SVG edge
+underlay), with the three models folded into favicon chips on the cards that
+call them, the Ingestion / Query path / Observability groups drawn as
+containers, and click-to-spotlight of downstream flows
+([ADR-015](adr/ADR-015-codebase-map.md), amended). It complements this document by
 putting the *relational* facts on the edges where they belong ("`reranked`
 composes a base retriever", "condense calls the same llama.cpp server the
 answer generator does"). It is reachable from the sidebar and the ⌘K palette

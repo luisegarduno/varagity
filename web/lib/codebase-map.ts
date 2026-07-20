@@ -50,15 +50,25 @@ export interface MapEdge {
   label?: string;
 }
 
+/** One side-panel callout row (models / tools / integrations). */
+export interface TopItem {
+  /** Unique within its list, kebab-case. */
+  id: string;
+  /** Display name, <= 40 chars. */
+  label: string;
+  /** Favicon domain (vendored under `public/map-icons/`), no scheme/path. */
+  domain?: string;
+}
+
 /** The whole curated graph plus its "top" callouts. */
 export interface CodebaseMap {
-  project: { name: string; date: string; summary: string };
-  /** Node ids, <= 3. */
-  topModels: string[];
-  /** Node ids, <= 10. */
-  topTools: string[];
-  /** Node ids, <= 10. */
-  topIntegrations: string[];
+  project: { name: string; date: string; tagline: string };
+  /** <= 3 rows. */
+  topModels: TopItem[];
+  /** <= 10 rows. */
+  topTools: TopItem[];
+  /** <= 10 rows. */
+  topIntegrations: TopItem[];
   /** <= 60 nodes, <= 120 edges. */
   graph: { nodes: MapNode[]; edges: MapEdge[] };
 }
@@ -78,9 +88,11 @@ const KEBAB_CASE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
  *    <= 10 topIntegrations.
  * 3. Lengths: label <= 28, sub <= 40, edge label <= 24, group <= 24,
  *    detail <= 200, sourceRef <= 120.
- * 4. Every `top*` id exists in `graph.nodes`.
+ * 4. `top*` rows have unique kebab-case ids and non-empty labels <= 40 chars
+ *    (they are standalone callouts, not graph-node references — the scan
+ *    schema's shape).
  * 5. <= 3 distinct groups, each holding 3–6 nodes.
- * 6. `domain` carries no scheme and no path.
+ * 6. `domain` carries no scheme and no path (nodes and `top*` rows alike).
  * 8. The graph is a DAG (Kahn's algorithm) — the layout's longest-path rank
  *    step depends on it, so it is an invariant, not an assumption.
  *
@@ -155,11 +167,27 @@ export function validateMap(map: CodebaseMap): string[] {
     }
   }
 
-  // Invariant 4 — top* ids exist.
-  const checkTop = (name: string, list: readonly string[]): void => {
-    for (const id of list) {
-      if (!ids.has(id)) {
-        errors.push(`${name} references unknown node: "${id}"`);
+  // Invariant 4 — top* rows are well-formed callouts.
+  const checkTop = (name: string, list: readonly TopItem[]): void => {
+    const seen = new Set<string>();
+    for (const item of list) {
+      if (!KEBAB_CASE.test(item.id)) {
+        errors.push(`${name} id is not kebab-case: "${item.id}"`);
+      }
+      if (seen.has(item.id)) {
+        errors.push(`${name} has a duplicate id: "${item.id}"`);
+      }
+      seen.add(item.id);
+      if (item.label.length === 0 || item.label.length > 40) {
+        errors.push(`${name} "${item.id}": label must be 1–40 chars`);
+      }
+      if (
+        item.domain !== undefined &&
+        (item.domain.includes("/") || item.domain.includes(":"))
+      ) {
+        errors.push(
+          `${name} "${item.id}": domain "${item.domain}" must have no scheme or path`,
+        );
       }
     }
   };

@@ -1,19 +1,25 @@
 import { describe, expect, it } from "vitest";
 
 import { CODEBASE_MAP } from "@/lib/codebase-map.data";
+import { precomputedLayout } from "@/lib/codebase-map.layout";
 import type { CodebaseMap } from "@/lib/codebase-map";
-import { layout, type NodeBox } from "@/lib/map-layout";
+import {
+  arrowHead,
+  condense,
+  edgePath,
+  labelAnchor,
+  layoutGraph,
+  polylineLength,
+  serializeLayout,
+  type MapLayout,
+  type NodeBox,
+} from "@/lib/map-layout";
 
-interface Point {
-  x: number;
-  y: number;
-}
-
-/** A layout-only fixture: a group that spans two columns, a long edge, and an
- * ungrouped node sharing a column with group members (to exercise contiguity).
- * It need not satisfy validateMap — layout() trusts its input. */
+/** A layout-only fixture: a group, a chip-folded model, an ungrouped chain,
+ * and a long edge. It need not satisfy validateMap — the layout trusts its
+ * input. */
 const FIXTURE: CodebaseMap = {
-  project: { name: "Fixture", date: "2026-01-01", summary: "layout fixture" },
+  project: { name: "Fixture", date: "2026-01-01", tagline: "layout fixture" },
   topModels: [],
   topTools: [],
   topIntegrations: [],
@@ -21,41 +27,25 @@ const FIXTURE: CodebaseMap = {
     nodes: [
       { id: "a", label: "A", kind: "entry", sub: "source" },
       { id: "b", label: "B", kind: "entry" },
-      { id: "g1", label: "G1", kind: "tool", group: "Group" },
-      { id: "g2", label: "G2", kind: "tool", group: "Group" },
-      { id: "g3", label: "G3", kind: "tool", group: "Group" },
+      { id: "g1", label: "G1", kind: "service", group: "Group" },
+      { id: "g2", label: "G2", kind: "service", group: "Group" },
+      { id: "g3", label: "G3", kind: "agent", group: "Group" },
       { id: "mid", label: "MID", kind: "service" },
       { id: "z", label: "Z", kind: "store" },
+      { id: "m", label: "M", kind: "model", domain: "example.com" },
     ],
     edges: [
-      { from: "a", to: "g1" },
+      { from: "a", to: "g1", label: "starts" },
       { from: "a", to: "mid" },
-      { from: "a", to: "z" }, // long edge: rank 0 -> rank 3
+      { from: "a", to: "z" }, // long edge across every layer
       { from: "b", to: "g2" },
       { from: "b", to: "mid" },
-      { from: "mid", to: "g3" },
-      { from: "g1", to: "z" },
-      { from: "g2", to: "z" },
+      { from: "g1", to: "g3", label: "hands off" },
+      { from: "g2", to: "g3" },
+      { from: "mid", to: "m" }, // chip-folded
+      { from: "g3", to: "m" }, // chip-folded
       { from: "g3", to: "z" },
-    ],
-  },
-};
-
-const CYCLE: CodebaseMap = {
-  project: { name: "Cycle", date: "2026-01-01", summary: "cyclic fixture" },
-  topModels: [],
-  topTools: [],
-  topIntegrations: [],
-  graph: {
-    nodes: [
-      { id: "c1", label: "C1", kind: "service" },
-      { id: "c2", label: "C2", kind: "service" },
-      { id: "c3", label: "C3", kind: "service" },
-    ],
-    edges: [
-      { from: "c1", to: "c2" },
-      { from: "c2", to: "c3" },
-      { from: "c3", to: "c1" },
+      { from: "mid", to: "z" },
     ],
   },
 };
@@ -70,61 +60,60 @@ function overlaps(a: NodeBox, b: NodeBox): boolean {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
-/** Column index per node, derived from x — one distinct x per rank by
- * construction, so equal x means the same column. */
-function columnIndex(positions: ReadonlyMap<string, NodeBox>): Map<string, number> {
-  const xs = [...new Set([...positions.values()].map((box) => box.x))].sort(
-    (p, q) => p - q,
-  );
-  const indexOfX = new Map(xs.map((x, i) => [x, i]));
-  const out = new Map<string, number>();
-  for (const [id, box] of positions) out.set(id, indexOfX.get(box.x) ?? 0);
-  return out;
-}
-
-/** The first and last coordinate pairs of an `M … C …` path. */
-function endpoints(d: string): { start: Point; end: Point } {
-  const nums = (d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
-  return {
-    start: { x: nums[0], y: nums[1] },
-    end: { x: nums[nums.length - 2], y: nums[nums.length - 1] },
-  };
-}
-
-function onBoundary(p: Point, box: NodeBox): boolean {
-  const eps = 0.05;
-  const within = (v: number, lo: number, hi: number): boolean =>
-    v >= lo - eps && v <= hi + eps;
-  const onVerticalEdge =
-    (Math.abs(p.x - box.x) <= eps || Math.abs(p.x - (box.x + box.w)) <= eps) &&
-    within(p.y, box.y, box.y + box.h);
-  const onHorizontalEdge =
-    (Math.abs(p.y - box.y) <= eps || Math.abs(p.y - (box.y + box.h)) <= eps) &&
-    within(p.x, box.x, box.x + box.w);
-  return onVerticalEdge || onHorizontalEdge;
-}
-
-/** Every group present in the graph, in first-appearance order. */
-function groupNames(map: CodebaseMap): string[] {
-  const seen: string[] = [];
-  for (const node of map.graph.nodes) {
-    if (node.group !== undefined && !seen.includes(node.group)) seen.push(node.group);
-  }
-  return seen;
-}
-
-/** The invariants that must hold for any DAG the layout accepts. */
-function assertLayoutProperties(map: CodebaseMap): void {
-  const result = layout(map);
+/** The invariants that must hold for any graph the layout accepts. */
+async function assertLayoutProperties(map: CodebaseMap): Promise<MapLayout> {
+  const result = await layoutGraph(map);
   const { positions } = result;
 
-  // Determinism — a second call is structurally identical.
-  expect(layout(map)).toEqual(result);
+  // Determinism — a second run is structurally identical (ELK layered is
+  // deterministic; same input → same coordinates).
+  expect(JSON.parse(JSON.stringify(await layoutGraph(map)))).toEqual(
+    JSON.parse(JSON.stringify(result)),
+  );
 
-  // Positive, bounded canvas; every box sits inside it.
+  // Exactly the condensed (renderable) nodes are placed.
+  const condensed = condense(map);
+  expect([...positions.keys()].sort()).toEqual(
+    condensed.nodes.map((node) => node.id).sort(),
+  );
+  expect(result.foldedEdges).toEqual(condensed.edges);
+
+  // Every condensed edge is represented exactly once across the rendered
+  // edges' `orig` lists (cross-group edges merge; none may vanish).
+  const seen = new Map<number, number>();
+  for (const edge of result.edges) {
+    for (const index of edge.orig) seen.set(index, (seen.get(index) ?? 0) + 1);
+  }
+  expect([...seen.values()].every((count) => count === 1)).toBe(true);
+  expect(seen.size).toBe(condensed.edges.length);
+
+  // Rendered endpoints resolve to a placed node or a group band.
+  const bandIds = new Set(result.groupBands.map((band) => band.id));
+  for (const edge of result.edges) {
+    expect(positions.has(edge.from) || bandIds.has(edge.from)).toBe(true);
+    expect(positions.has(edge.to) || bandIds.has(edge.to)).toBe(true);
+    expect(edge.points.length).toBeGreaterThanOrEqual(2);
+    for (const p of edge.points) {
+      expect(Number.isFinite(p.x)).toBe(true);
+      expect(Number.isFinite(p.y)).toBe(true);
+    }
+    if (edge.labelPos) {
+      expect(Number.isFinite(edge.labelPos.x)).toBe(true);
+      expect(Number.isFinite(edge.labelPos.y)).toBe(true);
+    }
+    expect(polylineLength(edge.points)).toBeGreaterThan(0);
+    expect(edgePath(edge.points).startsWith("M ")).toBe(true);
+    expect(arrowHead(edge.points).startsWith("M ")).toBe(true);
+    expect(labelAnchor(edge.points)).not.toBeNull();
+  }
+
+  // Positive, bounded canvas; every box sits inside it; nothing is NaN.
   expect(result.bounds.w).toBeGreaterThan(0);
   expect(result.bounds.h).toBeGreaterThan(0);
   for (const box of positions.values()) {
+    for (const v of [box.x, box.y, box.w, box.h]) {
+      expect(Number.isFinite(v)).toBe(true);
+    }
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.y).toBeGreaterThanOrEqual(0);
     expect(box.x + box.w).toBeLessThanOrEqual(result.bounds.w);
@@ -142,115 +131,113 @@ function assertLayoutProperties(map: CodebaseMap): void {
     }
   }
 
-  // Every edge is drawable left->right or intra-column (never rank-decreasing),
-  // and its path starts/ends on its endpoints' box boundaries.
-  const column = columnIndex(positions);
-  for (const { edge, d } of result.edgePaths) {
-    const from = boxFor(positions, edge.from);
-    const to = boxFor(positions, edge.to);
-    expect(
-      (column.get(edge.to) ?? 0) >= (column.get(edge.from) ?? 0),
-      `${edge.from} -> ${edge.to} decreases rank`,
-    ).toBe(true);
-    const { start, end } = endpoints(d);
-    expect(onBoundary(start, from), `${edge.from} -> ${edge.to} start off box`).toBe(
-      true,
-    );
-    expect(onBoundary(end, to), `${edge.from} -> ${edge.to} end off box`).toBe(true);
-  }
-
-  // Group bands: one per group, every member inside, columns consecutive,
-  // members consecutive within each column.
-  const bandOf = new Map(result.groupBands.map((band) => [band.group, band]));
-  expect([...bandOf.keys()].sort()).toEqual(groupNames(map).sort());
-
-  for (const group of groupNames(map)) {
-    const band = bandOf.get(group);
-    if (band === undefined) throw new Error(`no band for "${group}"`);
+  // Group containers: one per group, every member strictly inside, and no
+  // foreign card intruding.
+  const groupNames = [
+    ...new Set(map.graph.nodes.flatMap((node) => (node.group ? [node.group] : []))),
+  ];
+  expect(result.groupBands.map((band) => band.group).sort()).toEqual(
+    [...groupNames].sort(),
+  );
+  for (const band of result.groupBands) {
     const memberIds = map.graph.nodes
-      .filter((node) => node.group === group)
+      .filter((node) => node.group === band.group)
       .map((node) => node.id);
-
     for (const id of memberIds) {
       const box = boxFor(positions, id);
-      expect(box.x).toBeGreaterThanOrEqual(band.x);
-      expect(box.y).toBeGreaterThanOrEqual(band.y);
-      expect(box.x + box.w).toBeLessThanOrEqual(band.x + band.w);
-      expect(box.y + box.h).toBeLessThanOrEqual(band.y + band.h);
+      expect(box.x).toBeGreaterThan(band.x);
+      expect(box.y).toBeGreaterThan(band.y);
+      expect(box.x + box.w).toBeLessThan(band.x + band.w);
+      expect(box.y + box.h).toBeLessThan(band.y + band.h);
     }
-
-    // Occupied columns are a consecutive run.
-    const cols = [...new Set(memberIds.map((id) => column.get(id) ?? 0))].sort(
-      (p, q) => p - q,
-    );
-    expect(cols[cols.length - 1] - cols[0] + 1).toBe(cols.length);
-
-    // Within each occupied column the members sit in consecutive slots.
-    for (const c of cols) {
-      const colX = xForColumn(positions, c);
-      const ordered = [...positions.entries()]
-        .filter(([, box]) => box.x === colX)
-        .sort((p, q) => p[1].y - q[1].y)
-        .map(([id]) => id);
-      const slots = memberIds
-        .filter((id) => (column.get(id) ?? 0) === c)
-        .map((id) => ordered.indexOf(id))
-        .sort((p, q) => p - q);
-      expect(slots[slots.length - 1] - slots[0] + 1).toBe(slots.length);
+    for (const [id, box] of positions) {
+      if (memberIds.includes(id)) continue;
+      expect(overlaps(box, band), `${id} intrudes into "${band.group}"`).toBe(false);
     }
   }
+
+  return result;
 }
 
-/** The shared x of every node in a given column index. */
-function xForColumn(positions: ReadonlyMap<string, NodeBox>, c: number): number {
-  const xs = [...new Set([...positions.values()].map((box) => box.x))].sort(
-    (p, q) => p - q,
-  );
-  return xs[c];
-}
-
-describe("layout — fixture", () => {
-  it("holds every layout invariant", () => {
-    assertLayoutProperties(FIXTURE);
+describe("condense", () => {
+  it("folds models into chips on their callers", () => {
+    const { nodes, edges, chips } = condense(FIXTURE);
+    expect(nodes.map((node) => node.id)).not.toContain("m");
+    expect(edges.some((edge) => edge.to === "m")).toBe(false);
+    expect(chips.get("mid")).toEqual([{ label: "M", domain: "example.com" }]);
+    expect(chips.get("g3")).toEqual([{ label: "M", domain: "example.com" }]);
   });
 
-  it("ranks by longest path (the long edge doesn't shorten z's column)", () => {
-    const column = columnIndex(layout(FIXTURE).positions);
-    expect(column.get("a")).toBe(0);
-    expect(column.get("b")).toBe(0);
-    expect(column.get("z")).toBe(3);
-    expect(column.get("g3")).toBe(2);
-  });
-
-  it("keeps the group's members contiguous even beside an ungrouped node", () => {
-    const { positions } = layout(FIXTURE);
-    const column = columnIndex(positions);
-    const firstColMembers = ["g1", "g2"].filter((id) => (column.get(id) ?? 0) === 1);
-    const ordered = [...positions.entries()]
-      .filter(([id]) => (column.get(id) ?? 0) === 1)
-      .sort((p, q) => p[1].y - q[1].y)
-      .map(([id]) => id);
-    const slots = firstColMembers.map((id) => ordered.indexOf(id)).sort((p, q) => p - q);
-    expect(slots[slots.length - 1] - slots[0] + 1).toBe(slots.length);
-  });
-
-  it("throws on a cyclic graph", () => {
-    expect(() => layout(CYCLE)).toThrow(/cycle/);
+  it("folds the real map's three models into the expected cards", () => {
+    const { nodes, chips } = condense(CODEBASE_MAP);
+    expect(nodes).toHaveLength(23);
+    expect(nodes.some((node) => node.kind === "model")).toBe(false);
+    expect(chips.get("retrievers")?.map((chip) => chip.label)).toEqual([
+      "multilingual-e5-large",
+      "bge-reranker-v2-m3",
+    ]);
+    expect(chips.get("ingest")?.map((chip) => chip.label)).toEqual([
+      "multilingual-e5-large",
+    ]);
+    for (const id of ["condenser", "answerer", "contextualizer"]) {
+      expect(chips.get(id)?.map((chip) => chip.label)).toEqual([
+        "Qwythos-9B (llama.cpp)",
+      ]);
+    }
   });
 });
 
-describe("layout — real CODEBASE_MAP", () => {
-  it("holds every layout invariant", () => {
-    assertLayoutProperties(CODEBASE_MAP);
+describe("layoutGraph — fixture", () => {
+  it("holds every layout invariant", async () => {
+    await assertLayoutProperties(FIXTURE);
   });
 
-  it("draws every edge (none dropped as dangling)", () => {
-    const result = layout(CODEBASE_MAP);
-    expect(result.edgePaths).toHaveLength(CODEBASE_MAP.graph.edges.length);
+  it("sizes chip-carrying cards taller than plain ones", async () => {
+    const { positions } = await layoutGraph(FIXTURE);
+    expect(boxFor(positions, "mid").h).toBeGreaterThan(boxFor(positions, "a").h);
+  });
+});
+
+describe("layoutGraph — real CODEBASE_MAP", () => {
+  it("holds every layout invariant", async () => {
+    await assertLayoutProperties(CODEBASE_MAP);
   });
 
-  it("places every node exactly once", () => {
-    const result = layout(CODEBASE_MAP);
-    expect(result.positions.size).toBe(CODEBASE_MAP.graph.nodes.length);
+  it("draws the three group containers", async () => {
+    const result = await layoutGraph(CODEBASE_MAP);
+    expect(result.groupBands.map((band) => band.group).sort()).toEqual([
+      "Ingestion",
+      "Observability",
+      "Query path",
+    ]);
+  });
+
+  it("merges same-pair cross-group edges and keeps their origins", async () => {
+    const result = await layoutGraph(CODEBASE_MAP);
+    // api → Query path carries both api→condenser and api→qflow.
+    const merged = result.edges.find(
+      (edge) => edge.from === "api" && edge.orig.length > 1,
+    );
+    expect(merged).toBeDefined();
+  });
+});
+
+describe("precomputed layout snapshot", () => {
+  // The page renders the checked-in snapshot (instant hydration, no elkjs in
+  // the browser) — both guards below fail CI when the data changes without a
+  // regeneration. Regenerate with: bun run test -u
+
+  it("codebase-map.layout.json matches a live ELK run", async () => {
+    const live = serializeLayout(await layoutGraph(CODEBASE_MAP));
+    await expect(`${JSON.stringify(live, null, 2)}\n`).toMatchFileSnapshot(
+      "../codebase-map.layout.json",
+    );
+  });
+
+  it("the loader rehydrates exactly what ELK produces", async () => {
+    const live = JSON.parse(
+      JSON.stringify(serializeLayout(await layoutGraph(CODEBASE_MAP))),
+    );
+    expect(serializeLayout(precomputedLayout())).toEqual(live);
   });
 });

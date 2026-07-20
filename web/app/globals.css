@@ -445,3 +445,116 @@
     margin-block-end: 0;
   }
 }
+
+/* --- Codebase map (foglamp-style surface; components/map/*) ------------- */
+
+/* The map card shadow: light theme leans on borders + a soft drop, dark
+   theme on inset highlights + stacked drops (the foglamp treatment). */
+:root {
+  --map-card-shadow:
+    0 0 0 1px #0000000f, 0 1px 2px -1px #0000000f, 0 2px 4px 0 #0000000a;
+  --map-beam-sweep: rgba(0, 0, 0, 0.4);
+}
+.dark {
+  --map-card-shadow:
+    inset 0 1px 0 0 #ffffff08, inset 0 0 0 1px #ffffff08, 0 0 0 1px #0000001a,
+    0 2px 2px 0 #0000001a, 0 4px 4px 0 #0000001a, 0 8px 8px 0 #0000001a;
+  --map-beam-sweep: rgba(255, 255, 255, 0.75);
+}
+
+@property --map-beam-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: true;
+}
+
+@keyframes map-beam-spin {
+  to {
+    --map-beam-angle: 360deg;
+  }
+}
+
+/* The agent-card "beam": a static aurora ring with a slowly rotating sweep,
+   masked down to the 1px border. Reduced motion drops the spin (the sweep
+   freezes at its initial angle), keeping the static colored ring. */
+.map-beam {
+  position: relative;
+}
+.map-beam::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background:
+    conic-gradient(
+      from var(--map-beam-angle),
+      transparent 0% 54%,
+      color-mix(in oklab, var(--map-beam-sweep) 40%, transparent) 60%,
+      var(--map-beam-sweep) 66%,
+      color-mix(in oklab, var(--map-beam-sweep) 40%, transparent) 72%,
+      transparent 78% 100%
+    ),
+    radial-gradient(ellipse 70px 40px at 20% -8%, rgba(255, 80, 120, 0.55), transparent),
+    radial-gradient(ellipse 80px 40px at 85% 108%, rgba(90, 90, 255, 0.55), transparent),
+    radial-gradient(ellipse 60px 36px at 100% 10%, rgba(255, 140, 60, 0.5), transparent),
+    radial-gradient(ellipse 60px 40px at 0% 90%, rgba(60, 190, 130, 0.45), transparent);
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0.6;
+  pointer-events: none;
+  animation: map-beam-spin 6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .map-beam::after {
+    animation: none;
+  }
+}
+
+/* Entrance choreography for the map: cards spring in with a blur settle,
+   chrome fades in, edges draw themselves. All use `animation-fill-mode:
+   backwards` (set inline with the per-element delay) so elements hold their
+   hidden from-state during the stagger, then return to natural styles — a
+   later dim/spotlight class is never fought by a forwards fill. */
+@keyframes map-node-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.85);
+    filter: blur(6px);
+  }
+}
+@keyframes map-fade-enter {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes map-edge-draw {
+  from {
+    stroke-dashoffset: var(--map-edge-len);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.map-node-enter {
+  animation: map-node-enter 0.55s cubic-bezier(0.22, 1.2, 0.36, 1);
+}
+.map-fade-enter {
+  animation: map-fade-enter 0.5s ease-out;
+}
+.map-edge-draw {
+  animation: map-edge-draw 0.6s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .map-node-enter,
+  .map-fade-enter,
+  .map-edge-draw {
+    animation: none;
+  }
+}

@@ -4,195 +4,336 @@ import { FrameIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react";
 import { useCallback, useId, useMemo, useRef, useState } from "react";
 
 import { CODEBASE_MAP } from "@/lib/codebase-map.data";
-import type { MapEdge } from "@/lib/codebase-map";
-import { layout } from "@/lib/map-layout";
+import { precomputedLayout } from "@/lib/codebase-map.layout";
+import type { MapEdge, NodeKind } from "@/lib/codebase-map";
+import { arrowHead, edgePath, labelAnchor, polylineLength } from "@/lib/map-layout";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-import { KIND_META, MapNode } from "./MapNode";
+import { KIND_META, MapNodeCard } from "./MapNode";
 import { MapLegend } from "./MapLegend";
+import { MapSidePanel } from "./MapSidePanel";
 import { NodeDetail } from "./NodeDetail";
 
-/** Zoom clamps and step (spec_codebase_map.md §5.7: 0.4×–2.5×). */
-const MIN_SCALE = 0.4;
-const MAX_SCALE = 2.5;
-const ZOOM_STEP = 1.2;
-/** Trackpad/wheel zoom sensitivity per wheel delta unit. */
-const WHEEL_BASE = 1.0015;
+// Mixed from the OPAQUE background (never from --border, which carries alpha
+// in dark mode): translucent strokes stack where routes share a channel,
+// reading as doubled lines. Opaque same-color strokes overlap invisibly.
+const EDGE_STROKE =
+  "color-mix(in oklab, var(--background) 70%, var(--muted-foreground) 30%)";
 
-/** The pan/zoom of the inner drawing group, in the SVG's user coordinates. */
+const MIN_SCALE = 0.2;
+const MAX_SCALE = 3;
+const ZOOM_STEP = 1.2;
+/** Trackpad pinch sensitivity (ctrlKey+wheel). */
+const PINCH_BASE = 0.012;
+/** Space the fit keeps clear of the floating side panel on wide viewports. */
+const FIT_PAD_LEFT = 320;
+const FIT_PAD_RIGHT = 48;
+const FIT_PAD_Y = 56;
+/** Pointer travel below this is a click, not a pan. */
+const CLICK_SLOP = 4;
+
+// The traveling beams: a glowing comet occasionally runs an edge and "hits"
+// the target (flashing its ring). Sparse by design — one run, long rest.
+const BEAM_SPEED = 0.25; // px per ms — an unhurried glide
+const BEAM_TRAVEL_MIN_MS = 1600;
+const BEAM_TRAVEL_MAX_MS = 5000;
+const BEAM_REST_MS = 30000; // + up to 25s jitter between runs
+
 interface Transform {
   x: number;
   y: number;
-  scale: number;
+  k: number;
 }
 
-const IDENTITY: Transform = { x: 0, y: 0, scale: 1 };
-
-function clamp(value: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, value));
-}
+const clamp = (v: number, lo: number, hi: number): number =>
+  Math.min(hi, Math.max(lo, v));
 
 /**
- * Apply a zoom `factor` about a fixed user-space point, so the content under
- * that point stays put (cursor for wheel, view center for keys/buttons).
+ * A discrete traveling beam: a comet (bright leading edge, fading tail) that
+ * glides along the edge path via a WAAPI offset-path animation —
+ * compositor-friendly, so even the full map stays smooth. The animation loop
+ * lives in a cleanup-returning ref callback (the house `useEffect`-free
+ * pattern) and never starts under reduced motion.
  */
-function zoomAbout(prev: Transform, ux: number, uy: number, factor: number): Transform {
-  const scale = clamp(prev.scale * factor, MIN_SCALE, MAX_SCALE);
-  const applied = scale / prev.scale;
-  return {
-    scale,
-    x: ux - (ux - prev.x) * applied,
-    y: uy - (uy - prev.y) * applied,
-  };
-}
-
-/** Map a client (screen) point into the SVG's user coordinate system. */
-function clientToUser(
-  svg: SVGSVGElement,
-  clientX: number,
-  clientY: number,
-): { x: number; y: number } {
-  const ctm = svg.getScreenCTM();
-  if (!ctm) return { x: clientX, y: clientY };
-  const point = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
-  return { x: point.x, y: point.y };
+function BeamPulse({
+  d,
+  length,
+  color,
+  dimmed,
+  targetId,
+  onArrive,
+}: {
+  d: string;
+  length: number;
+  color: string;
+  dimmed: boolean;
+  /** The endpoint whose ring flashes when the comet lands. */
+  targetId: string;
+  /** Stable across renders — captured once by the animation loop. */
+  onArrive: (targetId: string, color: string) => void;
+}) {
+  const attach = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (!el || typeof el.animate !== "function") return;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+      let stopped = false;
+      let anim: Animation | null = null;
+      let timer: ReturnType<typeof setTimeout>;
+      const travelMs = clamp(length / BEAM_SPEED, BEAM_TRAVEL_MIN_MS, BEAM_TRAVEL_MAX_MS);
+      const run = (): void => {
+        if (stopped) return;
+        anim?.cancel(); // release the previous run's forward-fill
+        el.style.opacity = "1";
+        // fill: "forwards" holds the beam at the target while the 0.25s
+        // opacity fade plays — without it the beam snaps back to the path
+        // start and flashes there mid-fade.
+        anim = el.animate(
+          [{ offsetDistance: "0%" }, { offsetDistance: "100%" }],
+          { duration: travelMs, easing: "ease-in-out", fill: "forwards" },
+        );
+        anim.onfinish = () => {
+          el.style.opacity = "0";
+          if (stopped) return;
+          onArrive(targetId, color);
+          timer = setTimeout(run, BEAM_REST_MS + Math.random() * 25000);
+        };
+      };
+      timer = setTimeout(run, 1200 + Math.random() * BEAM_REST_MS);
+      return () => {
+        stopped = true;
+        clearTimeout(timer);
+        anim?.cancel();
+      };
+    },
+    [length, targetId, color, onArrive],
+  );
+  return (
+    <div className={cn("transition-opacity duration-300", dimmed && "opacity-15")}>
+      {/* A comet, not a dot: a pill rotated along the path (offsetRotate auto
+          keeps its x-axis on the travel direction). */}
+      <div
+        ref={attach}
+        className="pointer-events-none absolute top-0 left-0 h-[3px] w-8 rounded-full"
+        style={{
+          offsetPath: `path("${d}")`,
+          offsetRotate: "auto",
+          background: `linear-gradient(to right, transparent, ${color})`,
+          boxShadow: `0 0 10px ${color}66`,
+          opacity: 0,
+          transition: "opacity 0.25s ease",
+        }}
+      />
+    </div>
+  );
 }
 
 /**
- * The codebase map: a deterministic layered SVG of how Varagity fits together,
- * with pan, zoom-to-cursor, and click-to-trace of downstream flows
- * (spec_codebase_map.md §5.5–§5.8). Reachable from `/map`; the developer-mode
- * gating of its entry points arrives in a later phase.
+ * The codebase map: foglamp's flow-map treatment on the house tokens — ELK
+ * lays the cards and containers out (see lib/map-layout.ts), edges render as
+ * soft orthogonal runs with chevrons and traveling beam comets, and clicking
+ * a card spotlights its downstream flow with an anchored detail popover.
  *
- * No `useEffect` (the house rule): selection is `useState`, the layout and
- * adjacency are `useMemo` over a static import, pan/zoom live in event
- * handlers, and the one native listener — the non-passive `wheel`, needed
- * because React's synthetic `onWheel` is forcibly passive
- * (facebook/react#19654) — is attached in a cleanup-returning ref callback.
+ * No `useEffect` (the house rule): the layout is a synchronous import of the
+ * drift-guarded snapshot, pan/zoom write a ref's transform straight to the
+ * DOM in commit-phase ref callbacks (running it through React state
+ * re-rendered the whole graph every pointermove), and the two native
+ * listeners (non-passive `wheel`, the beams' WAAPI loops) attach in
+ * cleanup-returning ref callbacks.
  */
 export function CodebaseMapView() {
   const map = CODEBASE_MAP;
-  // The input never changes at runtime, so the whole layout is computed once.
-  const { positions, edgePaths, groupBands, bounds } = useMemo(() => layout(map), [map]);
+  // The checked-in, drift-guarded ELK snapshot — synchronous, so the map is
+  // interactive the moment it hydrates (no elkjs in the browser).
+  const layout = useMemo(() => precomputedLayout(), []);
+  const { nodes, foldedEdges, positions, groupBands, edges, chips, bounds } = layout;
 
-  const [transform, setTransform] = useState<Transform>(IDENTITY);
   const [selected, setSelected] = useState<string | null>(null);
-
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const panRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const [kindFocus, setKindFocus] = useState<NodeKind | null>(null);
 
   const reactId = useId();
   const hintId = `${reactId}-hint`;
-  const clipId = `${reactId}-clip`;
-  const arrowId = `${reactId}-arrow`;
-  const arrowActiveId = `${reactId}-arrow-active`;
 
-  const nodesById = useMemo(
-    () => new Map(map.graph.nodes.map((node) => [node.id, node])),
-    [map],
-  );
+  // ── Pan/zoom, imperatively ────────────────────────────────────────────────
+  const graphRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const viewportSize = useRef<{ w: number; h: number } | null>(null);
+  const tRef = useRef<Transform>({ x: 24, y: 24, k: 0.55 });
+  const tracedPosRef = useRef<{ x: number; y: number } | null>(null);
+  const fitted = useRef(false);
+  const drag = useRef<{
+    pointerId: number;
+    px: number;
+    py: number;
+    tx: number;
+    ty: number;
+    moved: boolean;
+  } | null>(null);
 
-  // from → its outgoing edges: drives both the trace closure and the SR mirror.
-  const edgesByFrom = useMemo(() => {
-    const out = new Map<string, MapEdge[]>();
-    for (const edge of map.graph.edges) {
-      const list = out.get(edge.from);
-      if (list) list.push(edge);
-      else out.set(edge.from, [edge]);
+  // `will-change: transform` is held only while a gesture is in flight — kept
+  // permanently, the browser caches one raster and zoom goes blurry.
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const applyTransform = useCallback(() => {
+    const t = tRef.current;
+    const g = graphRef.current;
+    if (g) {
+      g.style.willChange = "transform";
+      g.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
+      g.style.opacity = "1";
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+      idleTimer.current = setTimeout(() => {
+        g.style.willChange = "auto";
+      }, 150);
     }
-    return out;
-  }, [map]);
-
-  // The transitive-downstream closure of the selected node (it, plus every
-  // node any edge chain reaches). `null` when nothing is selected.
-  const reachable = useMemo<ReadonlySet<string> | null>(() => {
-    if (selected === null) return null;
-    const seen = new Set<string>([selected]);
-    const stack = [selected];
-    while (stack.length > 0) {
-      const id = stack.pop() as string;
-      for (const edge of edgesByFrom.get(id) ?? []) {
-        if (!seen.has(edge.to)) {
-          seen.add(edge.to);
-          stack.push(edge.to);
-        }
-      }
+    const pop = popoverRef.current;
+    const pos = tracedPosRef.current;
+    if (pop && pos) {
+      pop.style.left = `${t.x + pos.x * t.k}px`;
+      pop.style.top = `${t.y + pos.y * t.k}px`;
     }
-    return seen;
-  }, [selected, edgesByFrom]);
-
-  // One clip rect for every node (uniform box sizes) keeps long text inside.
-  const clip = useMemo(() => {
-    let w = 0;
-    let h = 0;
-    for (const box of positions.values()) {
-      w = Math.max(w, box.w);
-      h = Math.max(h, box.h);
-    }
-    return { w, h };
-  }, [positions]);
-
-  const toggleSelect = useCallback((id: string) => {
-    setSelected((prev) => (prev === id ? null : id));
   }, []);
 
   const zoomAboutCenter = useCallback(
     (factor: number) => {
-      setTransform((prev) => zoomAbout(prev, bounds.w / 2, bounds.h / 2, factor));
+      const size = viewportSize.current;
+      const cx = size ? size.w / 2 : 0;
+      const cy = size ? size.h / 2 : 0;
+      const prev = tRef.current;
+      const k = clamp(prev.k * factor, MIN_SCALE, MAX_SCALE);
+      const ratio = k / prev.k;
+      tRef.current = {
+        k,
+        x: cx - (cx - prev.x) * ratio,
+        y: cy - (cy - prev.y) * ratio,
+      };
+      applyTransform();
     },
-    [bounds.w, bounds.h],
+    [applyTransform],
   );
 
-  // Attach the non-passive wheel listener (and stash the element for pan's
-  // coordinate math) in a cleanup-returning ref callback. Idempotent so Strict
-  // Mode's attach → cleanup → attach cycle nets a single live listener.
-  const attachCanvas = useCallback((el: SVGSVGElement | null) => {
-    svgRef.current = el;
-    if (el === null) return;
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const point = clientToUser(el, event.clientX, event.clientY);
-      setTransform((prev) =>
-        zoomAbout(prev, point.x, point.y, Math.pow(WHEEL_BASE, -event.deltaY)),
-      );
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => {
-      el.removeEventListener("wheel", onWheel);
-      svgRef.current = null;
-    };
-  }, []);
+  // Fit the graph into the visible area (clear of the floating panel) once.
+  // Capped at 1 — upscaling blows the cards past native size. A graph too
+  // deep to fit readably instead fits its height and opens on the start of
+  // the flow, panning right through the story.
+  const fitToViewport = useCallback(
+    (el: HTMLDivElement) => {
+      const wide = el.clientWidth >= 900;
+      const padL = wide ? FIT_PAD_LEFT : 24;
+      const padR = wide ? FIT_PAD_RIGHT : 24;
+      const availW = Math.max(200, el.clientWidth - padL - padR);
+      const availH = Math.max(200, el.clientHeight - FIT_PAD_Y * 2);
+      const kFit = Math.min(availW / bounds.w, availH / bounds.h);
+      if (kFit >= 0.45) {
+        const k = clamp(kFit, 0.3, 1);
+        tRef.current = {
+          x: padL + (availW - bounds.w * k) / 2,
+          y: FIT_PAD_Y + (availH - bounds.h * k) / 2,
+          k,
+        };
+      } else {
+        const k = clamp((availH / bounds.h) * 0.9, 0.5, 0.8);
+        tRef.current = {
+          x: padL + 16,
+          y: FIT_PAD_Y + (availH - bounds.h * k) / 2,
+          k,
+        };
+      }
+      applyTransform();
+    },
+    [bounds.w, bounds.h, applyTransform],
+  );
 
-  function startPan(event: React.PointerEvent<SVGRectElement>) {
-    const svg = svgRef.current;
-    if (!svg) return;
-    const point = clientToUser(svg, event.clientX, event.clientY);
-    panRef.current = { pointerId: event.pointerId, x: point.x, y: point.y };
+  // Measure, fit once, and attach the non-passive wheel listener — all in a
+  // cleanup-returning ref callback (React's onWheel is forcibly passive).
+  // Idempotent under Strict Mode's attach → cleanup → attach cycle.
+  const attachViewport = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (el === null) return;
+      viewportSize.current = { w: el.clientWidth, h: el.clientHeight };
+      if (!fitted.current) {
+        fitted.current = true;
+        fitToViewport(el);
+      }
+      const onWheel = (event: WheelEvent) => {
+        event.preventDefault();
+        const prev = tRef.current;
+        if (event.ctrlKey) {
+          // Trackpad pinch arrives as ctrlKey+wheel — the gesture that zooms.
+          const rect = el.getBoundingClientRect();
+          const cx = event.clientX - rect.left;
+          const cy = event.clientY - rect.top;
+          const factor = Math.exp(-event.deltaY * PINCH_BASE);
+          const k = clamp(prev.k * factor, MIN_SCALE, MAX_SCALE);
+          const ratio = k / prev.k;
+          tRef.current = {
+            k,
+            x: cx - (cx - prev.x) * ratio,
+            y: cy - (cy - prev.y) * ratio,
+          };
+        } else {
+          // Two-finger scroll (either axis) pans the canvas.
+          tRef.current = {
+            ...prev,
+            x: prev.x - event.deltaX,
+            y: prev.y - event.deltaY,
+          };
+        }
+        applyTransform();
+      };
+      el.addEventListener("wheel", onWheel, { passive: false });
+      return () => {
+        el.removeEventListener("wheel", onWheel);
+      };
+    },
+    [fitToViewport, applyTransform],
+  );
+
+  function isCanvasTarget(target: EventTarget | null): boolean {
+    return !(
+      target instanceof Element && target.closest("button, [data-map-popover], a")
+    );
+  }
+
+  function startPan(event: React.PointerEvent<HTMLDivElement>) {
+    if (!isCanvasTarget(event.target)) return;
+    drag.current = {
+      pointerId: event.pointerId,
+      px: event.clientX,
+      py: event.clientY,
+      tx: tRef.current.x,
+      ty: tRef.current.y,
+      moved: false,
+    };
     event.currentTarget.setPointerCapture(event.pointerId);
   }
-
-  function movePan(event: React.PointerEvent<SVGRectElement>) {
-    const pan = panRef.current;
-    const svg = svgRef.current;
-    if (!pan || !svg || pan.pointerId !== event.pointerId) return;
-    const point = clientToUser(svg, event.clientX, event.clientY);
-    const dx = point.x - pan.x;
-    const dy = point.y - pan.y;
-    pan.x = point.x;
-    pan.y = point.y;
-    setTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+  function movePan(event: React.PointerEvent<HTMLDivElement>) {
+    const d = drag.current;
+    if (!d || d.pointerId !== event.pointerId) return;
+    if (Math.hypot(event.clientX - d.px, event.clientY - d.py) > CLICK_SLOP) {
+      d.moved = true;
+    }
+    if (!d.moved) return;
+    tRef.current = {
+      ...tRef.current,
+      x: d.tx + (event.clientX - d.px),
+      y: d.ty + (event.clientY - d.py),
+    };
+    applyTransform();
   }
-
-  function endPan(event: React.PointerEvent<SVGRectElement>) {
-    if (panRef.current?.pointerId === event.pointerId) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-      panRef.current = null;
+  function endPan(event: React.PointerEvent<HTMLDivElement>) {
+    const d = drag.current;
+    if (d?.pointerId !== event.pointerId) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    const wasDrag = d.moved;
+    drag.current = null;
+    // A stationary click on the background clears the spotlight.
+    if (!wasDrag && isCanvasTarget(event.target) && selected !== null) {
+      setSelected(null);
     }
   }
 
-  // Zoom keys and Escape bubble up from the focused node or button.
-  function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+  // Zoom keys and Escape bubble up from the focused card or button.
+  function onKeyDown(event: React.KeyboardEvent<HTMLElement>) {
     switch (event.key) {
       case "Escape":
         if (selected !== null) setSelected(null);
@@ -207,185 +348,315 @@ export function CodebaseMapView() {
         zoomAboutCenter(1 / ZOOM_STEP);
         event.preventDefault();
         break;
-      case "0":
-        setTransform(IDENTITY);
+      case "0": {
+        fitted.current = false;
+        const viewport = graphRef.current?.parentElement;
+        if (viewport instanceof HTMLDivElement) {
+          fitted.current = true;
+          fitToViewport(viewport);
+        }
         event.preventDefault();
         break;
+      }
       default:
         break;
     }
   }
 
+  const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+
+  // Trace: clicking a card lights its full downstream path (BFS along the
+  // folded edges) and opens the detail popover.
+  const trace = useMemo(() => {
+    if (selected === null) return null;
+    const inTrace = new Set<string>([selected]);
+    const edgeSet = new Set<number>();
+    const queue = [selected];
+    while (queue.length > 0) {
+      const cur = queue.shift() as string;
+      foldedEdges.forEach((e, i) => {
+        if (e.from !== cur) return;
+        edgeSet.add(i);
+        if (!inTrace.has(e.to)) {
+          inTrace.add(e.to);
+          queue.push(e.to);
+        }
+      });
+    }
+    return { nodes: inTrace, edges: edgeSet };
+  }, [selected, foldedEdges]);
+
+  const nodeActive = (id: string, kind: NodeKind): boolean =>
+    (kindFocus === null || kind === kindFocus) &&
+    (trace === null || trace.nodes.has(id));
+  const edgeActive = (e: { orig: number[] }): boolean =>
+    (kindFocus === null ||
+      e.orig.some((i) => {
+        const o = foldedEdges[i];
+        return (
+          nodesById.get(o.from)?.kind === kindFocus ||
+          nodesById.get(o.to)?.kind === kindFocus
+        );
+      })) &&
+    (trace === null || e.orig.some((i) => trace.edges.has(i)));
+
+  // Beam-hit rings: one overlay per node/group, flashed imperatively when a
+  // beam arrives (refs, not state — a flash shouldn't re-render the graph).
+  const hitRings = useRef(new Map<string, HTMLElement>());
+  const hitTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const registerHitRing = (id: string) => (el: HTMLElement | null) => {
+    if (el) hitRings.current.set(id, el);
+    else hitRings.current.delete(id);
+  };
+  const flashTarget = useCallback((id: string, color: string) => {
+    const el = hitRings.current.get(id);
+    if (!el) return;
+    el.style.borderColor = color;
+    el.style.opacity = "0.55"; // soft glow, not a hard outline
+    const prev = hitTimers.current.get(id);
+    if (prev) clearTimeout(prev);
+    hitTimers.current.set(
+      id,
+      setTimeout(() => {
+        el.style.opacity = "0";
+      }, 600),
+    );
+  }, []);
+
+  // Entrance choreography: things appear along the flow direction.
+  const delayAt = (x: number, y = 0): number =>
+    0.15 + ((x + y) / Math.max(1, bounds.w + bounds.h)) * 0.9;
+  const xOf = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const [id, box] of positions) m.set(id, box.x);
+    for (const g of groupBands) m.set(g.id, g.x);
+    return m;
+  }, [positions, groupBands]);
+
   const selectedNode = selected === null ? null : (nodesById.get(selected) ?? null);
+  const selectedBox = selected === null ? undefined : positions.get(selected);
+
+  // The graph's transform is never rendered by React — it is applied in this
+  // commit-phase ref callback and re-applied imperatively on every gesture,
+  // so a pan/zoom frame never re-renders the graph.
+  const attachGraph = useCallback(
+    (el: HTMLDivElement | null) => {
+      graphRef.current = el;
+      if (el) applyTransform();
+    },
+    [applyTransform],
+  );
+
+  // Same deal for the popover: anchored under its card at mount (the wrapper
+  // is keyed by node id, so a new selection re-runs this), then kept glued by
+  // applyTransform() while panning/zooming.
+  const attachPopover = useCallback(
+    (el: HTMLDivElement | null) => {
+      popoverRef.current = el;
+      if (el === null) {
+        tracedPosRef.current = null;
+        return;
+      }
+      const box = el.dataset.anchor ? JSON.parse(el.dataset.anchor) : null;
+      if (box) {
+        tracedPosRef.current = { x: box.x, y: box.y + box.h + 10 };
+        const t = tRef.current;
+        el.style.left = `${t.x + tracedPosRef.current.x * t.k}px`;
+        el.style.top = `${t.y + tracedPosRef.current.y * t.k}px`;
+      }
+    },
+    [],
+  );
+
   const labelOf = (id: string): string => nodesById.get(id)?.label ?? id;
 
   return (
-    <div
-      className="relative min-h-0 flex-1 overflow-hidden bg-background"
+    <section
+      aria-label="Codebase map"
+      aria-describedby={hintId}
       onKeyDown={onKeyDown}
+      className="relative min-h-0 flex-1 overflow-hidden"
     >
-      <svg
-        ref={attachCanvas}
-        role="application"
-        aria-label="Codebase map"
-        aria-describedby={hintId}
-        viewBox={`0 0 ${bounds.w} ${bounds.h}`}
-        preserveAspectRatio="xMidYMid meet"
-        className="h-full w-full touch-none select-none"
+      <div
+        ref={attachViewport}
+        onPointerDown={startPan}
+        onPointerMove={movePan}
+        onPointerUp={endPan}
+        onPointerCancel={endPan}
+        className={cn(
+          "absolute inset-0 cursor-grab touch-none overflow-hidden select-none active:cursor-grabbing",
+          // The faint grid backdrop of the reference design.
+          "bg-[linear-gradient(color-mix(in_oklab,var(--border)_45%,transparent)_1px,transparent_1px),linear-gradient(90deg,color-mix(in_oklab,var(--border)_45%,transparent)_1px,transparent_1px)] bg-size-[56px_56px] bg-center",
+          "dark:bg-[linear-gradient(color-mix(in_oklab,var(--border)_10%,transparent)_1px,transparent_1px),linear-gradient(90deg,color-mix(in_oklab,var(--border)_10%,transparent)_1px,transparent_1px)]",
+        )}
       >
-        <defs>
-          <clipPath id={clipId}>
-            <rect width={clip.w} height={clip.h} />
-          </clipPath>
-          <marker
-            id={arrowId}
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerWidth="7"
-            markerHeight="7"
-            orient="auto-start-reverse"
-          >
-            <path d="M 0 1 L 9 5 L 0 9 z" className="fill-foreground/40" />
-          </marker>
-          <marker
-            id={arrowActiveId}
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerWidth="7"
-            markerHeight="7"
-            orient="auto-start-reverse"
-          >
-            <path d="M 0 1 L 9 5 L 0 9 z" className="fill-primary" />
-          </marker>
-        </defs>
-
-        {/* Full-viewBox background: catches pan gestures at any zoom. */}
-        <rect
-          x={0}
-          y={0}
-          width={bounds.w}
-          height={bounds.h}
-          fill="transparent"
-          className="cursor-grab active:cursor-grabbing"
-          onPointerDown={startPan}
-          onPointerMove={movePan}
-          onPointerUp={endPan}
-          onPointerCancel={endPan}
-        />
-
-        <g
-          transform={`translate(${transform.x} ${transform.y}) scale(${transform.scale})`}
+        <div
+          ref={attachGraph}
+          className="absolute top-0 left-0 origin-top-left"
+          style={{ width: bounds.w, height: bounds.h, opacity: 0 }}
         >
-          {/* Group bands, drawn behind their members. */}
+          {/* Group containers — labeled vertical stacks. */}
           {groupBands.map((band) => (
-            <g key={band.group}>
-              <rect
-                x={band.x}
-                y={band.y}
-                width={band.w}
-                height={band.h}
-                rx={16}
-                strokeDasharray="4 5"
-                className="fill-muted/25 stroke-border"
-                strokeWidth={1}
-              />
-              <text
-                x={band.x + 16}
-                y={band.y + 18}
-                className="fill-muted-foreground text-[11px] font-medium tracking-wide uppercase"
-              >
+            <div
+              key={band.id}
+              style={{
+                left: band.x,
+                top: band.y,
+                width: band.w,
+                height: band.h,
+                animationDelay: `${delayAt(band.x)}s`,
+                animationFillMode: "backwards",
+              }}
+              className="map-fade-enter absolute rounded-[32px] border border-border/60 bg-card/60 [box-shadow:var(--map-card-shadow)] dark:border-transparent dark:bg-card/50"
+            >
+              <span className="absolute top-4 left-4 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
                 {band.group}
-              </text>
-            </g>
+              </span>
+              <div
+                ref={registerHitRing(band.id)}
+                className="pointer-events-none absolute inset-0 rounded-[32px] border opacity-0 transition-[opacity,border-color] duration-500"
+                style={{ borderColor: "transparent" }}
+              />
+            </div>
           ))}
 
-          {/* Edges. On trace, downstream edges brighten and reveal their kind. */}
-          {edgePaths.map(({ edge, d }, index) => {
-            const active = reachable !== null && reachable.has(edge.from);
-            const dim = reachable !== null && !active;
-            const from = positions.get(edge.from);
-            const to = positions.get(edge.to);
-            const mx = from && to ? (from.x + from.w + to.x) / 2 : 0;
-            const my =
-              from && to ? (from.y + from.h / 2 + to.y + to.h / 2) / 2 : 0;
-            const chipWidth = (edge.kind?.length ?? 1) * 6 + 12;
-            return (
-              <g
-                key={index}
-                className={cn(
-                  "motion-safe:transition-opacity motion-safe:duration-300",
-                  dim ? "opacity-15" : "opacity-100",
-                )}
-              >
-                <path
-                  d={d}
-                  fill="none"
-                  markerEnd={`url(#${active ? arrowActiveId : arrowId})`}
+          {/* Edges: soft orthogonal runs, drawing themselves in. */}
+          <svg
+            aria-hidden
+            width={bounds.w}
+            height={bounds.h}
+            className="pointer-events-none absolute inset-0 overflow-visible"
+          >
+            {edges.map((e, i) => {
+              const d = edgePath(e.points);
+              const length = polylineLength(e.points);
+              const delay = delayAt(xOf.get(e.from) ?? 0) + 0.25;
+              return (
+                <g
+                  key={i}
                   className={cn(
-                    active
-                      ? "stroke-primary stroke-[1.75]"
-                      : "stroke-muted-foreground/45 stroke-[1.25]",
+                    "transition-opacity duration-300",
+                    edgeActive(e) ? "opacity-100" : "opacity-15",
                   )}
-                />
-                {active && edge.kind ? (
-                  <g
-                    transform={`translate(${mx} ${my})`}
-                    className="pointer-events-none motion-safe:animate-in motion-safe:fade-in motion-safe:duration-300"
-                  >
-                    <rect
-                      x={-chipWidth / 2}
-                      y={-8}
-                      width={chipWidth}
-                      height={16}
-                      rx={5}
-                      className="fill-popover stroke-border"
-                      strokeWidth={1}
-                    />
-                    <text
-                      textAnchor="middle"
-                      y={4}
-                      className="fill-muted-foreground font-mono text-[9px]"
-                    >
-                      {edge.kind}
-                    </text>
-                  </g>
-                ) : null}
-              </g>
+                >
+                  <path
+                    d={d}
+                    fill="none"
+                    stroke={EDGE_STROKE}
+                    strokeWidth={1.4}
+                    strokeLinecap="round"
+                    className="map-edge-draw"
+                    style={{
+                      strokeDasharray: length,
+                      ["--map-edge-len" as string]: `${length}`,
+                      animationDelay: `${delay}s`,
+                      animationFillMode: "backwards",
+                    }}
+                  />
+                  <path
+                    d={arrowHead(e.points)}
+                    fill="none"
+                    stroke={EDGE_STROKE}
+                    strokeWidth={1.4}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="map-fade-enter"
+                    style={{
+                      animationDelay: `${delay + 0.5}s`,
+                      animationFillMode: "backwards",
+                    }}
+                  />
+                </g>
+              );
+            })}
+          </svg>
+
+          {/* Discrete traveling beams — one per edge, sparse and staggered. */}
+          {edges.map((e, i) => {
+            const sourceKind = nodesById.get(foldedEdges[e.orig[0]].from)?.kind ?? "entry";
+            return (
+              <BeamPulse
+                key={`b${i}`}
+                d={edgePath(e.points)}
+                length={polylineLength(e.points)}
+                color={KIND_META[sourceKind].hex}
+                dimmed={!edgeActive(e)}
+                targetId={e.to}
+                onArrive={flashTarget}
+              />
             );
           })}
 
-          {/* Nodes, in declaration (reading) order so Tab follows the story. */}
-          {map.graph.nodes.map((node) => {
+          {/* Edge labels. Explicit labels always show, where ELK reserved
+              room for them; kind-only labels ("reads", "writes") are
+              boilerplate that piles up in shared channels, so they surface
+              only while the edge is part of a traced flow. */}
+          {edges.map((e, i) => {
+            const kindLabel = e.orig
+              .map((oi) => foldedEdges[oi].kind)
+              .find(Boolean);
+            const text = e.label ?? kindLabel;
+            if (!text) return null;
+            const kindOnly = !e.label;
+            const inTrace = trace !== null && e.orig.some((oi) => trace.edges.has(oi));
+            if (kindOnly && !inTrace) return null;
+            const mid = e.labelPos ?? labelAnchor(e.points);
+            if (!mid) return null;
+            return (
+              <span
+                key={`l${i}${kindOnly ? "k" : ""}`}
+                className={cn(
+                  "map-fade-enter absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-background px-2 py-0.5 whitespace-nowrap",
+                  "pointer-events-none text-xs text-muted-foreground/80 transition-opacity duration-300",
+                  !edgeActive(e) && "opacity-15",
+                )}
+                style={{
+                  left: mid.x,
+                  top: mid.y,
+                  animationDelay: kindOnly
+                    ? "0s"
+                    : `${delayAt(xOf.get(e.from) ?? 0) + 0.6}s`,
+                  animationFillMode: "backwards",
+                }}
+              >
+                {text}
+              </span>
+            );
+          })}
+
+          {/* Node cards, in data (reading) order so Tab follows the story. */}
+          {nodes.map((node) => {
             const box = positions.get(node.id);
             if (!box) return null;
             return (
-              <MapNode
+              <MapNodeCard
                 key={node.id}
                 node={node}
                 box={box}
-                clipId={clipId}
+                chips={chips.get(node.id)}
                 selected={selected === node.id}
-                dimmed={reachable !== null && !reachable.has(node.id)}
-                onSelect={toggleSelect}
+                dimmed={!nodeActive(node.id, node.kind)}
+                enterDelay={delayAt(box.x, box.y)}
+                hitRingRef={registerHitRing(node.id)}
+                onSelect={(id) => setSelected((prev) => (prev === id ? null : id))}
               />
             );
           })}
-        </g>
-      </svg>
+        </div>
+      </div>
 
-      {/* Usage hint the SVG's aria-describedby points at. */}
+      {/* Usage hint the section's aria-describedby points at. */}
       <p id={hintId} className="sr-only">
-        Interactive diagram. Tab to reach a node; Enter or Space traces its
-        downstream flow; Escape clears; plus, minus, and zero zoom. A text
-        equivalent of every node and its connections follows.
+        Interactive architecture map. Tab reaches each component; Enter or
+        Space spotlights its downstream flow and opens its details; Escape
+        clears; plus, minus, and zero zoom. A text list of every connection
+        follows the map.
       </p>
 
-      {/* Browse-mode text equivalent (not aria-hidden; no focusables). */}
+      {/* Browse-mode text equivalent of the full graph (models included). */}
       <ul className="sr-only">
         {map.graph.nodes.map((node) => {
-          const outs = edgesByFrom.get(node.id) ?? [];
+          const outs = map.graph.edges.filter((edge) => edge.from === node.id);
           return (
             <li key={node.id}>
               {node.label} ({KIND_META[node.kind].label})
@@ -393,7 +664,7 @@ export function CodebaseMapView() {
               {outs.length > 0
                 ? ` Connects to ${outs
                     .map(
-                      (edge) =>
+                      (edge: MapEdge) =>
                         `${labelOf(edge.to)}${edge.label ? ` (${edge.label})` : ""}`,
                     )
                     .join(", ")}.`
@@ -403,45 +674,55 @@ export function CodebaseMapView() {
         })}
       </ul>
 
-      <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4">
-        <div className="flex items-start justify-between gap-4">
-          <MapLegend project={map.project} />
-          {selectedNode ? (
-            <NodeDetail
-              node={selectedNode}
-              map={map}
-              onClose={() => setSelected(null)}
-            />
-          ) : null}
-        </div>
+      <MapSidePanel map={map} />
+      <MapLegend onKindFocus={setKindFocus} />
 
-        <div className="pointer-events-auto flex w-fit items-center gap-1 rounded-lg border border-border bg-card/90 p-1 shadow-sm backdrop-blur-sm">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Zoom in"
-            onClick={() => zoomAboutCenter(ZOOM_STEP)}
-          >
-            <ZoomInIcon />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Zoom out"
-            onClick={() => zoomAboutCenter(1 / ZOOM_STEP)}
-          >
-            <ZoomOutIcon />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Reset view"
-            onClick={() => setTransform(IDENTITY)}
-          >
-            <FrameIcon />
-          </Button>
+      {/* Detail popover for the spotlit card — positioned in screen space
+          (outside the pan/zoom transform) so it stays readable at any zoom;
+          applyTransform() keeps it glued to its card while panning. */}
+      {selectedNode && selectedBox ? (
+        <div
+          key={selectedNode.id}
+          ref={attachPopover}
+          data-anchor={JSON.stringify(selectedBox)}
+          className="absolute"
+        >
+          <NodeDetail node={selectedNode} left={0} top={0} />
         </div>
+      ) : null}
+
+      <div className="pointer-events-auto absolute right-4 bottom-4 z-20 flex items-center gap-1 rounded-full bg-card/70 p-1 backdrop-blur-md [box-shadow:var(--map-card-shadow)]">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Zoom in"
+          className="rounded-full"
+          onClick={() => zoomAboutCenter(ZOOM_STEP)}
+        >
+          <ZoomInIcon />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Zoom out"
+          className="rounded-full"
+          onClick={() => zoomAboutCenter(1 / ZOOM_STEP)}
+        >
+          <ZoomOutIcon />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Reset view"
+          className="rounded-full"
+          onClick={() => {
+            const viewport = graphRef.current?.parentElement;
+            if (viewport instanceof HTMLDivElement) fitToViewport(viewport);
+          }}
+        >
+          <FrameIcon />
+        </Button>
       </div>
-    </div>
+    </section>
   );
 }

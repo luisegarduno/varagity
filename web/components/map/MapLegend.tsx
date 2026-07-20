@@ -1,63 +1,51 @@
 /**
- * The map legend: the project summary header plus a kind → shape key
- * (spec_codebase_map.md §5.5 / §5.8). Each swatch reuses {@link NodeShape},
- * so "what an X looks like" is drawn in exactly one place.
+ * The map's legend: the frosted pill bar along the bottom edge, one entry per
+ * rendered kind (foglamp's treatment). Hovering or focusing an entry
+ * spotlights that kind on the canvas — the view passes the highlight state
+ * back down as per-node dimming.
  */
 
-import type { CodebaseMap, NodeKind } from "@/lib/codebase-map";
+"use client";
 
-import { KIND_META, NodeShape } from "./MapNode";
+import type { NodeKind } from "@/lib/codebase-map";
+import { cn } from "@/lib/utils";
 
-const KIND_ORDER: NodeKind[] = [
-  "entry",
-  "agent",
-  "model",
-  "tool",
-  "service",
-  "store",
-  "external",
-];
+import { Glyph, KIND_META } from "./MapNode";
 
-/** A tiny, non-interactive swatch of a kind's shape for the key. */
-function Swatch({ kind }: { kind: NodeKind }) {
+/** The kinds that render as cards, in legend order (models fold into chips). */
+const LEGEND_KINDS: NodeKind[] = ["entry", "agent", "service", "store", "external"];
+
+/** The legend bar, absolutely positioned over the canvas by the view. */
+export function MapLegend({
+  onKindFocus,
+}: {
+  /** Called with a kind to spotlight, or `null` to clear. */
+  onKindFocus: (kind: NodeKind | null) => void;
+}) {
   return (
-    <svg
-      viewBox="-8 -8 76 56"
-      width={34}
-      height={24}
-      aria-hidden
-      className="shrink-0"
-    >
-      <NodeShape kind={kind} w={60} h={40} />
-    </svg>
-  );
-}
-
-/** The legend card, absolutely positioned over the canvas by the view. */
-export function MapLegend({ project }: { project: CodebaseMap["project"] }) {
-  return (
-    <div className="pointer-events-auto max-w-72 rounded-xl border border-border bg-card/90 p-3.5 text-card-foreground shadow-sm backdrop-blur-sm">
-      <h1 className="font-heading text-lg leading-tight font-normal">
-        {project.name} · codebase map
-      </h1>
-      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-        {project.summary}
-      </p>
-      <ul className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5">
-        {KIND_ORDER.map((kind) => (
-          <li key={kind} className="flex items-center gap-2">
-            <Swatch kind={kind} />
-            <span className="min-w-0 text-[11px]">
-              <span className="block truncate font-medium">
-                {KIND_META[kind].label}
-              </span>
-              <span className="block truncate text-muted-foreground">
-                {KIND_META[kind].treatment}
-              </span>
-            </span>
-          </li>
-        ))}
-      </ul>
+    <div className="pointer-events-auto absolute bottom-4 left-1/2 z-20 hidden -translate-x-1/2 items-center gap-4 rounded-full bg-card/70 px-5 py-2.5 backdrop-blur-md [box-shadow:var(--map-card-shadow)] sm:flex">
+      {LEGEND_KINDS.map((kind) => {
+        const meta = KIND_META[kind];
+        return (
+          <button
+            key={kind}
+            type="button"
+            aria-label={`Highlight ${meta.plural.toLowerCase()}`}
+            onMouseEnter={() => onKindFocus(kind)}
+            onMouseLeave={() => onKindFocus(null)}
+            onFocus={() => onKindFocus(kind)}
+            onBlur={() => onKindFocus(null)}
+            className={cn(
+              "flex cursor-default items-center gap-1.5 text-[10px] font-medium tracking-wider uppercase",
+              "text-muted-foreground/70 outline-none hover:text-foreground focus-visible:text-foreground",
+              "motion-safe:transition-colors",
+            )}
+          >
+            <Glyph name={meta.glyph} className={cn("size-3.5", meta.tint)} />
+            {meta.plural}
+          </button>
+        );
+      })}
     </div>
   );
 }
