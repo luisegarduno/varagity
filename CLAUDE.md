@@ -49,7 +49,8 @@ over the same Prefect flows:
    (`RETRIEVAL_METHOD=reranked`). Host port binding is interface-specific
    (`192.168.86.21:8081`).
 3. **postgres** (`:5432`) — pgvector; canonical chunk metadata + dense vectors, plus
-   conversation persistence (`conversations`/`messages`/`message_sources`).
+   conversation persistence (`conversations`/`messages`/`message_sources`, plus
+   `conversation_groups` — the sidebar's folders).
    `varagity/stores/schema.sql` runs on first boot only (`docker compose down -v` resets);
    `varagity/stores/migrations/*.sql` reconcile existing volumes (idempotent runner on API
    startup).

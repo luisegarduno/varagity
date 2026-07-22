@@ -17,6 +17,7 @@ export type ChatRequest = Schemas["ChatRequest"];
 export type ChatOverrides = Schemas["ChatOverrides"];
 export type ConversationSummary = Schemas["ConversationSummaryOut"];
 export type ConversationDetail = Schemas["ConversationDetailOut"];
+export type GroupOut = Schemas["GroupOut"];
 export type ChatMessage = Schemas["MessageOut"];
 export type RetrievalEvent = Schemas["RetrievalEvent"];
 export type RetrievedChunk = Schemas["RetrievedChunk"];
@@ -117,6 +118,37 @@ export function getConversation(id: string): Promise<ConversationDetail> {
 export function deleteConversation(id: string): Promise<void> {
   return request(`/api/conversations/${encodeURIComponent(id)}`, {
     method: "DELETE",
+  });
+}
+
+/** List the sidebar conversation groups, name order. */
+export function listGroups(): Promise<GroupOut[]> {
+  return request("/api/groups");
+}
+
+/** Create a conversation group (a sidebar folder). */
+export function createGroup(name: string): Promise<GroupOut> {
+  return request("/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** Delete a group; its conversations survive, ungrouped. */
+export function deleteGroup(id: string): Promise<void> {
+  return request(`/api/groups/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+/** File a conversation under a group (`null` ungroups it). */
+export function setConversationGroup(
+  conversationId: string,
+  groupId: string | null,
+): Promise<void> {
+  return request(`/api/conversations/${encodeURIComponent(conversationId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ group_id: groupId }),
   });
 }
 

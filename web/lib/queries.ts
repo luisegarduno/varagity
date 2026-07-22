@@ -22,6 +22,7 @@ import {
   getSettings,
   listConversations,
   listDocuments,
+  listGroups,
   locatePreview,
 } from "@/lib/api";
 
@@ -34,6 +35,8 @@ export const queryKeys = {
   conversations: ["conversations", "list"] as const,
   /** One conversation's transcript. */
   conversation: (id: string) => ["conversations", "detail", id] as const,
+  /** The sidebar's conversation groups (folders). */
+  groups: ["groups"] as const,
   config: ["config"] as const,
   settings: ["settings"] as const,
   documents: ["documents"] as const,
@@ -55,6 +58,14 @@ export function conversationQuery(id: string) {
   return queryOptions({
     queryKey: queryKeys.conversation(id),
     queryFn: () => getConversation(id),
+  });
+}
+
+/** The sidebar's conversation groups, name order (the folder list). */
+export function groupsQuery() {
+  return queryOptions({
+    queryKey: queryKeys.groups,
+    queryFn: () => listGroups(),
   });
 }
 

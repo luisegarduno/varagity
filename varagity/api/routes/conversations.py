@@ -10,10 +10,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from varagity.api.deps import get_conversation_store
+from varagity.api.routes.groups import group_not_found
 from varagity.api.schemas import (
     ConversationCreateRequest,
     ConversationDetailOut,
     ConversationSummaryOut,
+    ConversationUpdateRequest,
 )
 from varagity.stores.conversation_store import ConversationStore
 
@@ -90,6 +92,34 @@ def get_conversation(conversation_id: str, store: StoreDep) -> ConversationDetai
     if detail is None:
         raise _not_found(conversation_id)
     return ConversationDetailOut(**detail.model_dump())
+
+
+@router.patch("/api/conversations/{conversation_id}", status_code=204)
+def update_conversation(
+    conversation_id: str, payload: ConversationUpdateRequest, store: StoreDep
+) -> Response:
+    """Move a conversation into a sidebar group, or out of one.
+
+    Deliberately not a re-order: the move never bumps ``updated_at``, so
+    the recency-sorted list keeps its order.
+
+    Args:
+        conversation_id: The conversation to move.
+        payload: The target group (``group_id: null`` ungroups).
+        store: The per-request conversation store.
+
+    Returns:
+        An empty ``204`` response.
+
+    Raises:
+        HTTPException: ``404 group_not_found`` for an unknown target group;
+            ``404 conversation_not_found`` for an unknown conversation.
+    """
+    if payload.group_id is not None and not store.group_exists(payload.group_id):
+        raise group_not_found(payload.group_id)
+    if store.set_conversation_group(conversation_id, payload.group_id) == 0:
+        raise _not_found(conversation_id)
+    return Response(status_code=204)
 
 
 @router.delete("/api/conversations/{conversation_id}", status_code=204)

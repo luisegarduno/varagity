@@ -32,13 +32,14 @@ from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
 pytestmark = pytest.mark.integration
 
-CONVERSATION_TABLES = ("conversations", "messages", "message_sources")
+CONVERSATION_TABLES = ("conversations", "messages", "message_sources", "conversation_groups")
 
 ALL_MIGRATIONS = [
     "001_conversations.sql",
     "002_app_settings.sql",
     "003_condensed_query.sql",
     "004_message_engine.sql",
+    "005_conversation_groups.sql",
 ]
 
 
@@ -54,7 +55,7 @@ def migrated_conninfo(pg_conninfo: str) -> str:
     """The container database with migrations applied and tables truncated."""
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         run_migrations(conn)
-        conn.execute("TRUNCATE conversations CASCADE")
+        conn.execute("TRUNCATE conversations, conversation_groups CASCADE")
     return pg_conninfo
 
 
@@ -77,7 +78,7 @@ def _message_columns(conn: psycopg.Connection) -> dict[str, tuple[str, str]]:
 def _drop_migrated_state(conn: psycopg.Connection) -> None:
     conn.execute(
         "DROP TABLE IF EXISTS message_sources, messages, conversations, "
-        "app_settings, schema_migrations CASCADE"
+        "conversation_groups, app_settings, schema_migrations CASCADE"
     )
 
 
@@ -285,6 +286,37 @@ class TestConversationStoreRoundTrip:
             detail = store.get_conversation(created.conversation_id)
             assert detail is not None
             assert detail.updated_at >= created.updated_at
+
+    def test_group_round_trip_and_detach_on_delete(self, migrated_conninfo: str) -> None:
+        """Migration 005's contract: grouping is organization, never ownership."""
+        with ConversationStore(migrated_conninfo) as store:
+            created = store.create_conversation()
+            assert store.list_conversations()[0].group_id is None  # ungrouped by default
+
+            grp = store.create_group("Research")
+            assert store.group_exists(grp.group_id)
+            assert [g.group_id for g in store.list_groups()] == [grp.group_id]
+
+            assert store.set_conversation_group(created.conversation_id, grp.group_id) == 1
+            assert store.list_conversations()[0].group_id == grp.group_id
+
+            # The FK is the backstop behind the route's group_exists check.
+            with pytest.raises(psycopg.errors.ForeignKeyViolation):
+                store.set_conversation_group(created.conversation_id, "ghost")
+
+            # Deleting the group detaches its conversations (SET NULL) —
+            # the conversation and its history survive.
+            assert store.delete_group(grp.group_id) == 1
+            assert store.list_groups() == []
+            summaries = store.list_conversations()
+            assert summaries[0].conversation_id == created.conversation_id
+            assert summaries[0].group_id is None
+
+    def test_groups_order_case_folded_by_name(self, migrated_conninfo: str) -> None:
+        with ConversationStore(migrated_conninfo) as store:
+            for name in ("zebra", "Alpha", "beta"):
+                store.create_group(name)
+            assert [g.name for g in store.list_groups()] == ["Alpha", "beta", "zebra"]
 
 
 @pytest.fixture(scope="module")

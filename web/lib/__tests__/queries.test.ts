@@ -6,6 +6,7 @@ import {
   conversationQuery,
   conversationsQuery,
   documentsQuery,
+  groupsQuery,
   previewQuery,
   queryKeys,
   settingsQuery,
@@ -17,12 +18,28 @@ describe("query keys", () => {
     expect(conversationQuery("abc").queryKey).toEqual(
       queryKeys.conversation("abc"),
     );
+    expect(groupsQuery().queryKey).toEqual(queryKeys.groups);
     expect(configQuery().queryKey).toEqual(queryKeys.config);
     expect(settingsQuery().queryKey).toEqual(queryKeys.settings);
     expect(documentsQuery().queryKey).toEqual(queryKeys.documents);
     expect(previewQuery("d0", "d0::3", "text").queryKey).toEqual(
       queryKeys.preview("d0", "d0::3"),
     );
+  });
+
+  it("keeps the group list disjoint from the conversation keys", () => {
+    // Group CRUD invalidates `groups`; a move invalidates the conversation
+    // list. Neither may prefix-match the other's cache entries.
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.groups, []);
+    client.setQueryData(queryKeys.conversations, []);
+
+    const matched = client
+      .getQueryCache()
+      .findAll({ queryKey: queryKeys.groups })
+      .map((query) => query.queryKey);
+
+    expect(matched).toEqual([queryKeys.groups]);
   });
 
   it("keeps one conversation's key distinct from another's", () => {

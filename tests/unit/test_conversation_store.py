@@ -286,17 +286,67 @@ class TestConversationCrud:
 
     def test_list_conversations_maps_rows(self) -> None:
         conn = ScriptedConnection(
-            [ScriptedCursor(rows=[("c1", "Kelp", CREATED_AT, UPDATED_AT, 4)])]
+            [
+                ScriptedCursor(
+                    rows=[
+                        ("c1", "Kelp", CREATED_AT, UPDATED_AT, "g1", 4),
+                        ("c2", "Loose", CREATED_AT, UPDATED_AT, None, 0),
+                    ]
+                )
+            ]
         )
-        (summary,) = store_with(conn).list_conversations()
-        assert summary.conversation_id == "c1"
-        assert summary.title == "Kelp"
-        assert summary.message_count == 4
+        grouped, ungrouped = store_with(conn).list_conversations()
+        assert grouped.conversation_id == "c1"
+        assert grouped.title == "Kelp"
+        assert grouped.message_count == 4
+        assert grouped.group_id == "g1"
+        assert ungrouped.group_id is None
 
     def test_delete_conversation_reports_rowcount(self) -> None:
         conn = ScriptedConnection([ScriptedCursor(rowcount=1)])
         assert store_with(conn).delete_conversation("c1") == 1
         assert conn.queries[0][1] == ("c1",)
+
+
+class TestGroupCrud:
+    def test_create_group_returns_the_row(self) -> None:
+        conn = ScriptedConnection([ScriptedCursor(row=(CREATED_AT,))])
+        created = store_with(conn).create_group("Research")
+        assert created.name == "Research"
+        assert created.created_at == CREATED_AT
+        assert len(created.group_id) == 32  # uuid4 hex
+        sql, params = conn.queries[0]
+        assert "INSERT INTO conversation_groups" in sql
+        assert params == (created.group_id, "Research")
+
+    def test_list_groups_maps_rows_in_name_order(self) -> None:
+        conn = ScriptedConnection(
+            [ScriptedCursor(rows=[("g1", "Alpha", CREATED_AT), ("g2", "beta", UPDATED_AT)])]
+        )
+        groups = store_with(conn).list_groups()
+        assert [(g.group_id, g.name) for g in groups] == [("g1", "Alpha"), ("g2", "beta")]
+        assert "ORDER BY lower(name)" in conn.queries[0][0]  # case-folded folder order
+
+    def test_group_exists(self) -> None:
+        assert store_with(ScriptedConnection([ScriptedCursor(row=(1,))])).group_exists("g")
+        assert not store_with(ScriptedConnection([ScriptedCursor()])).group_exists("g")
+
+    def test_delete_group_reports_rowcount(self) -> None:
+        conn = ScriptedConnection([ScriptedCursor(rowcount=1)])
+        assert store_with(conn).delete_group("g1") == 1
+        sql, params = conn.queries[0]
+        assert "DELETE FROM conversation_groups" in sql
+        assert params == ("g1",)
+
+    def test_set_conversation_group_files_and_ungroups(self) -> None:
+        conn = ScriptedConnection([ScriptedCursor(rowcount=1), ScriptedCursor(rowcount=1)])
+        store = store_with(conn)
+        assert store.set_conversation_group("c1", "g1") == 1
+        assert store.set_conversation_group("c1", None) == 1
+        assert conn.queries[0][1] == ("g1", "c1")
+        assert conn.queries[1][1] == (None, "c1")
+        # A move must never bump updated_at — it would re-order the sidebar.
+        assert "updated_at" not in conn.queries[0][0]
 
 
 class TestGetConversation:

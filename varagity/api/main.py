@@ -33,6 +33,7 @@ from varagity.api.routes import (
     chat,
     conversations,
     documents,
+    groups,
     ingest,
     metrics,
     system,
@@ -346,6 +347,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
     app.include_router(system.router)
     app.include_router(conversations.router)
+    app.include_router(groups.router)
     app.include_router(chat.router)
     app.include_router(settings_routes.router)
     app.include_router(documents.router)

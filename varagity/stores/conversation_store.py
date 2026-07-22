@@ -41,12 +41,20 @@ _TITLE_PROMPT = (
 _TITLE_MAX_CHARS = 80
 
 _LIST_CONVERSATIONS_SQL = """
-SELECT c.conversation_id, c.title, c.created_at, c.updated_at,
+SELECT c.conversation_id, c.title, c.created_at, c.updated_at, c.group_id,
        count(m.message_id) AS message_count
 FROM conversations c
 LEFT JOIN messages m ON m.conversation_id = c.conversation_id
 GROUP BY c.conversation_id
 ORDER BY c.updated_at DESC
+"""
+
+# Alphabetical, case-folded (the sidebar renders groups folder-style);
+# creation time breaks ties so equal names keep a stable order.
+_LIST_GROUPS_SQL = """
+SELECT group_id, name, created_at
+FROM conversation_groups
+ORDER BY lower(name), created_at
 """
 
 _SELECT_MESSAGES_SQL = """
@@ -86,6 +94,8 @@ class ConversationSummary(BaseModel):
         created_at: Creation timestamp.
         updated_at: Last-turn timestamp (list ordering key).
         message_count: Number of persisted messages (user + assistant).
+        group_id: Sidebar group the conversation is filed under (``None``
+            = ungrouped).
     """
 
     conversation_id: str
@@ -93,6 +103,21 @@ class ConversationSummary(BaseModel):
     created_at: datetime
     updated_at: datetime
     message_count: int
+    group_id: str | None = None
+
+
+class ConversationGroup(BaseModel):
+    """One sidebar conversation group (a user-created folder).
+
+    Attributes:
+        group_id: The app-generated id.
+        name: Display name (not unique — ids are the identity).
+        created_at: Creation timestamp.
+    """
+
+    group_id: str
+    name: str
+    created_at: datetime
 
 
 class StoredSource(BaseModel):
@@ -269,7 +294,8 @@ class ConversationStore(ClosingContextMixin):
                 title=row[1],
                 created_at=row[2],
                 updated_at=row[3],
-                message_count=int(row[4]),
+                group_id=row[4],
+                message_count=int(row[5]),
             )
             for row in rows
         ]
@@ -357,6 +383,86 @@ class ConversationStore(ClosingContextMixin):
         """
         cursor = self._conn.execute(
             "DELETE FROM conversations WHERE conversation_id = %s", (conversation_id,)
+        )
+        return cursor.rowcount
+
+    def list_groups(self) -> list[ConversationGroup]:
+        """List every conversation group, name order (case-folded).
+
+        Returns:
+            All groups, including empty ones — an empty folder is still a
+            drop target in the sidebar.
+        """
+        rows = self._conn.execute(_LIST_GROUPS_SQL).fetchall()
+        return [ConversationGroup(group_id=row[0], name=row[1], created_at=row[2]) for row in rows]
+
+    def create_group(self, name: str) -> ConversationGroup:
+        """Insert a new conversation group.
+
+        Args:
+            name: Display name (uniqueness is not enforced — ids are the
+                identity).
+
+        Returns:
+            The created group.
+        """
+        group_id = uuid.uuid4().hex
+        row = self._conn.execute(
+            "INSERT INTO conversation_groups (group_id, name) VALUES (%s, %s) RETURNING created_at",
+            (group_id, name),
+        ).fetchone()
+        assert row is not None  # RETURNING on a successful INSERT
+        return ConversationGroup(group_id=group_id, name=name, created_at=row[0])
+
+    def group_exists(self, group_id: str) -> bool:
+        """Check whether a group id is known.
+
+        Args:
+            group_id: The id to look up.
+
+        Returns:
+            ``True`` if a matching row exists.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM conversation_groups WHERE group_id = %s", (group_id,)
+        ).fetchone()
+        return row is not None
+
+    def delete_group(self, group_id: str) -> int:
+        """Delete a group; its conversations detach (``ON DELETE SET NULL``).
+
+        Args:
+            group_id: The group to delete (unknown id is a no-op).
+
+        Returns:
+            The number of ``conversation_groups`` rows deleted (0 or 1).
+        """
+        cursor = self._conn.execute(
+            "DELETE FROM conversation_groups WHERE group_id = %s", (group_id,)
+        )
+        return cursor.rowcount
+
+    def set_conversation_group(self, conversation_id: str, group_id: str | None) -> int:
+        """File a conversation under a group, or ungroup it.
+
+        Deliberately no ``updated_at`` bump: moving a conversation must not
+        re-order the recency-sorted sidebar list.
+
+        Args:
+            conversation_id: The conversation to move (unknown id is a
+                no-op).
+            group_id: Target group id, or ``None`` to ungroup.
+
+        Returns:
+            The number of ``conversations`` rows updated (0 or 1).
+
+        Raises:
+            psycopg.errors.ForeignKeyViolation: If ``group_id`` is unknown
+                (callers validate first; the FK is the backstop).
+        """
+        cursor = self._conn.execute(
+            "UPDATE conversations SET group_id = %s WHERE conversation_id = %s",
+            (group_id, conversation_id),
         )
         return cursor.rowcount
 

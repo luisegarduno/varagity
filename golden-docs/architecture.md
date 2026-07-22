@@ -367,7 +367,7 @@ varagity/
 ├── stores/
 │   ├── records.py        # ChunkRecord, RetrievalTrace, RetrievedChunk
 │   ├── vector_store.py, bm25_store.py, schema.sql
-│   ├── conversation_store.py   # conversations / messages / message_sources snapshots
+│   ├── conversation_store.py   # conversations / groups / messages / message_sources snapshots
 │   ├── app_settings_store.py   # persisted runtime overrides + the _corpus_stale flag
 │   └── migrate.py, migrations/ # idempotent NNN_*.sql runner (runs on API startup)
 ├── retrieval/            # semantic.py, bm25.py (+ hydrate), hybrid.py, reranked.py

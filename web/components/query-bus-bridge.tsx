@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { useMountEffect } from "@/hooks/use-mount-effect";
 import { onConversationsChanged } from "@/lib/conversations-bus";
+import { onGroupsChanged } from "@/lib/groups-bus";
 import { queryKeys } from "@/lib/queries";
 import { onSettingsChanged } from "@/lib/settings-bus";
 
@@ -38,12 +39,17 @@ export function QueryBusBridge() {
       autoTitleTimer = setTimeout(invalidateConversations, AUTO_TITLE_DELAY_MS);
     });
 
+    const offGroups = onGroupsChanged(() => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.groups });
+    });
+
     const offSettings = onSettingsChanged(() => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
     });
 
     return () => {
       offConversations();
+      offGroups();
       offSettings();
       clearTimeout(autoTitleTimer);
     };

@@ -259,7 +259,7 @@
         "type": "object"
       },
       "ConversationSummaryOut": {
-        "description": "One conversation in the ``GET /api/conversations`` list.\n\nAttributes:\n    conversation_id: The app-generated id.\n    title: Current title.\n    created_at: Creation timestamp.\n    updated_at: Last-turn timestamp (list ordering key).\n    message_count: Number of persisted messages.",
+        "description": "One conversation in the ``GET /api/conversations`` list.\n\nAttributes:\n    conversation_id: The app-generated id.\n    title: Current title.\n    created_at: Creation timestamp.\n    updated_at: Last-turn timestamp (list ordering key).\n    message_count: Number of persisted messages.\n    group_id: Sidebar group the conversation is filed under (``None``\n        = ungrouped).",
         "properties": {
           "conversation_id": {
             "title": "Conversation Id",
@@ -269,6 +269,17 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Id"
           },
           "message_count": {
             "title": "Message Count",
@@ -292,6 +303,28 @@
           "message_count"
         ],
         "title": "ConversationSummaryOut",
+        "type": "object"
+      },
+      "ConversationUpdateRequest": {
+        "additionalProperties": false,
+        "description": "Body of ``PATCH /api/conversations/{conversation_id}``.\n\nUnknown fields are rejected so a typo'd patch fails loudly instead of\nsilently doing nothing.\n\nAttributes:\n    group_id: Sidebar group to file the conversation under, or ``None``\n        to ungroup it. Required \u2014 it is the route's only mutable field,\n        so an empty patch is a validation error, not a silent no-op.",
+        "properties": {
+          "group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Id"
+          }
+        },
+        "required": [
+          "group_id"
+        ],
+        "title": "ConversationUpdateRequest",
         "type": "object"
       },
       "DeltaEvent": {
@@ -517,6 +550,48 @@
           "error"
         ],
         "title": "ErrorResponse",
+        "type": "object"
+      },
+      "GroupCreateRequest": {
+        "additionalProperties": false,
+        "description": "Body of ``POST /api/groups``.\n\nAttributes:\n    name: Display name of the new group.",
+        "properties": {
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "GroupCreateRequest",
+        "type": "object"
+      },
+      "GroupOut": {
+        "description": "One sidebar conversation group (a user-created folder).\n\nAttributes:\n    group_id: The app-generated id.\n    name: Display name.\n    created_at: Creation timestamp.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "group_id": {
+            "title": "Group Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "group_id",
+          "name",
+          "created_at"
+        ],
+        "title": "GroupOut",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -1837,6 +1912,50 @@
         "tags": [
           "conversations"
         ]
+      },
+      "patch": {
+        "description": "Move a conversation into a sidebar group, or out of one.\n\nDeliberately not a re-order: the move never bumps ``updated_at``, so\nthe recency-sorted list keeps its order.\n\nArgs:\n    conversation_id: The conversation to move.\n    payload: The target group (``group_id: null`` ungroups).\n    store: The per-request conversation store.\n\nReturns:\n    An empty ``204`` response.\n\nRaises:\n    HTTPException: ``404 group_not_found`` for an unknown target group;\n        ``404 conversation_not_found`` for an unknown conversation.",
+        "operationId": "update_conversation_api_conversations__conversation_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Conversation",
+        "tags": [
+          "conversations"
+        ]
       }
     },
     "/api/documents": {
@@ -2112,6 +2231,108 @@
         "summary": "Preview Page",
         "tags": [
           "documents"
+        ]
+      }
+    },
+    "/api/groups": {
+      "get": {
+        "description": "List every conversation group, name order.\n\nArgs:\n    store: The per-request conversation store.\n\nReturns:\n    All groups, including empty ones.",
+        "operationId": "list_groups_api_groups_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/GroupOut"
+                  },
+                  "title": "Response List Groups Api Groups Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Groups",
+        "tags": [
+          "groups"
+        ]
+      },
+      "post": {
+        "description": "Create a conversation group.\n\nArgs:\n    payload: The new group's display name.\n    store: The per-request conversation store.\n\nReturns:\n    The created group.",
+        "operationId": "create_group_api_groups_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Group",
+        "tags": [
+          "groups"
+        ]
+      }
+    },
+    "/api/groups/{group_id}": {
+      "delete": {
+        "description": "Delete a group; its conversations survive, ungrouped.\n\nArgs:\n    group_id: The group to delete.\n    store: The per-request conversation store.\n\nReturns:\n    An empty ``204`` response.\n\nRaises:\n    HTTPException: ``404 group_not_found`` for an unknown id.",
+        "operationId": "delete_group_api_groups__group_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "title": "Group Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Group",
+        "tags": [
+          "groups"
         ]
       }
     },

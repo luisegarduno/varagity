@@ -234,13 +234,15 @@ recorded fallback if migrations ever get non-trivial —
   than not starting.
 
 Current migrations: `001_conversations.sql` and `002_app_settings.sql` (the
-next two sections), plus v3's `003_condensed_query.sql` and
+next two sections), v3's `003_condensed_query.sql` and
 `004_message_engine.sql` — two nullable `ALTER TABLE messages ADD COLUMN`s
 for the chat engine's provenance snapshot
-([below](#conversation-persistence)). `schema.sql` deliberately needed no
-edit for 003/004: it holds only the v1 chunk-side tables — `messages` exists
-solely in `001`, so both install paths (fresh volume and existing `pgdata`)
-converge through the runner alone.
+([below](#conversation-persistence)) — and `005_conversation_groups.sql`,
+the sidebar's conversation folders (also
+[below](#conversation-persistence)). `schema.sql` deliberately needed no
+edit for any of them: it holds only the v1 chunk-side tables — `messages`
+exists solely in `001`, so both install paths (fresh volume and existing
+`pgdata`) converge through the runner alone.
 
 ## Conversation persistence
 
@@ -284,18 +286,38 @@ CREATE TABLE IF NOT EXISTS message_sources (
 -- Transcript fetches read a conversation's messages in order.
 CREATE INDEX IF NOT EXISTS messages_conversation_created_idx
     ON messages(conversation_id, created_at);
+
+-- 005: sidebar conversation groups — user-created folders. Deleting a
+-- group detaches its conversations (SET NULL), never deletes them.
+CREATE TABLE IF NOT EXISTS conversation_groups (
+    group_id    TEXT PRIMARY KEY,        -- app-generated id
+    name        TEXT NOT NULL,           -- display name (not unique — ids are the identity)
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_id TEXT
+    REFERENCES conversation_groups(group_id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS conversations_group_id_idx ON conversations(group_id);
 ```
 
 ```mermaid
 erDiagram
+    conversation_groups |o--o{ conversations : "ON DELETE SET NULL"
     conversations ||--o{ messages : "ON DELETE CASCADE"
     messages ||--o{ message_sources : "ON DELETE CASCADE"
     chunks |o..o{ message_sources : "chunk_id — soft ref, no FK"
+    conversation_groups {
+        text group_id PK
+        text name "display name"
+        timestamptz created_at
+    }
     conversations {
         text conversation_id PK
         text title "auto-titled from the first question"
         timestamptz created_at
         timestamptz updated_at
+        text group_id FK "sidebar group — 005, nullable"
     }
     messages {
         text message_id PK
@@ -350,6 +372,13 @@ Notes:
   its `message_sources` rows (rank 1-based, best first), and the
   conversation's `updated_at` bump — a partial failure leaves no dangling
   turn. An aborted stream persists nothing.
+- **Groups are organization, never ownership** (migration 005): the sidebar's
+  folders live in `conversation_groups`, and `conversations.group_id` is a
+  nullable FK with `ON DELETE SET NULL` — deleting a group returns its
+  conversations to the ungrouped list with history intact. Moving a
+  conversation (`PATCH /api/conversations/{id}`) deliberately does **not**
+  bump `updated_at`, so filing a chat never re-orders the recency-sorted
+  list.
 
 ## Runtime settings overrides
 

@@ -206,6 +206,23 @@ class ConversationCreateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class ConversationUpdateRequest(BaseModel):
+    """Body of ``PATCH /api/conversations/{conversation_id}``.
+
+    Unknown fields are rejected so a typo'd patch fails loudly instead of
+    silently doing nothing.
+
+    Attributes:
+        group_id: Sidebar group to file the conversation under, or ``None``
+            to ungroup it. Required — it is the route's only mutable field,
+            so an empty patch is a validation error, not a silent no-op.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_id: str | None
+
+
 class ConversationSummaryOut(BaseModel):
     """One conversation in the ``GET /api/conversations`` list.
 
@@ -215,6 +232,8 @@ class ConversationSummaryOut(BaseModel):
         created_at: Creation timestamp.
         updated_at: Last-turn timestamp (list ordering key).
         message_count: Number of persisted messages.
+        group_id: Sidebar group the conversation is filed under (``None``
+            = ungrouped).
     """
 
     conversation_id: str
@@ -222,6 +241,7 @@ class ConversationSummaryOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     message_count: int
+    group_id: str | None = None
 
 
 class MessageSourceOut(BaseModel):
@@ -287,6 +307,32 @@ class ConversationDetailOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     messages: list[MessageOut]
+
+
+class GroupCreateRequest(BaseModel):
+    """Body of ``POST /api/groups``.
+
+    Attributes:
+        name: Display name of the new group.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+
+
+class GroupOut(BaseModel):
+    """One sidebar conversation group (a user-created folder).
+
+    Attributes:
+        group_id: The app-generated id.
+        name: Display name.
+        created_at: Creation timestamp.
+    """
+
+    group_id: str
+    name: str
+    created_at: datetime
 
 
 class ServiceHealth(BaseModel):

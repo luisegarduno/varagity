@@ -19,13 +19,16 @@ from varagity.stores.conversation_store import (
 NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=UTC)
 
 
-def summary(conversation_id: str, title: str = "T", count: int = 0) -> ConversationSummary:
+def summary(
+    conversation_id: str, title: str = "T", count: int = 0, group_id: str | None = None
+) -> ConversationSummary:
     return ConversationSummary(
         conversation_id=conversation_id,
         title=title,
         created_at=NOW,
         updated_at=NOW,
         message_count=count,
+        group_id=group_id,
     )
 
 
@@ -35,6 +38,8 @@ class FakeStore:
         self.details: dict[str, ConversationDetail] = {}
         self.deleted: list[str] = []
         self.created_titles: list[str | None] = []
+        self.known_groups: set[str] = set()
+        self.moves: list[tuple[str, str | None]] = []
 
     def list_conversations(self) -> list[ConversationSummary]:
         return self.summaries
@@ -51,6 +56,15 @@ class FakeStore:
             self.deleted.append(conversation_id)
             return 1
         return 0
+
+    def group_exists(self, group_id: str) -> bool:
+        return group_id in self.known_groups
+
+    def set_conversation_group(self, conversation_id: str, group_id: str | None) -> int:
+        if conversation_id not in self.details:
+            return 0
+        self.moves.append((conversation_id, group_id))
+        return 1
 
 
 @pytest.fixture
@@ -72,12 +86,15 @@ async def request(app: FastAPI, method: str, path: str, **kwargs: Any) -> httpx.
 
 
 async def test_list_conversations(app: FastAPI, store: FakeStore) -> None:
-    store.summaries = [summary("a", "First", 4), summary("b", "Second", 2)]
+    store.summaries = [summary("a", "First", 4, group_id="g1"), summary("b", "Second", 2)]
     response = await request(app, "GET", "/api/conversations")
     assert response.status_code == 200
     data = response.json()
     assert [c["conversation_id"] for c in data] == ["a", "b"]
     assert data[0]["message_count"] == 4
+    # The sidebar partitions on group_id, so the list must carry it.
+    assert data[0]["group_id"] == "g1"
+    assert data[1]["group_id"] is None
 
 
 async def test_create_conversation_201(app: FastAPI, store: FakeStore) -> None:
@@ -129,6 +146,54 @@ async def test_get_unknown_conversation_404(app: FastAPI) -> None:
     response = await request(app, "GET", "/api/conversations/ghost")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "conversation_not_found"
+
+
+async def test_move_conversation_into_group_204(app: FastAPI, store: FakeStore) -> None:
+    store.details["c1"] = ConversationDetail(
+        conversation_id="c1", title="T", created_at=NOW, updated_at=NOW, messages=[]
+    )
+    store.known_groups.add("g1")
+    response = await request(app, "PATCH", "/api/conversations/c1", json={"group_id": "g1"})
+    assert response.status_code == 204
+    assert store.moves == [("c1", "g1")]
+
+
+async def test_ungroup_conversation_204(app: FastAPI, store: FakeStore) -> None:
+    store.details["c1"] = ConversationDetail(
+        conversation_id="c1", title="T", created_at=NOW, updated_at=NOW, messages=[]
+    )
+    response = await request(app, "PATCH", "/api/conversations/c1", json={"group_id": None})
+    assert response.status_code == 204
+    assert store.moves == [("c1", None)]
+
+
+async def test_move_to_unknown_group_404(app: FastAPI, store: FakeStore) -> None:
+    store.details["c1"] = ConversationDetail(
+        conversation_id="c1", title="T", created_at=NOW, updated_at=NOW, messages=[]
+    )
+    response = await request(app, "PATCH", "/api/conversations/c1", json={"group_id": "ghost"})
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "group_not_found"
+    assert store.moves == []
+
+
+async def test_move_unknown_conversation_404(app: FastAPI, store: FakeStore) -> None:
+    store.known_groups.add("g1")
+    response = await request(app, "PATCH", "/api/conversations/ghost", json={"group_id": "g1"})
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "conversation_not_found"
+
+
+async def test_move_requires_the_group_id_field(app: FastAPI) -> None:
+    response = await request(app, "PATCH", "/api/conversations/c1", json={})
+    assert response.status_code == 422
+
+
+async def test_move_rejects_unknown_fields(app: FastAPI) -> None:
+    response = await request(
+        app, "PATCH", "/api/conversations/c1", json={"group_id": None, "title": "x"}
+    )
+    assert response.status_code == 422
 
 
 async def test_delete_conversation_204(app: FastAPI, store: FakeStore) -> None:

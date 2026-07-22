@@ -139,6 +139,92 @@ export interface paths {
         delete: operations["delete_conversation_api_conversations__conversation_id__delete"];
         options?: never;
         head?: never;
+        /**
+         * Update Conversation
+         * @description Move a conversation into a sidebar group, or out of one.
+         *
+         *     Deliberately not a re-order: the move never bumps ``updated_at``, so
+         *     the recency-sorted list keeps its order.
+         *
+         *     Args:
+         *         conversation_id: The conversation to move.
+         *         payload: The target group (``group_id: null`` ungroups).
+         *         store: The per-request conversation store.
+         *
+         *     Returns:
+         *         An empty ``204`` response.
+         *
+         *     Raises:
+         *         HTTPException: ``404 group_not_found`` for an unknown target group;
+         *             ``404 conversation_not_found`` for an unknown conversation.
+         */
+        patch: operations["update_conversation_api_conversations__conversation_id__patch"];
+        trace?: never;
+    };
+    "/api/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Groups
+         * @description List every conversation group, name order.
+         *
+         *     Args:
+         *         store: The per-request conversation store.
+         *
+         *     Returns:
+         *         All groups, including empty ones.
+         */
+        get: operations["list_groups_api_groups_get"];
+        put?: never;
+        /**
+         * Create Group
+         * @description Create a conversation group.
+         *
+         *     Args:
+         *         payload: The new group's display name.
+         *         store: The per-request conversation store.
+         *
+         *     Returns:
+         *         The created group.
+         */
+        post: operations["create_group_api_groups_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/groups/{group_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Group
+         * @description Delete a group; its conversations survive, ungrouped.
+         *
+         *     Args:
+         *         group_id: The group to delete.
+         *         store: The per-request conversation store.
+         *
+         *     Returns:
+         *         An empty ``204`` response.
+         *
+         *     Raises:
+         *         HTTPException: ``404 group_not_found`` for an unknown id.
+         */
+        delete: operations["delete_group_api_groups__group_id__delete"];
+        options?: never;
+        head?: never;
         patch?: never;
         trace?: never;
     };
@@ -725,6 +811,8 @@ export interface components {
          *         created_at: Creation timestamp.
          *         updated_at: Last-turn timestamp (list ordering key).
          *         message_count: Number of persisted messages.
+         *         group_id: Sidebar group the conversation is filed under (``None``
+         *             = ungrouped).
          */
         ConversationSummaryOut: {
             /** Conversation Id */
@@ -743,6 +831,24 @@ export interface components {
             updated_at: string;
             /** Message Count */
             message_count: number;
+            /** Group Id */
+            group_id?: string | null;
+        };
+        /**
+         * ConversationUpdateRequest
+         * @description Body of ``PATCH /api/conversations/{conversation_id}``.
+         *
+         *     Unknown fields are rejected so a typo'd patch fails loudly instead of
+         *     silently doing nothing.
+         *
+         *     Attributes:
+         *         group_id: Sidebar group to file the conversation under, or ``None``
+         *             to ungroup it. Required — it is the route's only mutable field,
+         *             so an empty patch is a validation error, not a silent no-op.
+         */
+        ConversationUpdateRequest: {
+            /** Group Id */
+            group_id: string | null;
         };
         /**
          * DocumentBulkDeleteRequest
@@ -867,6 +973,37 @@ export interface components {
          */
         ErrorResponse: {
             error: components["schemas"]["ErrorBody"];
+        };
+        /**
+         * GroupCreateRequest
+         * @description Body of ``POST /api/groups``.
+         *
+         *     Attributes:
+         *         name: Display name of the new group.
+         */
+        GroupCreateRequest: {
+            /** Name */
+            name: string;
+        };
+        /**
+         * GroupOut
+         * @description One sidebar conversation group (a user-created folder).
+         *
+         *     Attributes:
+         *         group_id: The app-generated id.
+         *         name: Display name.
+         *         created_at: Creation timestamp.
+         */
+        GroupOut: {
+            /** Group Id */
+            group_id: string;
+            /** Name */
+            name: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -1748,6 +1885,121 @@ export interface operations {
             header?: never;
             path: {
                 conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_conversation_api_conversations__conversation_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConversationUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_groups_api_groups_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupOut"][];
+                };
+            };
+        };
+    };
+    create_group_api_groups_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_group_api_groups__group_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
             };
             cookie?: never;
         };
