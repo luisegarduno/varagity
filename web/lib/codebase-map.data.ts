@@ -2,11 +2,12 @@
  * The curated codebase map — the checked-in, hand-maintained picture of how
  * Varagity fits together (ADR-015; update rule in golden-docs/architecture.md).
  *
- * This is the condensed 24-node graph from the 2026-07-20 foglamp scan
- * (`.foglamp/scan.json`), adopted verbatim as the map's source of truth: one
- * node per moving part, model usage expressed as edges into the three `model`
- * nodes (the renderer folds those into on-card chips), and three groups
- * (Ingestion · Query path · Observability) drawn as containers.
+ * This is the condensed 26-node graph adopted one-shot from a 2026-07-20
+ * foglamp scan of the repo; the scan artifact is not retained, so this
+ * literal is the source of truth: one node per moving part, model usage
+ * expressed as edges into the three `model` nodes (the renderer folds those
+ * into on-card chips), and three groups (Ingestion · Query path ·
+ * Observability) drawn as containers.
  *
  * Authored as a TS literal ending in `satisfies CodebaseMap` so the
  * `kind`/`EdgeKind` unions genuinely type-check — a JSON literal would widen
@@ -31,7 +32,16 @@ export const CODEBASE_MAP = {
     { id: "e5-large", label: "multilingual-e5-large", domain: "huggingface.co" },
     { id: "bge-reranker", label: "bge-reranker-v2-m3", domain: "huggingface.co" },
   ],
-  topTools: [],
+  // The pluggable families (the four @register registries + the OCR factory,
+  // spec §5.1) and the preview capability — internal, so no favicon domains.
+  topTools: [
+    { id: "parsers", label: "Parser registry" },
+    { id: "chunkers", label: "Chunker registry" },
+    { id: "retrievers", label: "Retriever registry" },
+    { id: "chat-engines", label: "Chat engine registry" },
+    { id: "ocr", label: "OCR engines" },
+    { id: "preview", label: "Page previews" },
+  ],
   topIntegrations: [
     { id: "llamacpp", label: "llama.cpp", domain: "ggml.ai" },
     { id: "infinity", label: "Infinity", domain: "github.com" },
@@ -51,7 +61,9 @@ export const CODEBASE_MAP = {
         label: "Next.js chat GUI",
         kind: "entry",
         sub: "web/ · :3000",
-        sourceRef: "web/app/page.tsx",
+        // The map's update rule applied to itself (ADR-015): pinning /map's
+        // own page here means deleting the map route fails the drift guard.
+        sourceRef: "web/app/map/page.tsx",
         detail:
           "SSE chat with an evidence panel showing how each answer was built, corpus manager, live settings drawer, command palette, and a /map architecture map behind developer mode.",
       },

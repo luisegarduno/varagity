@@ -5,7 +5,7 @@
       "label": "Next.js chat GUI",
       "kind": "entry",
       "sub": "web/ · :3000",
-      "sourceRef": "web/app/page.tsx",
+      "sourceRef": "web/app/map/page.tsx",
       "detail": "SSE chat with an evidence panel showing how each answer was built, corpus manager, live settings drawer, command palette, and a /map architecture map behind developer mode."
     },
     {

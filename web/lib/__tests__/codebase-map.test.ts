@@ -35,12 +35,12 @@ describe("CODEBASE_MAP shape", () => {
     expect(validateMap(CODEBASE_MAP)).toEqual([]);
   });
 
-  it("matches the adopted scan totals", () => {
+  it("matches the curated totals", () => {
     const { nodes, edges } = CODEBASE_MAP.graph;
     expect(nodes).toHaveLength(26);
     expect(edges).toHaveLength(38);
     expect(CODEBASE_MAP.topModels).toHaveLength(3);
-    expect(CODEBASE_MAP.topTools).toHaveLength(0);
+    expect(CODEBASE_MAP.topTools).toHaveLength(6);
     expect(CODEBASE_MAP.topIntegrations).toHaveLength(10);
 
     const groups = new Map<string, number>();
@@ -54,10 +54,14 @@ describe("CODEBASE_MAP shape", () => {
     ]);
   });
 
-  it("pins the web entry to its page and keeps docsdir sourceRef-free", () => {
+  it("pins the map's own page and keeps docsdir sourceRef-free", () => {
     const byId = new Map(CODEBASE_MAP.graph.nodes.map((node) => [node.id, node]));
+    // The map's update rule applied to itself (ADR-015): the web entry pins
+    // /map's page, so deleting the map route fails CI. The chat page the web
+    // node previously pinned keeps an existence guard here instead.
+    expect(byId.get("web")?.sourceRef).toBe("web/app/map/page.tsx");
+    expect(existsSync(path.join(REPO_ROOT, "web/app/page.tsx"))).toBe(true);
     // docs/ is gitignored, so its node could never resolve on a CI checkout.
-    expect(byId.get("web")?.sourceRef).toBe("web/app/page.tsx");
     expect(byId.get("docsdir")?.sourceRef).toBeUndefined();
   });
 

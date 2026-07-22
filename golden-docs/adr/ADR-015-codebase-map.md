@@ -127,9 +127,12 @@ The first shipped canvas was correct but **noisy**: 41 fully-drawn nodes and
 than a map. A foglamp.dev scan of this repo rendered the same system far more
 legibly, so the map was rebuilt to that standard. What changed, and why:
 
-- **The data is now the condensed scan graph** (26 nodes / 38 edges, from
-  `.foglamp/scan.json` 2026-07-20): one node per moving part instead of one
-  per registry entry, with `Ingestion` / `Query path` / `Observability` as the
+- **The data is now the condensed scan graph** (26 nodes / 38 edges), adopted
+  one-shot from a 2026-07-20 foglamp scan whose artifact is not retained in
+  the repo — from adoption on, the checked-in literal is the source of truth,
+  hand-maintained under the unchanged update rule: one node per moving part
+  instead of one per registry entry, with `Ingestion` / `Query path` /
+  `Observability` as the
   three groups. Same schema discipline (`satisfies CodebaseMap`, validator,
   drift-guarded `sourceRef`s — all 15 verified against the tree); the `top*`
   callouts became standalone `{id, label, domain}` rows feeding the new side
@@ -154,7 +157,7 @@ legibly, so the map was rebuilt to that standard. What changed, and why:
 
 - **Favicons are vendored, not fetched.** The original "favicons omitted"
   stance protected the no-phone-home rule at the cost of the look. The
-  amendment keeps the rule and the look: the eleven integration/model icons
+  amendment keeps the rule and the look: the integration/model icons
   were fetched once at authoring time into `web/public/map-icons/` and served
   same-origin, with the kind glyph as the on-error fallback (the
   privacy-plugin-self-hosts-fonts precedent from the docs site).
