@@ -114,7 +114,7 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
 ## Conventions (enforced, not aspirational)
 
 - **Registries for pluggable families** (spec §5.1): parsers (`pdf`, `text`, `office`,
-  `web`), chunking strategies (`recursive_character`, `token_based`, `markdown_aware`,
+  `web`, `image`), chunking strategies (`recursive_character`, `token_based`, `markdown_aware`,
   `semantic`, `docling_hybrid`), retrievers (`semantic`, `bm25`, `hybrid`, `reranked`),
   and chat engines (`simple`, `condense_context`) self-register via `@register("name")`
   in their package; adding an implementation = one new file + its import line in the

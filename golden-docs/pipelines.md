@@ -42,7 +42,7 @@ flowchart TB
     discover --> loop{{"for each file"}}
     loop --> skip{"unchanged?<br/>(doc_id, content_hash)<br/>already in documents"}
     skip -->|"yes · skip before parse"| loop
-    skip -->|no| parse["parse_document<br/>text | pdf (two-pass OCR) | office | web — §9.2, spec_v2 §8"]
+    skip -->|no| parse["parse_document<br/>text | pdf (two-pass OCR) | office | web | image (OCR) — §9.2, spec_v2 §8"]
     parse --> chunk["chunk_document<br/>CHUNKING_STRATEGY registry, 5 strategies — §9.3, spec_v2 §7"]
     chunk --> ctx["contextualize_chunks<br/>LLM situating blurb per chunk — §9.4"]
     ctx --> embed["embed_chunks<br/>e5 passage mode, batched — §9.5"]
@@ -65,11 +65,13 @@ discovery/parse/chunk are local and deterministic, so they carry none (below).
   same stage functions through the same loop, so plain and tracked execution
   cannot drift. The task bundle is public (`TASK_STAGES`) — the API's ingest
   runner wraps these very tasks (below).
-- **Four parser families, one loop** (spec_v2 §8, ADR-009). Discovery
-  buckets each file: `.txt`/`.md` → `text`; `.pdf` → `pdf` (fast text-layer
-  pass with the automatic OCR fallback pass —
-  [runbook](runbook.md#ocr-fallback-operations)); `.docx`/`.pptx`/`.xlsx` →
-  `office`; `.html`/`.htm` → `web`. Office and web share the PDF parser's
+- **Five parser families, one loop** (spec_v2 §8, ADR-009). Discovery
+  buckets each file: `.txt`/`.md`/`.rst` → `text`; `.pdf` → `pdf` (fast
+  text-layer pass with the automatic OCR fallback pass —
+  [runbook](runbook.md#ocr-fallback-operations)); the OOXML families,
+  `.csv`, and OpenDocument → `office`; `.html`/`.htm`/`.xhtml` → `web`;
+  bitmap images → `image` (no text layer exists, so OCR always runs and
+  chunks carry `extraction: "ocr"`). Office and web share the PDF parser's
   Docling core but never OCR — their text is digital by construction, so
   every chunk carries `extraction: "text"`.
 - **Five chunking strategies** (spec_v2 §7). `chunk_document` dispatches on

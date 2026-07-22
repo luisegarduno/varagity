@@ -10,8 +10,8 @@ One page per package:
 - [Configuration & logging](config.md) — `config`, `logging_setup`, `tokens`
 - [Model clients](models.md) — the llama.cpp / infinity clients (chat,
   embeddings, rerank), the streaming `<think>` splitter, and the factory
-- [Ingestion](ingest.md) — discovery, parsers (text, PDF/OCR, office, web —
-  over a shared Docling core), the loader
+- [Ingestion](ingest.md) — discovery, parsers (text, PDF/OCR, office, web,
+  image — over a shared Docling core), the loader
 - [Chunking](chunking.md) — strategy registry + the five strategies
   (`recursive_character`, `token_based`, `markdown_aware`, `docling_hybrid`,
   `semantic`)

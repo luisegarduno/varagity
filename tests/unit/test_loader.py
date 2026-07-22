@@ -731,3 +731,21 @@ class TestDualWrite:
         assert again.ingested == 2
         assert sorted(bm25.deleted_doc_ids) == sorted(store.documents)
         assert len(bm25.indexed) == first.chunks  # re-indexed without duplicates
+
+
+def test_every_discovery_bucket_has_a_registered_parser() -> None:
+    """Tuple↔registry guard: the dispatch table covers every bucket and resolves.
+
+    Mirrors the config-validator↔registry regression tests: a bucket added
+    to discovery without a `_BUCKET_PARSERS` row would silently rely on the
+    defensive `unsupported` counter, and a row naming an unregistered
+    parser would fail every ingest.
+    """
+    from dataclasses import fields
+
+    from varagity.ingest.discovery import Buckets
+    from varagity.ingest.parsers import get_parser
+
+    assert [attr for attr, _ in loader_module._BUCKET_PARSERS] == [f.name for f in fields(Buckets)]
+    for _bucket, parser_name in loader_module._BUCKET_PARSERS:
+        get_parser(parser_name)  # raises KeyError if unregistered

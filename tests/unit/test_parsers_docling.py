@@ -21,6 +21,7 @@ from varagity.ingest.parsers.office import OfficeParser
 from varagity.ingest.parsers.web import WebParser
 
 CORPUS = Path(__file__).parents[1] / "fixtures" / "corpus"
+FORMATS = Path(__file__).parents[1] / "fixtures" / "formats"
 
 
 class StubDocument:
@@ -140,3 +141,52 @@ class TestRealWebConversion:
         assert raw.text.lstrip().startswith("#")
         # The planted fact.
         assert "12 hectares" in raw.text
+
+    def test_xhtml_rides_the_web_parser(self) -> None:
+        raw = get_parser("web").extract(FORMATS / "mooring_notice.xhtml", verbose=0)
+        assert raw.source_meta["file_type"] == "xhtml"
+        assert raw.source_meta["page"] is None
+        assert raw.source_meta["extraction"] == "text"
+        # The planted fact.
+        assert "84 euros" in raw.text
+
+
+class TestRealWidenedOfficeConversion:
+    """Real conversions of the post-v3 office formats (csv / OpenDocument)."""
+
+    def test_csv_exports_one_gfm_table_with_no_page(self) -> None:
+        raw = get_parser("office").extract(FORMATS / "harbor_pilotage.csv", verbose=0)
+        assert raw.source_meta["file_type"] == "csv"
+        assert raw.source_meta["page"] is None  # single table, no item provenance
+        assert raw.source_meta["extraction"] == "text"
+        table_lines = [line for line in raw.text.splitlines() if line.startswith("|")]
+        # The planted fact.
+        assert any("Kestrel Barge" in line and "4.7" in line for line in table_lines)
+
+    def test_odt_extracts_structure_with_no_page(self) -> None:
+        raw = get_parser("office").extract(FORMATS / "gullwing_ferry_manual.odt", verbose=0)
+        assert raw.source_meta["file_type"] == "odt"
+        assert raw.source_meta["page"] is None  # like .docx: no reliable pagination
+        assert raw.source_meta["extraction"] == "text"
+        assert raw.text.lstrip().startswith("#")  # heading markup survives
+        # The planted fact (carried over from the .docx source).
+        assert "800 meters before docking" in raw.text
+
+    def test_ods_maps_sheets_to_pages_like_xlsx(self) -> None:
+        raw = get_parser("office").extract(FORMATS / "quayside_inventory.ods", verbose=0)
+        assert raw.source_meta["file_type"] == "ods"
+        assert raw.source_meta["page"] == 1  # sheet → page, same as .xlsx
+        assert raw.source_meta["extraction"] == "text"
+        table_lines = [line for line in raw.text.splitlines() if line.startswith("|")]
+        assert any("Mooring bollard" in line and "148" in line for line in table_lines)
+        assert "Capstan winch" in raw.text  # second sheet extracted too
+
+    def test_odp_extracts_slides_with_no_page_provenance(self) -> None:
+        raw = get_parser("office").extract(FORMATS / "petrel_turbine_briefing.odp", verbose=0)
+        assert raw.source_meta["file_type"] == "odp"
+        # Unlike .pptx, Docling's ODP backend attaches no per-item page
+        # provenance — page degrades to None (observed behavior, pinned).
+        assert raw.source_meta["page"] is None
+        assert raw.source_meta["extraction"] == "text"
+        # The planted fact (carried over from the .pptx source).
+        assert "3.4 megawatts" in raw.text

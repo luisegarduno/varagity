@@ -60,11 +60,10 @@ def discover_documents_task(docs_path: str, verbose: int | None = None) -> Bucke
     """
     buckets = loader.discover_documents(docs_path, verbose=verbose)
     get_run_logger().info(
-        "discovered %d file(s) under %s (%d text-like, %d pdf)",
+        "discovered %d file(s) under %s (%s)",
         buckets.total,
         docs_path,
-        len(buckets.text_like),
-        len(buckets.pdf),
+        ", ".join(f"{len(paths)} {name}" for name, paths in buckets.by_bucket()),
     )
     return buckets
 

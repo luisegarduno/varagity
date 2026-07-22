@@ -94,7 +94,7 @@ def raw_document(
         text: The normalized extracted text.
         page_counts: Per-page character counts (for page attribution;
             empty for non-paginated formats).
-        extraction: ``"text"`` or ``"ocr_fallback"``.
+        extraction: ``"text"``, ``"ocr"``, or ``"ocr_fallback"``.
 
     Returns:
         The :class:`~varagity.ingest.parsers.base.RawDocument` handed to the

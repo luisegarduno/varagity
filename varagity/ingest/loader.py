@@ -74,6 +74,7 @@ _BUCKET_PARSERS: tuple[tuple[str, str], ...] = (
     ("pdf", "pdf"),
     ("office", "office"),
     ("web", "web"),
+    ("image", "image"),
 )
 
 

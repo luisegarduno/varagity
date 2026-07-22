@@ -71,7 +71,7 @@ export function ChunkCard({
 }) {
   const [expanded, setExpanded] = useState(false);
   const { data: config = null } = useQuery(configQuery());
-  const ocr = chunk.extraction === "ocr_fallback";
+  const ocr = chunk.extraction === "ocr_fallback" || chunk.extraction === "ocr";
   const clock = fileClock(chunk);
   // Belt and braces with the server's kill switch: while config is still
   // in flight the chunk stays optimistic — a disabled server would answer

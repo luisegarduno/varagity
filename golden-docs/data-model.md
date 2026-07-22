@@ -59,15 +59,17 @@ Every chunk persists this record (pydantic-validated; stored whole in the
 | `created_at` | datetime | Ingestion timestamp (UTC) |
 | `file_created_at` | datetime? | Filesystem birth time of the source file (UTC) — best-effort: `os.stat` exposes it on macOS/Windows; on Linux a GNU-coreutils `stat -c %W` fallback reads it, and `None` means the filesystem records none (a copy/download also resets it) |
 | `file_modified_at` | datetime? | Filesystem mtime of the source file (UTC) — the **document's** clock, distinct from `created_at` (the ingest's). Uploads keep the original file's clock: the GUI sends `File.lastModified` and the upload route restamps the stored file's mtime. `None` only on pre-field rows (backfilled by the next reingest) |
-| `extraction` | str | `"text"` or `"ocr_fallback"` — **beyond spec §8.1**: extraction provenance for retrieval-quality debugging (OCR noise hits BM25 keyword matching hardest) |
+| `extraction` | str | `"text"`, `"ocr"` (image parser — OCR is that format's only path), or `"ocr_fallback"` (the PDF pass-2 recovery) — **beyond spec §8.1**: extraction provenance for retrieval-quality debugging (OCR noise hits BM25 keyword matching hardest) |
 | `heading_path` | str? | **v2**: markdown heading breadcrumb (e.g. `"Operations > Dredging"`) set by the heading-aware chunkers (`markdown_aware`, `docling_hybrid` — spec_v2 §7); `None` for strategies without structure. New `ChunkRecord` fields land in the `metadata` JSONB — no migration needed |
 
 ¹ `page` is document-level (the first page that contributed text), not
 per-chunk: the shared chunker copies one `source_meta` per document, so
 per-chunk page attribution has no data path yet. A future chunker with
 `start_index` support plus a loader page-map lookup would make it per-chunk.
-For the v2 office formats, Docling models `.pptx` slides and `.xlsx` sheets
-as pages, so `page` carries a slide/sheet number there.
+For the v2 office formats, Docling models `.pptx` slides and `.xlsx`/`.ods`
+sheets as pages, so `page` carries a slide/sheet number there (`.odp` slides
+expose no item provenance, so `page` stays `None`); an OCR'd image is a
+one-page document, so `page` is `1` whenever text was recognized.
 
 ## The `RetrievalTrace`
 

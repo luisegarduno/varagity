@@ -85,7 +85,12 @@ def test_defaults_load() -> None:
     assert settings.POSTGRES_PORT == 5432
     assert settings.POSTGRES_DB == "varagity"
     assert settings.POSTGRES_USER == "varagity"
-    assert settings.ALLOWED_EXTENSIONS == ".pdf,.txt,.md,.docx,.pptx,.xlsx,.html,.htm"
+    assert settings.ALLOWED_EXTENSIONS == (
+        ".pdf,.txt,.md,.rst,"
+        ".docx,.docm,.dotx,.dotm,.pptx,.pptm,.potx,.potm,.ppsx,.ppsm,.xlsx,.xlsm,"
+        ".csv,.odt,.ods,.odp,.html,.htm,.xhtml,"
+        ".png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp"
+    )
     assert settings.CHUNKING_STRATEGY == "recursive_character"
     assert settings.CHUNK_SIZE == 400  # characters, not tokens
     assert settings.CHUNK_OVERLAP == 50

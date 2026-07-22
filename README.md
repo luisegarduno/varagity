@@ -65,8 +65,10 @@ Every pipeline stage is a tracked Prefect task.
     cp .env.example .env   # then set volumes, BASE_MODEL, keys/passwords
     ```
 
-2. Put documents (`.pdf`, `.txt`, `.md`, `.docx`, `.pptx`, `.xlsx`, `.html`)
-   into `./docs/`, then bring up the stack — ten services with healthchecks;
+2. Put documents (`.pdf`; plain text `.txt`/`.md`/`.rst`; the Office
+   families incl. OpenDocument and `.csv`; `.html`/`.xhtml`; or images
+   `.png`/`.jpg`/… — OCR'd automatically) into `./docs/`, then bring up the
+   stack — ten services with healthchecks;
    `--wait` returns once all are green:
     ```bash
     docker compose up -d --wait

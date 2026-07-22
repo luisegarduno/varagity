@@ -1,4 +1,4 @@
-"""Web-document parser: ``.html`` / ``.htm`` (spec_v2 §8).
+"""Web-document parser: ``.html`` / ``.htm`` / ``.xhtml`` (spec_v2 §8).
 
 A thin registration over the shared Docling core: web pages carry digital
 text, so a single no-OCR conversion through the same markdown/table/
@@ -15,4 +15,4 @@ from varagity.ingest.parsers.docling_base import DoclingParser
 
 @register("web")
 class WebParser(DoclingParser):
-    """Parser for the ``web`` bucket (``.html`` / ``.htm``)."""
+    """Parser for the ``web`` bucket (``.html`` / ``.htm`` / ``.xhtml``)."""

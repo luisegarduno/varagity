@@ -29,8 +29,11 @@ class Settings(BaseSettings):
             metadata, panels).
         DOCS_PATH: Directory scanned for the ingest corpus.
         ALLOWED_EXTENSIONS: Comma-separated whitelist of ingestable file
-            extensions (v2 widens the v1 ``.pdf``/``.txt``/``.md`` set with
-            the office/web formats — spec_v2 §8.1).
+            extensions. v2 widened the v1 ``.pdf``/``.txt``/``.md`` set with
+            the office/web formats (spec_v2 §8.1); the post-v3 widening adds
+            ``.rst``, ``.csv``, OpenDocument (``.odt``/``.ods``/``.odp``),
+            the Office macro/template variants, ``.xhtml``, and bitmap
+            images (``.png``/``.jpg``/… — OCR'd by the ``image`` parser).
         PDF_OCR_FALLBACK: Whether a PDF whose text-layer extraction comes
             up (near-)empty is automatically re-converted with OCR (plan
             decision #10). Off = pass 1's result stands and a textless PDF
@@ -221,7 +224,12 @@ class Settings(BaseSettings):
     DEFAULT_VERBOSE: int = 1
 
     DOCS_PATH: str = "./docs"
-    ALLOWED_EXTENSIONS: str = ".pdf,.txt,.md,.docx,.pptx,.xlsx,.html,.htm"
+    ALLOWED_EXTENSIONS: str = (
+        ".pdf,.txt,.md,.rst,"
+        ".docx,.docm,.dotx,.dotm,.pptx,.pptm,.potx,.potm,.ppsx,.ppsm,.xlsx,.xlsm,"
+        ".csv,.odt,.ods,.odp,.html,.htm,.xhtml,"
+        ".png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp"
+    )
 
     PDF_OCR_FALLBACK: bool = True
     PDF_OCR_MIN_CHARS: int = 50

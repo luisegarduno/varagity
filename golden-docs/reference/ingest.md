@@ -14,4 +14,6 @@
 
 ::: varagity.ingest.parsers.web
 
+::: varagity.ingest.parsers.image
+
 ::: varagity.ingest.loader

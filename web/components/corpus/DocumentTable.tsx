@@ -478,18 +478,20 @@ function FolderRow({
 
 /**
  * Render the extraction mix: plain-text methods stay quiet mono text, any
- * OCR-fallback chunks get a warning badge (the lower-fidelity path).
+ * OCR'd chunks (image OCR or the PDF fallback) get a warning badge (the
+ * lower-fidelity path).
  */
 function ExtractionMix({ document }: { document: DocumentOut }) {
   const entries = Object.entries(document.extraction_mix);
   if (entries.length === 0) {
     return <span className="text-xs text-muted-foreground">—</span>;
   }
-  const ocrCount = document.extraction_mix.ocr_fallback ?? 0;
+  const ocrCount =
+    (document.extraction_mix.ocr_fallback ?? 0) + (document.extraction_mix.ocr ?? 0);
   return (
     <span className="flex flex-wrap items-center gap-1.5">
       {entries
-        .filter(([method]) => method !== "ocr_fallback")
+        .filter(([method]) => method !== "ocr_fallback" && method !== "ocr")
         .map(([method, count]) => (
           <span key={method} className="font-mono text-xs text-muted-foreground">
             {method} ×{count}

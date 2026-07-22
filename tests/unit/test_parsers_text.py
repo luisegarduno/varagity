@@ -7,6 +7,8 @@ import pytest
 from varagity.ingest.parsers import PARSER_REGISTRY, get_parser
 from varagity.ingest.parsers.text import TextParser, remove_hyphen_space
 
+FORMATS = Path(__file__).parents[1] / "fixtures" / "formats"
+
 
 class TestRemoveHyphenSpace:
     """The reference implementation's regex cases, carried over."""
@@ -55,6 +57,15 @@ class TestTextParser:
         assert meta["file_name"] == "notes.MD"
         assert meta["file_type"] == "md"  # extension lowered
         assert meta["page"] is None
+
+    def test_rst_rides_the_text_parser(self) -> None:
+        raw = TextParser().extract(FORMATS / "tide_tables.rst", verbose=0)
+        assert raw.source_meta["file_type"] == "rst"
+        assert raw.source_meta["page"] is None
+        # No `extraction` key: the text parser leaves it to the ChunkRecord
+        # default ("text"), unlike the Docling-backed parsers.
+        assert "extraction" not in raw.source_meta
+        assert "5.2 metres" in raw.text
 
     def test_invalid_utf8_raises(self, tmp_path: Path) -> None:
         path = tmp_path / "binary.txt"

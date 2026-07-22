@@ -42,7 +42,7 @@ export interface EvidenceChunk {
   fileType: string | null;
   /** Page number when the format has one (`null` otherwise). */
   page: number | null;
-  /** `"text"` or `"ocr_fallback"` — the OCR badge signal. */
+  /** `"text"`, `"ocr"` (image), or `"ocr_fallback"` (PDF) — the OCR badge signal. */
   extraction: string | null;
   /** Source file's birth time (ISO; best-effort — often unavailable). */
   fileCreatedAt: string | null;

@@ -69,3 +69,33 @@ and what page provenance each format can honestly claim.
   provenance; if per-chunk page/char offsets ever land (the deferred
   in-browser preview, [ADR-005 §5](ADR-005-web-stack-and-api.md)), this
   core's per-page character counts are where they attach.
+
+## Amendment (2026-07-22): the low-cost widening + the `image` bucket
+
+The registry design above was built so that new formats cost one routing
+line — this amendment cashed that in, plus one genuinely new parser.
+
+- **Formats that ride existing parsers, zero new conversion code.**
+  `ALLOWED_EXTENSIONS` (still the single whitelist; the value in
+  `## Consequences` above is superseded) now also admits: `.rst` → `text`;
+  `.xhtml` → `web`; and, into `office`, the OOXML macro/template variants
+  (`.docm`/`.dotx`/`.dotm`/`.pptm`/`.potx`/`.potm`/`.ppsx`/`.ppsm`/`.xlsm`
+  — Docling's backends open them like their base formats), single-table
+  `.csv`, and OpenDocument `.odt`/`.ods`/`.odp`. OpenDocument needed one
+  new direct dependency (`odfdo` — Docling's backend imports it lazily);
+  everything else was routing. Verified page semantics: `.ods` sheets are
+  Docling pages (like `.xlsx`), `.odp` slides expose no item provenance
+  (unlike `.pptx`) so `page` stays `NULL`.
+- **A fifth bucket: `image` (`.png`/`.jpg`/`.jpeg`/`.tif`/`.tiff`/`.bmp`/
+  `.webp`), OCR-only.** Bitmaps have no text layer, so the two-pass trigger
+  logic is meaningless — `parsers/image.py` reuses the PDF parser's
+  OCR-engine factory and always converts with the configured engine in
+  full-page mode. Its chunks carry a third `extraction` value, `"ocr"`
+  (deliberately distinct from `"ocr_fallback"`: OCR is this format's only
+  path, not a recovery), which the GUI's OCR badge and extraction-mix
+  column also recognize. This ships the *text* half of the deferred image
+  modality; semantic image understanding (re-adding llama.cpp `--mmproj`)
+  stays deferred as noted above.
+- **The GUI consequence held again**: accept-lists, captions, and format
+  badges picked the new formats up from server truth; the only frontend
+  edits were widening the two OCR-badge checks to the new value.

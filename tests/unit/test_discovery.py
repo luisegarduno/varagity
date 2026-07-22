@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from varagity.config import Settings
 from varagity.ingest.discovery import Buckets, discover_documents
 
 
@@ -98,6 +99,47 @@ def test_allowed_but_unbucketed_extension_warns(
     assert any("no ingestion bucket" in r.message for r in caplog.records)
 
 
+def test_widened_formats_bucket_correctly(
+    tmp_path: Path, settings_env: Callable[..., None]
+) -> None:
+    """Widening: csv/ODF/macro variants → office, xhtml → web, rst → text, bitmaps → image."""
+    root = tmp_path / "docs"
+    root.mkdir()
+    for name in (
+        "pilotage.csv",
+        "manual.odt",
+        "inventory.ods",
+        "deck.odp",
+        "report.docm",
+        "template.dotx",
+        "slides.pptm",
+        "sheet.xlsm",
+        "notice.xhtml",
+        "tides.rst",
+        "sign.PNG",
+        "photo.webp",
+        "scan.tiff",
+    ):
+        (root / name).write_bytes(b"fake")
+    # Pin the shipped default whitelist (hermetic against a dev's env).
+    settings_env(ALLOWED_EXTENSIONS=Settings.model_fields["ALLOWED_EXTENSIONS"].default)
+    buckets = discover_documents(str(root), verbose=0)
+    assert {p.name for p in buckets.office} == {
+        "pilotage.csv",
+        "manual.odt",
+        "inventory.ods",
+        "deck.odp",
+        "report.docm",
+        "template.dotx",
+        "slides.pptm",
+        "sheet.xlsm",
+    }
+    assert [p.name for p in buckets.web] == ["notice.xhtml"]
+    assert [p.name for p in buckets.text_like] == ["tides.rst"]
+    assert {p.name for p in buckets.image} == {"sign.PNG", "photo.webp", "scan.tiff"}
+    assert buckets.total == 13
+
+
 def test_invalid_verbose_raises(corpus: Path, settings_env: Callable[..., None]) -> None:
     settings_env(ALLOWED_EXTENSIONS=".txt")
     with pytest.raises(ValueError, match="verbose"):
@@ -112,8 +154,9 @@ def test_buckets_total() -> None:
             pdf=[Path("b.pdf")],
             office=[Path("c.docx"), Path("d.xlsx")],
             web=[Path("e.html")],
+            image=[Path("f.png")],
         ).total
-        == 5
+        == 6
     )
 
 
@@ -121,5 +164,5 @@ def test_by_bucket_enumerates_every_bucket() -> None:
     """The render seam names each bucket exactly once, in a stable order."""
     buckets = Buckets(office=[Path("c.docx")])
     named = dict(buckets.by_bucket())
-    assert list(named) == ["text_like", "pdf", "office", "web"]
+    assert list(named) == ["text_like", "pdf", "office", "web", "image"]
     assert named["office"] == [Path("c.docx")]

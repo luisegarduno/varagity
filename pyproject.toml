@@ -17,6 +17,10 @@ dependencies = [
     "langchain-text-splitters>=1.1.2",
     "openai>=2.45.0",
     "pgvector>=0.5.0",
+    # OpenDocument ingestion (.odt/.ods/.odp): docling's opendocument
+    # backend imports odfdo lazily and raises without it — declared
+    # directly (docling's own extra is on the docling-slim package).
+    "odfdo>=3.9",
     # Page-preview locate/render (varagity/preview, ADR-010): declared
     # directly so the feature survives docling changing its backend deps —
     # both are already in the resolved set transitively (no image growth).

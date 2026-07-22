@@ -82,9 +82,10 @@ class ChunkRecord(BaseModel):
             the document's bytes last changed, independent of when they
             were ingested. ``None`` only on rows written before the field
             existed (or if the file vanished mid-ingest).
-        extraction: How text was extracted: ``"text"`` (default) or
-            ``"ocr_fallback"`` (set by the OCR fallback pass) — retrieval-quality
-            provenance beyond spec §8.1.
+        extraction: How text was extracted: ``"text"`` (default),
+            ``"ocr_fallback"`` (set by the PDF OCR fallback pass), or
+            ``"ocr"`` (image parser — OCR is that format's only path) —
+            retrieval-quality provenance beyond spec §8.1.
         heading_path: The chunk's markdown heading breadcrumb (e.g.
             ``"Operations > Dredging"``), set by the heading-aware chunkers
             (spec_v2 §7); ``None`` for strategies without structure.
@@ -163,7 +164,8 @@ class ChunkRecord(BaseModel):
                 ``None`` when the platform/filesystem doesn't expose one.
             file_modified_at: Filesystem mtime of the source file, or
                 ``None`` when it couldn't be read.
-            extraction: Extraction provenance (``"text"`` or ``"ocr_fallback"``).
+            extraction: Extraction provenance (``"text"``, ``"ocr"``, or
+                ``"ocr_fallback"``).
             heading_path: Markdown heading breadcrumb, or ``None`` for
                 strategies without structure.
 
@@ -280,7 +282,7 @@ class DocumentInfo(BaseModel):
         n_chunks: Chunks ingested (``0`` = no extractable text).
         ingested_at: When the document (last) landed in the stores.
         extraction_mix: Chunk count per extraction method (``text`` /
-            ``ocr_fallback``); empty for a 0-chunk document.
+            ``ocr`` / ``ocr_fallback``); empty for a 0-chunk document.
     """
 
     doc_id: str

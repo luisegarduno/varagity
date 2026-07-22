@@ -177,10 +177,11 @@ flowchart LR
 
 - **Ingestion** — `discover → parse → chunk → contextualize → embed →
   store(pgvector + Elasticsearch)`. Idempotent per file (byte-hash keyed).
-  Four parser families cover PDF (a two-pass Docling parse that OCRs scanned
-  pages automatically), plain text/markdown, office
-  (`.docx`/`.pptx`/`.xlsx`), and web (`.html`/`.htm`); the chunking strategy
-  is config-selected from five registered implementations.
+  Five parser families cover PDF (a two-pass Docling parse that OCRs scanned
+  pages automatically), plain text (`.txt`/`.md`/`.rst`), office (the
+  `.docx`/`.pptx`/`.xlsx` families, `.csv`, OpenDocument), web
+  (`.html`/`.htm`/`.xhtml`), and bitmap images (OCR-only); the chunking
+  strategy is config-selected from five registered implementations.
 - **Query** — `condense → embed(search query) → retrieve → generate →
   display`. The condense stage is v3's **chat engine** (`CHAT_ENGINE`,
   [ADR-011](adr/ADR-011-chat-engine-condense.md)): given the turn and its
@@ -258,16 +259,18 @@ caller edits:
 
 | Family | Registry | Selected by | Implementations |
 |---|---|---|---|
-| Parsers | `varagity/ingest/parsers/base.py` | discovery bucket | `text` (`.txt`/`.md`), `pdf` (Docling two-pass OCR), `office` (`.docx`/`.pptx`/`.xlsx`), `web` (`.html`/`.htm`) |
+| Parsers | `varagity/ingest/parsers/base.py` | discovery bucket | `text` (`.txt`/`.md`/`.rst`), `pdf` (Docling two-pass OCR), `office` (OOXML families / `.csv` / OpenDocument), `web` (`.html`/`.htm`/`.xhtml`), `image` (bitmaps, OCR-only) |
 | Chunking strategies | `varagity/chunking/base.py` | `CHUNKING_STRATEGY` | `recursive_character` (default — [ADR-008](adr/ADR-008-chunking-default.md)), `token_based`, `markdown_aware`, `semantic`, `docling_hybrid` |
 | Retrievers | `varagity/retrieval/base.py` | `RETRIEVAL_METHOD` | `semantic`, `bm25`, `hybrid`, `reranked` |
 | Chat engines | `varagity/chat/base.py` | `CHAT_ENGINE` | `simple` (default — [ADR-011](adr/ADR-011-chat-engine-condense.md)), `condense_context` |
 | OCR engines | `varagity/ingest/parsers/pdf.py` (a factory, deliberately not a registry) | `OCR_ENGINE` | `easyocr` (default, ADR-004), `tesseract` |
 | Model clients | `varagity/models/registry.py` | `model_type` argument | `embedding`, `rerank`, `default` (+ `reasoning`/`tool` aliases) |
 
-The `office` and `web` parsers share an *unregistered* Docling core
-(`parsers/docling_base.py`) — shared machinery stays a plain module; only
-selectable implementations register.
+The `office`, `web`, and `image` parsers share an *unregistered* Docling
+core (`parsers/docling_base.py`) — shared machinery stays a plain module;
+only selectable implementations register. (`image` layers the PDF parser's
+OCR-engine factory on top: an image has no text layer, so OCR always runs
+and its chunks carry `extraction: "ocr"`.)
 
 ## Cross-cutting conventions
 
@@ -356,7 +359,8 @@ varagity/
 │   ├── discovery.py      # scan DOCS_PATH, bucket by parser family
 │   ├── loader.py         # the single orchestration loop (idempotency, guards, dual-write)
 │   └── parsers/          # text.py, pdf.py (two-pass OCR + engine factory),
-│                         #   docling_base.py (shared core), office.py, web.py
+│                         #   docling_base.py (shared core), office.py, web.py,
+│                         #   image.py (OCR-only)
 ├── chunking/             # recursive_character (default), token_based, markdown_aware,
 │                         #   semantic, docling_hybrid
 ├── context/              # situate_context() — the contextual blurb

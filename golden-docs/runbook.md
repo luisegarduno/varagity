@@ -489,7 +489,10 @@ PDFs take a fast text-layer pass first; OCR (pass 2) triggers automatically
 when a document yields < `PDF_OCR_MIN_CHARS` non-whitespace chars, has
 ≥ `PDF_OCR_TEXTLESS_PAGE_RATIO` textless pages, or pass 1 raised. Chunks
 recovered this way carry `extraction: "ocr_fallback"` provenance
-(`SELECT ... WHERE metadata->>'extraction' = 'ocr_fallback'`).
+(`SELECT ... WHERE metadata->>'extraction' = 'ocr_fallback'`). Bitmap
+images (`.png`/`.jpg`/…) skip the trigger logic entirely: they have no
+text layer, so the `image` parser always runs the same configured engine
+in full-page mode and its chunks carry `extraction: "ocr"`.
 
 ```mermaid
 flowchart TB

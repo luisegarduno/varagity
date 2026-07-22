@@ -435,7 +435,7 @@ class DocumentOut(BaseModel):
         n_chunks: Chunks ingested (``0`` = no extractable text).
         ingested_at: When the document (last) landed in the stores.
         extraction_mix: Chunk count per extraction method (``text`` /
-            ``ocr_fallback``).
+            ``ocr`` / ``ocr_fallback``).
     """
 
     doc_id: str
