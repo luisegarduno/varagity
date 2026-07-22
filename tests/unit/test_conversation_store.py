@@ -1,11 +1,19 @@
 """Unit tests for the conversation store's pure logic.
 
 The SQL round-trips run against real Postgres in the integration suite;
-here a scripted fake connection covers the snapshot builder and the
-auto-title behavior (LLM cleanup, fallback, only-default-title guard).
+here a scripted fake connection covers the snapshot builder, the
+auto-title behavior (LLM cleanup, fallback, only-default-title guard),
+and each CRUD method's SQL shape, parameter marshalling, and row mapping.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
+
+import psycopg
+import pytest
+from psycopg.types.json import Json
 
 from varagity.stores.conversation_store import (
     DEFAULT_TITLE,
@@ -14,6 +22,9 @@ from varagity.stores.conversation_store import (
     _source_snapshot,
 )
 from varagity.stores.records import RetrievalTrace, RetrievedChunk
+
+CREATED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=UTC)
+UPDATED_AT = datetime(2026, 7, 21, 9, 5, 0, tzinfo=UTC)
 
 
 def make_chunk(*, with_trace: bool = True) -> RetrievedChunk:
@@ -197,6 +208,170 @@ class TestRecentTurns:
         assert store_with(conn).recent_turns("c1", limit=0) == []
         assert store_with(conn).recent_turns("c1", limit=-1) == []
         assert conn.queries == []  # the database is never touched
+
+
+class ScriptedCursor:
+    """One scripted result: fetchone/fetchall/iteration over the same rows."""
+
+    def __init__(self, *, row: Any = None, rows: list[Any] | None = None, rowcount: int = 0):
+        self._row = row
+        self._rows = rows or []
+        self.rowcount = rowcount
+
+    def fetchone(self) -> Any:
+        return self._row
+
+    def fetchall(self) -> list[Any]:
+        return self._rows
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._rows)
+
+
+class ScriptedConnection:
+    """Queue of scripted cursors; records every statement and transaction."""
+
+    def __init__(self, results: list[ScriptedCursor] | None = None) -> None:
+        self.results = list(results or [])
+        self.queries: list[tuple[str, Any]] = []
+        self.transactions = 0
+        self.closed = False
+
+    def execute(self, sql: str, params: Any = None) -> ScriptedCursor:
+        self.queries.append((sql, params))
+        return self.results.pop(0) if self.results else ScriptedCursor()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        self.transactions += 1
+        yield
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestLifecycle:
+    def test_init_connects_and_close_is_idempotent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = ScriptedConnection()
+        connects: list[tuple[str, bool]] = []
+        monkeypatch.setattr(
+            psycopg,
+            "connect",
+            lambda conninfo, autocommit: connects.append((conninfo, autocommit)) or conn,
+        )
+        store = ConversationStore("host=example dbname=x")
+        assert connects == [("host=example dbname=x", True)]
+        store.close()
+        assert conn.closed
+        store.close()  # already closed — not re-closed
+
+
+class TestConversationCrud:
+    def test_create_conversation_defaults_the_title(self) -> None:
+        conn = ScriptedConnection([ScriptedCursor(row=(CREATED_AT, UPDATED_AT))])
+        summary = store_with(conn).create_conversation()
+        assert summary.title == DEFAULT_TITLE
+        assert summary.message_count == 0
+        assert summary.created_at == CREATED_AT
+        assert len(summary.conversation_id) == 32  # uuid4 hex
+        assert conn.queries[0][1] == (summary.conversation_id, DEFAULT_TITLE)
+
+    def test_create_conversation_with_explicit_title(self) -> None:
+        conn = ScriptedConnection([ScriptedCursor(row=(CREATED_AT, UPDATED_AT))])
+        assert store_with(conn).create_conversation("Kelp").title == "Kelp"
+
+    def test_conversation_exists(self) -> None:
+        assert store_with(ScriptedConnection([ScriptedCursor(row=(1,))])).conversation_exists("c")
+        assert not store_with(ScriptedConnection([ScriptedCursor()])).conversation_exists("c")
+
+    def test_list_conversations_maps_rows(self) -> None:
+        conn = ScriptedConnection(
+            [ScriptedCursor(rows=[("c1", "Kelp", CREATED_AT, UPDATED_AT, 4)])]
+        )
+        (summary,) = store_with(conn).list_conversations()
+        assert summary.conversation_id == "c1"
+        assert summary.title == "Kelp"
+        assert summary.message_count == 4
+
+    def test_delete_conversation_reports_rowcount(self) -> None:
+        conn = ScriptedConnection([ScriptedCursor(rowcount=1)])
+        assert store_with(conn).delete_conversation("c1") == 1
+        assert conn.queries[0][1] == ("c1",)
+
+
+class TestGetConversation:
+    def test_unknown_id_returns_none(self) -> None:
+        assert store_with(ScriptedConnection([ScriptedCursor()])).get_conversation("nope") is None
+
+    def test_transcript_folds_sources_into_their_messages(self) -> None:
+        conversation_row = ScriptedCursor(row=("Kelp", CREATED_AT, UPDATED_AT))
+        source_rows = ScriptedCursor(
+            rows=[
+                ("m2", 1, "doc::0", {"score": 0.9}),
+                ("m2", 2, "doc::1", {"score": 0.5}),
+            ]
+        )
+        message_rows = ScriptedCursor(
+            rows=[
+                ("m1", "user", "How long?", CREATED_AT, None, None, None, None, None),
+                (
+                    "m2",
+                    "assistant",
+                    "About 12 km.",
+                    UPDATED_AT,
+                    "reranked",
+                    {"retrieval": 120},
+                    "thinking…",
+                    "kelp corridor length",
+                    "condense_context",
+                ),
+            ]
+        )
+        conn = ScriptedConnection([conversation_row, source_rows, message_rows])
+        detail = store_with(conn).get_conversation("c1")
+        assert detail is not None
+        assert detail.title == "Kelp"
+        user, assistant = detail.messages
+        assert user.sources == []
+        assert assistant.retrieval_method == "reranked"
+        assert assistant.condensed_query == "kelp corridor length"
+        assert assistant.chat_engine == "condense_context"
+        assert [source.chunk_id for source in assistant.sources] == ["doc::0", "doc::1"]
+        assert assistant.sources[0].trace == {"score": 0.9}
+
+
+class TestAppendMessage:
+    def test_assistant_turn_snapshots_sources_in_one_transaction(self) -> None:
+        conn = ScriptedConnection()
+        message_id = store_with(conn).append_message(
+            "c1",
+            "assistant",
+            "About 12 km.",
+            retrieval_method="reranked",
+            latency_ms={"retrieval": 120},
+            reasoning="thinking…",
+            condensed_query="kelp corridor length",
+            chat_engine="condense_context",
+            sources=[make_chunk()],
+        )
+        assert len(message_id) == 32
+        assert conn.transactions == 1
+        insert, source_insert, bump = conn.queries
+        assert "INSERT INTO messages" in insert[0]
+        assert insert[1][0] == message_id
+        assert isinstance(insert[1][5], Json)  # latency_ms marshalled as JSONB
+        assert "INSERT INTO message_sources" in source_insert[0]
+        assert source_insert[1][:3] == (message_id, 1, "doc::3")
+        assert isinstance(source_insert[1][3], Json)  # the spec_v2 §9.1 snapshot
+        assert "UPDATE conversations SET updated_at" in bump[0]
+        assert bump[1] == ("c1",)
+
+    def test_user_turn_writes_no_sources_and_null_latency(self) -> None:
+        conn = ScriptedConnection()
+        store_with(conn).append_message("c1", "user", "How long?")
+        insert, bump = conn.queries
+        assert insert[1][5] is None  # latency_ms stays NULL, not Json(None)
+        assert "UPDATE conversations" in bump[0]
 
 
 class TestAutoTitle:

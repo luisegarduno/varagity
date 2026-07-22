@@ -142,7 +142,7 @@ Python (this project uses [`uv`](https://github.com/astral-sh/uv)):
 
 ```bash
 uv sync                            # install deps (incl. dev/eval groups)
-uv run pytest                      # unit suite incl. async API tests (coverage floor: 80%)
+uv run pytest                      # unit suite incl. async API tests (coverage floor: 90%)
 uv run pytest -m integration       # real Postgres/ES via testcontainers (Docker)
 uv run pytest -m e2e               # full ingest→query over the fixtures corpus (Docker)
 uv run ruff check . && uv run ruff format --check .
@@ -168,7 +168,7 @@ bun run gen:types                  # regenerate lib/types.ts from the API's Open
 `docker compose build web` (or restart `bun run dev`).
 
 CI (GitHub Actions) runs two jobs on every push — **Python**: lint + format
-check, mypy, the unit suite under the 80% coverage floor (API included), and
+check, mypy, the unit suite under the 90% coverage floor (API included), and
 a strict docs build; **web**: `bun run lint`, the Vitest suite under a
 coverage floor, and a production build. The integration/e2e suites and the Playwright
 browser tests stay local — they need Docker and the live stack.

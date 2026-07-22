@@ -120,5 +120,5 @@ markers = [
 addopts = "--cov=varagity --cov-report=term-missing -m 'not integration and not e2e'"
 
 [tool.coverage.report]
-# The spec §15.3 floor; ratchet upward as coverage grows (unit suite ~87%).
-fail_under = 80
+# Ratcheted from the spec §15.3 floor of 80 as coverage grew (unit suite ~93%).
+fail_under = 90

@@ -273,3 +273,10 @@ class TestShowMatches:
         out = capture.get()
         assert "Trace" in out
         assert "—" in out
+
+    def test_paged_chunk_appends_the_page_to_its_source(self) -> None:
+        paged = _chunk(0, "page four text")
+        paged.metadata["page"] = 4
+        with console.capture() as capture:
+            cli_app._show_matches([paged])
+        assert "p.4" in capture.get()

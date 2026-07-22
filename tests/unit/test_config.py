@@ -510,3 +510,27 @@ class TestApiSettings:
             "http://localhost:3000",
             "https://varagity.local",
         ]
+
+
+class TestOcrLanguages:
+    def test_language_list_strips_lowercases_and_dedupes(self) -> None:
+        settings = Settings(_env_file=None, OCR_LANGUAGES=" EN, de ,en,,fr ")
+        assert settings.ocr_language_list == ["en", "de", "fr"]
+
+    def test_order_is_preserved_for_the_primary_language(self) -> None:
+        assert Settings(_env_file=None, OCR_LANGUAGES="de,en").ocr_language_list == ["de", "en"]
+
+    def test_no_language_codes_fails_fast(self) -> None:
+        with pytest.raises(ValidationError, match="at least one language code"):
+            Settings(_env_file=None, OCR_LANGUAGES=" , ,")
+
+
+class TestPdfOcrTriggerValidation:
+    def test_negative_min_chars_fails_fast(self) -> None:
+        with pytest.raises(ValidationError, match="PDF_OCR_MIN_CHARS"):
+            Settings(_env_file=None, PDF_OCR_MIN_CHARS=-1)
+
+    @pytest.mark.parametrize("ratio", [-0.1, 1.1])
+    def test_textless_page_ratio_out_of_bounds_fails_fast(self, ratio: float) -> None:
+        with pytest.raises(ValidationError, match="PDF_OCR_TEXTLESS_PAGE_RATIO"):
+            Settings(_env_file=None, PDF_OCR_TEXTLESS_PAGE_RATIO=ratio)

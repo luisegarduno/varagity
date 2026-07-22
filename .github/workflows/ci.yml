@@ -1,7 +1,7 @@
 # Two parallel jobs on every push (spec §15.3), plus a
 # main-only publish:
 #   checks — Python gates: ruff lint/format, mypy, unit tests (coverage
-#            floor 80%), strict mkdocs build.
+#            floor 90%), strict mkdocs build.
 #   web    — frontend gates: eslint, Vitest unit tests (lib/ coverage
 #            floor), production next build.
 #   pages  — publishes the site/ tree built by `checks` to GitHub Pages.
@@ -48,7 +48,7 @@ jobs:
       - name: Types (mypy)
         run: uv run mypy varagity
 
-      - name: Unit tests (coverage floor 80%)
+      - name: Unit tests (coverage floor 90%)
         run: uv run pytest
 
       - name: Docs (mkdocs build --strict)

@@ -89,7 +89,7 @@ uv run --group eval main.py eval       # 5-config retrieval matrix + chunker swe
 uv run --group eval main.py eval ocr   # OCR engine benchmark
 uv run --group eval main.py eval chat  # multi-turn chat-engine eval (the ADR-011 decision harness)
 
-uv run pytest                      # unit suite incl. async API tests (coverage floor 80%)
+uv run pytest                      # unit suite incl. async API tests (coverage floor 90%)
 uv run pytest -m integration       # real Postgres/ES via testcontainers (needs Docker)
 uv run pytest -m e2e               # full pipeline over tests/fixtures/corpus (needs Docker)
 uv run ruff check . && uv run ruff format --check .
@@ -166,7 +166,7 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
   (testcontainers), `-m e2e` (fake embeddings/LLM + real containerized stores); web unit
   tests via Vitest (`bun run test`, runs in CI under a coverage floor); Playwright e2e is
   opt-in (`bun --cwd web run e2e`, needs the live stack). CI = two jobs per push: Python
-  (ruff, mypy, unit suite at the 80% floor, `mkdocs build --strict`) + web (lint,
+  (ruff, mypy, unit suite at the 90% floor, `mkdocs build --strict`) + web (lint,
   coverage-gated Vitest, build); integration/e2e/Playwright stay local. Shared container
   setup lives in `varagity/eval/containers.py`.
 
