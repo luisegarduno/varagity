@@ -18,6 +18,8 @@ function chunk(overrides: Partial<EvidenceChunk> = {}): EvidenceChunk {
     fileType: "pdf",
     page: 1,
     extraction: "text",
+    fileCreatedAt: null,
+    fileModifiedAt: null,
     trace: null,
     ...overrides,
   };

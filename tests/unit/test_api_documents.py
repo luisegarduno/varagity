@@ -395,6 +395,67 @@ class TestRelativePathUpload:
         assert entry["replaced"] is True
         assert (docs_root / "q3" / "notes.md").read_bytes() == b"v2 longer"
 
+
+class TestModifiedUpload:
+    """The positional ``modified`` contract: stored files keep the document's clock."""
+
+    async def test_modified_restamps_the_stored_files_mtime(self, docs_root: Path) -> None:
+        stamp = datetime(2024, 5, 4, 12, 30, 45, tzinfo=UTC)
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("notes.md", b"# hi there")],
+            data={"modified": [str(int(stamp.timestamp() * 1000))]},
+        )
+        assert response.status_code == 201
+        assert response.json()["files"][0]["stored"] is True
+        mtime = (docs_root / "notes.md").stat().st_mtime
+        assert mtime == pytest.approx(stamp.timestamp())
+
+    async def test_empty_and_malformed_entries_keep_the_write_time(self, docs_root: Path) -> None:
+        before = datetime.now(UTC).timestamp()
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[
+                upload_part("a.md", b"aa"),
+                upload_part("b.md", b"bb"),
+                upload_part("c.md", b"cc"),
+            ],
+            data={"modified": ["", "not-a-number", "-5"]},
+        )
+        assert response.status_code == 201
+        assert all(entry["stored"] for entry in response.json()["files"])
+        for name in ("a.md", "b.md", "c.md"):
+            assert (docs_root / name).stat().st_mtime >= before  # untouched write time
+
+    async def test_modified_composes_with_relative_paths(self, docs_root: Path) -> None:
+        stamp = datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC)
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("notes.md", b"nested")],
+            data={"paths": ["q3/notes.md"], "modified": [str(int(stamp.timestamp() * 1000))]},
+        )
+        assert response.status_code == 201
+        mtime = (docs_root / "q3" / "notes.md").stat().st_mtime
+        assert mtime == pytest.approx(stamp.timestamp())
+
+    async def test_modified_length_mismatch_is_a_structured_422(self, docs_root: Path) -> None:
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("a.md", b"a"), upload_part("b.md", b"b")],
+            data={"modified": ["1700000000000"]},
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "modified_mismatch"
+        assert list(docs_root.iterdir()) == []  # checked before anything is written
+
     async def test_disallowed_extension_still_rejected_on_the_path_route(
         self, docs_root: Path
     ) -> None:

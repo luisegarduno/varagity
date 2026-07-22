@@ -6,7 +6,10 @@ auto-ingest** — ingestion is its own explicit action). v3 adds optional
 per-file relative ``paths`` (folder uploads): structure is *identity*, not
 decoration — ``doc_id`` hashes the path relative to ``DOCS_PATH``, so
 ``q3/notes.md`` and ``q4/notes.md`` must land at distinct paths or the
-second silently replaces the first. ``GET`` lists the ``documents`` table
+second silently replaces the first. The optional per-file ``modified``
+entries (epoch milliseconds, the browser's ``File.lastModified``) restamp
+each stored file's mtime, so the ``file_modified_at`` chunk provenance
+reflects the *document's* clock instead of the upload's. ``GET`` lists the ``documents`` table
 with each document's extraction mix and its path relative to ``DOCS_PATH``
 (the GUI's folder-grouping key). ``DELETE`` removes a document's chunks
 from **both** stores — the v1 gap ("removing a file does not remove its
@@ -29,6 +32,7 @@ to the full-text view.
 
 import contextlib
 import logging
+import os
 import re
 import shutil
 import unicodedata
@@ -185,8 +189,47 @@ def _upload_size(upload: UploadFile) -> int:
     return size
 
 
+def _apply_client_mtime(target: Path, raw_modified: str | None) -> None:
+    """Restamp a stored upload's mtime from the client's declared timestamp.
+
+    A freshly-written upload's mtime is the upload instant — useless as
+    document provenance (it collapses into the ingest time the
+    ``file_modified_at`` chunk field exists to be distinct from). The
+    browser knows the original file's clock (``File.lastModified``, epoch
+    milliseconds), so the client sends it along and the write applies it.
+
+    Best-effort by design: the timestamp is decoration on an
+    already-stored file, so an absent (``None``/``""``), unparseable, or
+    non-positive value — or a filesystem that refuses ``utime`` — logs and
+    returns rather than failing an upload that already succeeded.
+
+    Args:
+        target: The just-written file.
+        raw_modified: Epoch **milliseconds** as a decimal string, or
+            ``None``/``""`` to keep the write time.
+    """
+    if not raw_modified:
+        return
+    try:
+        seconds = float(raw_modified) / 1000.0
+    except ValueError:
+        logger.warning("ignoring unparseable modified timestamp %r for %s", raw_modified, target)
+        return
+    if seconds <= 0:
+        logger.warning("ignoring non-positive modified timestamp %r for %s", raw_modified, target)
+        return
+    try:
+        os.utime(target, (seconds, seconds))
+    except OSError as error:
+        logger.warning("could not restamp mtime on %s: %s", target, error)
+
+
 def _store_upload(
-    upload: UploadFile, docs_root: Path, max_bytes: int, raw_path: str | None = None
+    upload: UploadFile,
+    docs_root: Path,
+    max_bytes: int,
+    raw_path: str | None = None,
+    raw_modified: str | None = None,
 ) -> UploadedFileOut:
     """Validate and write one uploaded file into the corpus directory.
 
@@ -197,6 +240,9 @@ def _store_upload(
         raw_path: The client-declared relative path for this file (folder
             uploads, spec_v3 §5.2). ``None`` or ``""`` keeps the flat
             single-file contract byte-identical.
+        raw_modified: The client-declared last-modified time for this file
+            (epoch milliseconds), applied to the stored file's mtime.
+            ``None`` or ``""`` keeps the write time.
 
     Returns:
         The per-file outcome (rejections are reported, never raised — one
@@ -270,6 +316,7 @@ def _store_upload(
     finally:
         with contextlib.suppress(OSError):  # best-effort cleanup on the same bad mount
             partial.unlink(missing_ok=True)
+    _apply_client_mtime(target, raw_modified)
     logger.info("stored upload %s (%d bytes%s)", target, written, ", replaced" if replaced else "")
     return UploadedFileOut(
         file_name=name,
@@ -284,6 +331,7 @@ def _store_upload(
 def upload_documents(
     files: list[UploadFile],
     paths: Annotated[list[str] | None, Form()] = None,
+    modified: Annotated[list[str] | None, Form()] = None,
 ) -> UploadResponse:
     """Upload file(s) into ``DOCS_PATH`` (no auto-ingest).
 
@@ -300,18 +348,28 @@ def upload_documents(
     keeps that file on the flat path. Without ``paths`` the flat contract
     is untouched.
 
+    With ``modified`` (same positional contract), each stored file's mtime
+    is restamped to the client's declared last-modified time (epoch
+    milliseconds — the browser's ``File.lastModified``), so the
+    ``file_modified_at`` provenance on the next ingest's chunks carries the
+    document's clock rather than the upload instant. An empty-string entry
+    keeps that file's write time; a malformed entry is ignored per file.
+
     Args:
         files: The multipart file parts.
         paths: Optional relative path per file, positionally aligned with
             ``files``.
+        modified: Optional last-modified epoch-milliseconds per file,
+            positionally aligned with ``files``.
 
     Returns:
         Per-file outcomes, in upload order.
 
     Raises:
-        HTTPException: ``422 paths_mismatch`` when ``paths`` is present
-            with a different length than ``files`` (a positional contract
-            must be checked, not trusted); ``422 too_many_files`` / ``422
+        HTTPException: ``422 paths_mismatch`` / ``422 modified_mismatch``
+            when ``paths`` / ``modified`` is present with a different
+            length than ``files`` (a positional contract must be checked,
+            not trusted); ``422 too_many_files`` / ``422
             batch_too_large`` when the batch busts ``UPLOAD_MAX_FILES`` /
             ``UPLOAD_MAX_TOTAL_MB`` (checked before anything is written);
             ``422 no_file_stored`` when every file was rejected on its own
@@ -327,6 +385,15 @@ def upload_documents(
             detail={
                 "code": "paths_mismatch",
                 "message": f"paths carries {len(paths)} entries for {len(files)} files — "
+                "the positional pairing must match exactly",
+            },
+        )
+    if modified is not None and len(modified) != len(files):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "modified_mismatch",
+                "message": f"modified carries {len(modified)} entries for {len(files)} files — "
                 "the positional pairing must match exactly",
             },
         )
@@ -369,9 +436,14 @@ def upload_documents(
     max_bytes = settings.UPLOAD_MAX_MB * 1024 * 1024
 
     matched_paths: list[str | None] = list(paths) if paths is not None else [None] * len(files)
+    matched_modified: list[str | None] = (
+        list(modified) if modified is not None else [None] * len(files)
+    )
     results = [
-        _store_upload(upload, docs_root, max_bytes, raw_path)
-        for upload, raw_path in zip(files, matched_paths, strict=True)
+        _store_upload(upload, docs_root, max_bytes, raw_path, raw_modified)
+        for upload, raw_path, raw_modified in zip(
+            files, matched_paths, matched_modified, strict=True
+        )
     ]
     if not any(result.stored for result in results):
         if any(result.reason == "write_failed" for result in results):

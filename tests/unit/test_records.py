@@ -1,6 +1,6 @@
 """Unit tests for varagity.stores.records (id/hash derivation, composition)."""
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 from varagity.stores.records import (
     ChunkRecord,
@@ -102,6 +102,23 @@ class TestChunkRecordCreate:
         assert dumped["page"] is None
         assert isinstance(dumped["created_at"], str)
         assert dumped["extraction"] == "text"
+
+    def test_file_timestamps_default_to_none(self) -> None:
+        """Rows written before the fields existed stay valid (no backfill)."""
+        record = _record()
+        assert record.file_created_at is None
+        assert record.file_modified_at is None
+
+    def test_file_timestamps_are_distinct_from_ingest_time_and_round_trip(self) -> None:
+        """The document's clock, not the chunker's: created_at stays ingest time."""
+        modified = datetime(2024, 5, 4, 12, 30, 45, tzinfo=UTC)
+        created = datetime(2024, 1, 2, 8, 0, 0, tzinfo=UTC)
+        record = _record(file_created_at=created, file_modified_at=modified)
+        assert record.file_modified_at == modified
+        assert record.created_at > modified  # ingest happened "now", years later
+        dumped = record.model_dump(mode="json")
+        assert datetime.fromisoformat(dumped["file_modified_at"]) == modified
+        assert datetime.fromisoformat(dumped["file_created_at"]) == created
 
 
 class TestRetrievedChunk:

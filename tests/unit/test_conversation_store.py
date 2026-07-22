@@ -29,6 +29,8 @@ def make_chunk(*, with_trace: bool = True) -> RetrievedChunk:
             "file_type": "pdf",
             "page": 4,
             "extraction": "ocr_fallback",
+            "file_created_at": "2024-01-02T08:00:00Z",
+            "file_modified_at": "2024-05-04T12:30:45Z",
         },
         score=0.87,
         trace=(
@@ -60,11 +62,21 @@ class TestSourceSnapshot:
         assert snapshot["file_type"] == "pdf"
         assert snapshot["page"] == 4
         assert snapshot["extraction"] == "ocr_fallback"
+        assert snapshot["file_created_at"] == "2024-01-02T08:00:00Z"
+        assert snapshot["file_modified_at"] == "2024-05-04T12:30:45Z"
         assert snapshot["trace"]["semantic_rank"] == 1
         assert snapshot["trace"]["rerank_score"] == 0.98
 
     def test_snapshot_without_trace_is_null(self) -> None:
         assert _source_snapshot(make_chunk(with_trace=False))["trace"] is None
+
+    def test_snapshot_tolerates_pre_timestamp_metadata(self) -> None:
+        """Chunks ingested before the fields existed snapshot as None, not KeyError."""
+        chunk = make_chunk()
+        del chunk.metadata["file_created_at"], chunk.metadata["file_modified_at"]
+        snapshot = _source_snapshot(chunk)
+        assert snapshot["file_created_at"] is None
+        assert snapshot["file_modified_at"] is None
 
 
 class ScriptedLLM:

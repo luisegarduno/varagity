@@ -11,6 +11,7 @@ import {
   docIdFromChunkId,
   evidenceFromMessage,
   evidenceFromRetrieval,
+  fileClock,
   formatTokensPerSecond,
   latencyRecord,
   LIVE_EVIDENCE_KEY,
@@ -32,6 +33,8 @@ const chunkA: RetrievedChunk = {
     page: null,
     extraction: "text",
     chunking_strategy: "simple",
+    file_created_at: "2024-01-02T08:00:00Z",
+    file_modified_at: "2024-05-04T12:30:45Z",
   },
   score: 0.9973,
   trace: {
@@ -111,14 +114,19 @@ describe("evidenceFromRetrieval", () => {
       fileType: "md",
       page: null,
       extraction: "text",
+      fileCreatedAt: "2024-01-02T08:00:00Z",
+      fileModifiedAt: "2024-05-04T12:30:45Z",
     });
     expect(first.trace?.rerank_delta).toBe(1);
+    // chunkB predates the timestamp fields — they normalize to null.
     expect(second).toMatchObject({
       key: "174928b2d662c122::4",
       docId: "174928b2d662c122",
       rank: 2,
       page: 7,
       extraction: "ocr_fallback",
+      fileCreatedAt: null,
+      fileModifiedAt: null,
       trace: null,
     });
   });
@@ -144,6 +152,8 @@ describe("sourcesFromRetrieval / evidenceFromMessage", () => {
       source: "/docs/marine/kelp_corridor.md",
       file_name: "kelp_corridor.md",
       extraction: "text",
+      file_created_at: "2024-01-02T08:00:00Z",
+      file_modified_at: "2024-05-04T12:30:45Z",
     });
 
     // The persisted view renders the same chunks as the live view did —
@@ -253,6 +263,44 @@ describe("condensedQuery threading (spec_v3 §4.7)", () => {
       ],
     };
     expect(evidenceFromMessage(legacy, null)?.condensedQuery).toBeNull();
+  });
+});
+
+describe("fileClock", () => {
+  const modifiedIso = "2024-05-04T12:30:45Z";
+  const createdIso = "2024-01-02T08:00:00Z";
+
+  it("renders the modified date, with both full stamps in the tooltip", () => {
+    const clock = fileClock({
+      fileCreatedAt: createdIso,
+      fileModifiedAt: modifiedIso,
+    });
+    // Locale-dependent output: build the expectation with the same API.
+    expect(clock?.text).toBe(
+      `modified ${new Date(modifiedIso).toLocaleDateString()}`,
+    );
+    expect(clock?.title).toBe(
+      `Source file modified ${new Date(modifiedIso).toLocaleString()}` +
+        ` · created ${new Date(createdIso).toLocaleString()}`,
+    );
+  });
+
+  it("omits the birth time when the filesystem recorded none", () => {
+    const clock = fileClock({ fileCreatedAt: null, fileModifiedAt: modifiedIso });
+    expect(clock?.title).toBe(
+      `Source file modified ${new Date(modifiedIso).toLocaleString()}`,
+    );
+  });
+
+  it("returns null for pre-timestamp chunks and unparseable values", () => {
+    expect(fileClock({ fileCreatedAt: null, fileModifiedAt: null })).toBeNull();
+    // A birth time alone is not worth a segment the line sorts by mtime.
+    expect(
+      fileClock({ fileCreatedAt: createdIso, fileModifiedAt: null }),
+    ).toBeNull();
+    expect(
+      fileClock({ fileCreatedAt: null, fileModifiedAt: "not-a-date" }),
+    ).toBeNull();
   });
 });
 

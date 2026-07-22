@@ -58,7 +58,9 @@ discovery/parse/chunk are local and deterministic, so they carry none (below).
 
 - **One orchestration loop.** The loader (`varagity/ingest/loader.py`) owns
   the loop — idempotency skip, empty-extraction guard, per-file failure
-  containment, `original_index` allocation — and invokes each stage through
+  containment, `original_index` allocation, file-clock provenance capture
+  (`file_timestamps` → `file_created_at`/`file_modified_at` on every
+  record) — and invokes each stage through
   an `IngestStages` seam. The flow passes `@task`-wrapped equivalents of the
   same stage functions through the same loop, so plain and tracked execution
   cannot drift. The task bundle is public (`TASK_STAGES`) — the API's ingest

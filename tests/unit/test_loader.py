@@ -1,14 +1,16 @@
 """Unit tests for the ingestion loader (identity/contextual paths + guards)."""
 
 import logging
+import os
 from collections import Counter
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from varagity.ingest import loader as loader_module
-from varagity.ingest.loader import MIN_EXTRACTED_CHARS, ingest_corpus
+from varagity.ingest.loader import MIN_EXTRACTED_CHARS, file_timestamps, ingest_corpus
 from varagity.stores.records import ChunkRecord
 
 
@@ -216,6 +218,79 @@ def test_happy_path_skeleton_invariants(pinned_settings: None, corpus: Path) -> 
 
     # injected store is NOT closed by the loader (caller owns it)
     assert store.closed is False
+
+
+class TestFileTimestamps:
+    """The file-clock provenance helper (created/modified, not ingest time)."""
+
+    def test_modified_reads_the_files_mtime(self, tmp_path: Path) -> None:
+        target = tmp_path / "doc.md"
+        target.write_text("content")
+        stamp = datetime(2024, 5, 4, 12, 30, 45, tzinfo=UTC)
+        os.utime(target, (stamp.timestamp(), stamp.timestamp()))
+        _, modified = file_timestamps(target)
+        assert modified == stamp
+
+    def test_missing_file_yields_none_pair(self, tmp_path: Path) -> None:
+        assert file_timestamps(tmp_path / "vanished.md") == (None, None)
+
+    @pytest.mark.skipif(
+        hasattr(Path(__file__).stat(), "st_birthtime"),
+        reason="platform exposes st_birthtime directly; the fallback never runs",
+    )
+    def test_created_comes_from_the_gnu_stat_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "doc.md"
+        target.write_text("content")
+        monkeypatch.setattr(loader_module, "_birthtime_fallback", lambda path: 1_700_000_000.0)
+        created, _ = file_timestamps(target)
+        assert created == datetime.fromtimestamp(1_700_000_000.0, tz=UTC)
+
+    def test_birthtime_fallback_parses_gnu_stat_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """%W prints epoch seconds, 0 when the filesystem records no birth time."""
+
+        class FakeCompleted:
+            def __init__(self, stdout: str) -> None:
+                self.stdout = stdout
+
+        outputs = iter(["1700000000\n", "0\n", "not-a-number\n", ""])
+        monkeypatch.setattr(
+            loader_module.subprocess,
+            "run",
+            lambda *args, **kwargs: FakeCompleted(next(outputs)),
+        )
+        target = tmp_path / "doc.md"
+        target.write_text("content")
+        assert loader_module._birthtime_fallback(target) == 1_700_000_000.0
+        assert loader_module._birthtime_fallback(target) is None  # unknown
+        assert loader_module._birthtime_fallback(target) is None  # non-GNU stat noise
+        assert loader_module._birthtime_fallback(target) is None  # empty stdout
+
+    def test_birthtime_fallback_contains_subprocess_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def explode(*args: object, **kwargs: object) -> None:
+            raise OSError("stat binary missing")
+
+        monkeypatch.setattr(loader_module.subprocess, "run", explode)
+        assert loader_module._birthtime_fallback(tmp_path / "doc.md") is None
+
+
+def test_file_timestamps_land_on_every_record(pinned_settings: None, corpus: Path) -> None:
+    """Chunk metadata carries the source file's clock, not the ingest clock."""
+    stamp = datetime(2024, 5, 4, 12, 30, 45, tzinfo=UTC)
+    os.utime(corpus / "aurora.md", (stamp.timestamp(), stamp.timestamp()))
+    store = FakeStore()
+    ingest_corpus(str(corpus), store=store, embeddings=FakeEmbeddings(), verbose=0)
+
+    aurora = [r for r in store.records if r.file_name == "aurora.md"]
+    assert aurora and all(r.file_modified_at == stamp for r in aurora)
+    assert all(r.created_at > stamp for r in aurora)  # ingest time is independent
+    # And it survives the metadata JSONB dump the vector store persists.
+    assert datetime.fromisoformat(aurora[0].model_dump(mode="json")["file_modified_at"]) == stamp
 
 
 def test_original_index_monotonic_from_store_watermark(pinned_settings: None, corpus: Path) -> None:

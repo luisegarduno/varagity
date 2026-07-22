@@ -185,6 +185,8 @@ def _source_snapshot(chunk: RetrievedChunk) -> dict[str, Any]:
         "file_type": chunk.metadata.get("file_type"),
         "page": chunk.metadata.get("page"),
         "extraction": chunk.metadata.get("extraction"),
+        "file_created_at": chunk.metadata.get("file_created_at"),
+        "file_modified_at": chunk.metadata.get("file_modified_at"),
         "trace": None if chunk.trace is None else chunk.trace.model_dump(mode="json"),
     }
 

@@ -11,6 +11,20 @@
             "title": "Files",
             "type": "array"
           },
+          "modified": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified"
+          },
           "paths": {
             "anyOf": [
               {
@@ -1851,7 +1865,7 @@
         ]
       },
       "post": {
-        "description": "Upload file(s) into ``DOCS_PATH`` (no auto-ingest).\n\nEach file is validated and stored independently; rejected files are\nreported per-file so a mixed batch partially succeeds. A same-named\nexisting file is replaced (the re-upload flow) \u2014 its changed content\nhash makes the next ingest re-process it.\n\nWith ``paths`` (folder uploads, spec_v3 \u00a75.2), each file lands at its\nsanitized relative path under ``DOCS_PATH``, preserving nested\nstructure \u2014 structure is *identity*: ``doc_id`` hashes the relative\npath, so ``q3/notes.md`` and ``q4/notes.md`` must not collapse onto one\nname. Entries pair with ``files`` positionally; an empty-string entry\nkeeps that file on the flat path. Without ``paths`` the flat contract\nis untouched.\n\nArgs:\n    files: The multipart file parts.\n    paths: Optional relative path per file, positionally aligned with\n        ``files``.\n\nReturns:\n    Per-file outcomes, in upload order.\n\nRaises:\n    HTTPException: ``422 paths_mismatch`` when ``paths`` is present\n        with a different length than ``files`` (a positional contract\n        must be checked, not trusted); ``422 too_many_files`` / ``422\n        batch_too_large`` when the batch busts ``UPLOAD_MAX_FILES`` /\n        ``UPLOAD_MAX_TOTAL_MB`` (checked before anything is written);\n        ``422 no_file_stored`` when every file was rejected on its own\n        merits (extension/size/name/path); ``500\n        docs_path_not_writable`` when nothing landed because the server\n        couldn't write ``DOCS_PATH`` (e.g. the ``./docs`` bind mount is\n        not writable by the api container's user).",
+        "description": "Upload file(s) into ``DOCS_PATH`` (no auto-ingest).\n\nEach file is validated and stored independently; rejected files are\nreported per-file so a mixed batch partially succeeds. A same-named\nexisting file is replaced (the re-upload flow) \u2014 its changed content\nhash makes the next ingest re-process it.\n\nWith ``paths`` (folder uploads, spec_v3 \u00a75.2), each file lands at its\nsanitized relative path under ``DOCS_PATH``, preserving nested\nstructure \u2014 structure is *identity*: ``doc_id`` hashes the relative\npath, so ``q3/notes.md`` and ``q4/notes.md`` must not collapse onto one\nname. Entries pair with ``files`` positionally; an empty-string entry\nkeeps that file on the flat path. Without ``paths`` the flat contract\nis untouched.\n\nWith ``modified`` (same positional contract), each stored file's mtime\nis restamped to the client's declared last-modified time (epoch\nmilliseconds \u2014 the browser's ``File.lastModified``), so the\n``file_modified_at`` provenance on the next ingest's chunks carries the\ndocument's clock rather than the upload instant. An empty-string entry\nkeeps that file's write time; a malformed entry is ignored per file.\n\nArgs:\n    files: The multipart file parts.\n    paths: Optional relative path per file, positionally aligned with\n        ``files``.\n    modified: Optional last-modified epoch-milliseconds per file,\n        positionally aligned with ``files``.\n\nReturns:\n    Per-file outcomes, in upload order.\n\nRaises:\n    HTTPException: ``422 paths_mismatch`` / ``422 modified_mismatch``\n        when ``paths`` / ``modified`` is present with a different\n        length than ``files`` (a positional contract must be checked,\n        not trusted); ``422 too_many_files`` / ``422\n        batch_too_large`` when the batch busts ``UPLOAD_MAX_FILES`` /\n        ``UPLOAD_MAX_TOTAL_MB`` (checked before anything is written);\n        ``422 no_file_stored`` when every file was rejected on its own\n        merits (extension/size/name/path); ``500\n        docs_path_not_writable`` when nothing landed because the server\n        couldn't write ``DOCS_PATH`` (e.g. the ``./docs`` bind mount is\n        not writable by the api container's user).",
         "operationId": "upload_documents_api_documents_post",
         "requestBody": {
           "content": {

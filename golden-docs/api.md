@@ -35,6 +35,7 @@ The code vocabulary, as built:
 | `unknown_setting` / `invalid_settings` | 422 | `PATCH /api/settings` — unknown name / value failing the `Settings` validators (linked settings validate as a merged whole). |
 | `no_file_stored` | 422 | `POST /api/documents` when every file in the batch was rejected. |
 | `paths_mismatch` | 422 | `POST /api/documents` when the `paths` form field doesn't pair 1:1 with `files` (the folder-upload positional contract is checked, not trusted). |
+| `modified_mismatch` | 422 | `POST /api/documents` when the `modified` form field (per-file last-modified epoch-ms; restamps each stored file's mtime so `file_modified_at` provenance survives the upload) doesn't pair 1:1 with `files`. Malformed *entries* are ignored per file, not errors. |
 | `too_many_files` / `batch_too_large` | 422 | `POST /api/documents` when the batch busts `UPLOAD_MAX_FILES` / `UPLOAD_MAX_TOTAL_MB` — rejected before any byte is written. Per-file problems (`invalid_path`, `path_too_deep`, `extension_not_allowed`, `file_too_large`, …) are **not** errors: they ride `UploadedFileOut.reason` inside the 201. |
 | `conversation_not_found` | 404 | `POST /api/chat` (pre-stream) and the conversation routes. |
 | `document_not_found` | 404 | `DELETE /api/documents/{doc_id}` and the two `…/preview/*` routes — the bulk `POST /api/documents/delete` reports unknown ids in `not_found` rather than failing the batch. |

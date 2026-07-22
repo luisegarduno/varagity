@@ -13,7 +13,7 @@ import {
   CollapsiblePanel,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import type { EvidenceChunk } from "@/lib/evidence";
+import { fileClock, type EvidenceChunk } from "@/lib/evidence";
 import { highlightTerms } from "@/lib/highlight";
 import { previewEligible } from "@/lib/preview";
 import { configQuery } from "@/lib/queries";
@@ -53,8 +53,9 @@ export function HighlightedText({
 
 /**
  * One evidence row (spec_v2 §4.6): rank + final score, the trace badges,
- * source provenance (file, page, format, OCR fallback), the contextual
- * blurb, and the expandable full chunk text with query-term highlights.
+ * source provenance (file, page, the file's modified date, format, OCR
+ * fallback), the contextual blurb, and the expandable full chunk text
+ * with query-term highlights.
  * `className`/`style` pass through for the panel's arrival stagger.
  */
 export function ChunkCard({
@@ -71,6 +72,7 @@ export function ChunkCard({
   const [expanded, setExpanded] = useState(false);
   const { data: config = null } = useQuery(configQuery());
   const ocr = chunk.extraction === "ocr_fallback";
+  const clock = fileClock(chunk);
   // Belt and braces with the server's kill switch: while config is still
   // in flight the chunk stays optimistic — a disabled server would answer
   // the locate with `preview_disabled` and the panel falls back to text.
@@ -118,6 +120,7 @@ export function ChunkCard({
           {chunk.fileName ?? chunk.source ?? "unknown source"}
         </span>
         {chunk.page !== null && <span>page {chunk.page}</span>}
+        {clock && <span title={clock.title}>{clock.text}</span>}
         {chunk.fileType && (
           <Badge variant="outline" className="font-mono uppercase">
             {chunk.fileType}

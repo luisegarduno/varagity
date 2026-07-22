@@ -36,8 +36,10 @@ one orchestration loop, with or without Prefect.
 """
 
 import logging
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -99,6 +101,67 @@ class IngestSummary:
     unsupported: int = 0
     failed: int = 0
     chunks: int = 0
+
+
+def file_timestamps(path: Path) -> tuple[datetime | None, datetime | None]:
+    """Read a file's filesystem timestamps — document provenance, not ingest time.
+
+    These land on every chunk's metadata record (``file_created_at`` /
+    ``file_modified_at``), answering "how old is this source?" independently
+    of ``created_at`` (which records when the chunk was ingested).
+
+    Birth time is best-effort by nature: ``os.stat`` exposes
+    ``st_birthtime`` on macOS/Windows but not on Linux (CPython doesn't
+    surface ``statx``), so :func:`_birthtime_fallback` shells out to GNU
+    coreutils there; filesystems without birth times, or a copy/download
+    that reset them, yield ``None`` rather than a guess (``st_ctime`` is
+    inode-change time, not creation, and would lie).
+
+    Args:
+        path: The file to stat.
+
+    Returns:
+        A ``(created, modified)`` pair of aware UTC datetimes; either is
+        ``None`` when unavailable (both, if the file cannot be stat'd).
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None, None
+    modified = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+    birth = getattr(stat, "st_birthtime", None) or _birthtime_fallback(path)
+    created = None if birth is None else datetime.fromtimestamp(birth, tz=UTC)
+    return created, modified
+
+
+def _birthtime_fallback(path: Path) -> float | None:
+    """Read a file's birth time via GNU coreutils (``stat -c %W``).
+
+    The Linux leg of :func:`file_timestamps`: the kernel exposes birth
+    times through ``statx()``, which CPython doesn't wrap — but coreutils'
+    ``stat`` does. One short subprocess per *file* (not per chunk) is noise
+    next to parsing and embedding.
+
+    Args:
+        path: The file to stat.
+
+    Returns:
+        The birth time as epoch seconds, or ``None`` when unknown (``%W``
+        prints ``0``), on non-GNU ``stat`` implementations, or on any
+        subprocess failure.
+    """
+    try:
+        result = subprocess.run(
+            ["stat", "-c", "%W", "--", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        birth = float(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return birth if birth > 0 else None
 
 
 def parse_document(parser: Parser, path: Path, *, verbose: int) -> RawDocument:
@@ -492,6 +555,7 @@ def _ingest_file(
         )
         return "no_text", 0
 
+    file_created_at, file_modified_at = file_timestamps(path)
     chunks = stages.chunk(raw_doc, verbose=verbose)
     contexts = stages.contextualize(
         document_text=raw_doc.text,
@@ -519,6 +583,8 @@ def _ingest_file(
             chunking_strategy=settings.CHUNKING_STRATEGY,
             embedding_model=settings.EMBEDDING_MODEL,
             content_hash=file_hash,
+            file_created_at=file_created_at,
+            file_modified_at=file_modified_at,
         )
         for chunk_index, chunk in enumerate(chunks)
     ]

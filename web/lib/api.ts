@@ -154,6 +154,8 @@ export function listDocuments(): Promise<DocumentOut[]> {
  * sets the multipart boundary itself, so no content-type header here.
  * `paths` (folder uploads, spec_v3 §5.2) pairs one relative path per file,
  * positionally — the server rejects the batch when the lengths differ.
+ * Each file's `lastModified` rides along the same way (`modified`, epoch
+ * ms) so stored files keep the document's clock, not the upload instant.
  */
 export async function uploadDocuments(
   files: File[],
@@ -162,6 +164,9 @@ export async function uploadDocuments(
   const form = new FormData();
   for (const file of files) form.append("files", file, file.name);
   if (paths != null) for (const path of paths) form.append("paths", path);
+  // The document's own clock (epoch ms): the server restamps each stored
+  // file's mtime so `file_modified_at` provenance survives the upload.
+  for (const file of files) form.append("modified", String(file.lastModified));
   const response = await fetch(`${API_URL}/api/documents`, {
     method: "POST",
     body: form,

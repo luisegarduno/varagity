@@ -273,18 +273,28 @@ export interface paths {
          *     keeps that file on the flat path. Without ``paths`` the flat contract
          *     is untouched.
          *
+         *     With ``modified`` (same positional contract), each stored file's mtime
+         *     is restamped to the client's declared last-modified time (epoch
+         *     milliseconds — the browser's ``File.lastModified``), so the
+         *     ``file_modified_at`` provenance on the next ingest's chunks carries the
+         *     document's clock rather than the upload instant. An empty-string entry
+         *     keeps that file's write time; a malformed entry is ignored per file.
+         *
          *     Args:
          *         files: The multipart file parts.
          *         paths: Optional relative path per file, positionally aligned with
          *             ``files``.
+         *         modified: Optional last-modified epoch-milliseconds per file,
+         *             positionally aligned with ``files``.
          *
          *     Returns:
          *         Per-file outcomes, in upload order.
          *
          *     Raises:
-         *         HTTPException: ``422 paths_mismatch`` when ``paths`` is present
-         *             with a different length than ``files`` (a positional contract
-         *             must be checked, not trusted); ``422 too_many_files`` / ``422
+         *         HTTPException: ``422 paths_mismatch`` / ``422 modified_mismatch``
+         *             when ``paths`` / ``modified`` is present with a different
+         *             length than ``files`` (a positional contract must be checked,
+         *             not trusted); ``422 too_many_files`` / ``422
          *             batch_too_large`` when the batch busts ``UPLOAD_MAX_FILES`` /
          *             ``UPLOAD_MAX_TOTAL_MB`` (checked before anything is written);
          *             ``422 no_file_stored`` when every file was rejected on its own
@@ -575,6 +585,8 @@ export interface components {
             files: string[];
             /** Paths */
             paths?: string[] | null;
+            /** Modified */
+            modified?: string[] | null;
         };
         /**
          * ChatOverrides

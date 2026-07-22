@@ -44,6 +44,10 @@ export interface EvidenceChunk {
   page: number | null;
   /** `"text"` or `"ocr_fallback"` — the OCR badge signal. */
   extraction: string | null;
+  /** Source file's birth time (ISO; best-effort — often unavailable). */
+  fileCreatedAt: string | null;
+  /** Source file's mtime (ISO) — the document's clock, not the ingest's. */
+  fileModifiedAt: string | null;
   /** Why it ranked where it did (`null` when the retriever attached none). */
   trace: RetrievalTrace | null;
 }
@@ -153,6 +157,31 @@ export function formatTokensPerSecond(rate: number): string {
   return `${figure} tok/s`;
 }
 
+function asDate(value: string | null): Date | null {
+  if (value === null) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/**
+ * The provenance line's file-clock segment: a short local date for the
+ * source file's last modification, with the full timestamp (and the birth
+ * time, when the filesystem recorded one) in the tooltip. `null` for
+ * chunks ingested before the fields existed, or when the value doesn't
+ * parse — the line simply omits the segment.
+ */
+export function fileClock(
+  chunk: Pick<EvidenceChunk, "fileCreatedAt" | "fileModifiedAt">,
+): { text: string; title: string } | null {
+  const modified = asDate(chunk.fileModifiedAt);
+  if (modified === null) return null;
+  const created = asDate(chunk.fileCreatedAt);
+  const title =
+    `Source file modified ${modified.toLocaleString()}` +
+    (created === null ? "" : ` · created ${created.toLocaleString()}`);
+  return { text: `modified ${modified.toLocaleDateString()}`, title };
+}
+
 /** A loosely-typed persisted snapshot's serialized retrieval trace. */
 function traceFromSnapshot(value: unknown): RetrievalTrace | null {
   if (value === null || typeof value !== "object") return null;
@@ -212,6 +241,8 @@ export function evidenceFromRetrieval(
       fileType: asString(chunk.metadata.file_type),
       page: asNumber(chunk.metadata.page),
       extraction: asString(chunk.metadata.extraction),
+      fileCreatedAt: asString(chunk.metadata.file_created_at),
+      fileModifiedAt: asString(chunk.metadata.file_modified_at),
       trace: chunk.trace,
     })),
   };
@@ -258,6 +289,8 @@ export function evidenceFromMessage(
         fileType: asString(snapshot.file_type),
         page: asNumber(snapshot.page),
         extraction: asString(snapshot.extraction),
+        fileCreatedAt: asString(snapshot.file_created_at),
+        fileModifiedAt: asString(snapshot.file_modified_at),
         trace: traceFromSnapshot(snapshot.trace),
       };
     }),
@@ -285,6 +318,8 @@ export function sourcesFromRetrieval(
       file_type: chunk.metadata.file_type ?? null,
       page: chunk.metadata.page ?? null,
       extraction: chunk.metadata.extraction ?? null,
+      file_created_at: chunk.metadata.file_created_at ?? null,
+      file_modified_at: chunk.metadata.file_modified_at ?? null,
       trace: chunk.trace,
     },
   }));

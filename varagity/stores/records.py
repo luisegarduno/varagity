@@ -73,7 +73,15 @@ class ChunkRecord(BaseModel):
         embedding_model: Served embedding model name.
         n_tokens: Approximate token count of ``content`` (plan decision #8).
         content_hash: The parent document's :func:`content_hash`.
-        created_at: Ingestion timestamp (UTC).
+        created_at: Ingestion timestamp (UTC) — when the chunk was made,
+            not a property of the source file (see ``file_modified_at``).
+        file_created_at: Filesystem birth time of the source file (UTC).
+            Best-effort: birth time is filesystem/platform-dependent, and a
+            copy or download resets it — ``None`` when unavailable.
+        file_modified_at: Filesystem mtime of the source file (UTC) — when
+            the document's bytes last changed, independent of when they
+            were ingested. ``None`` only on rows written before the field
+            existed (or if the file vanished mid-ingest).
         extraction: How text was extracted: ``"text"`` (default) or
             ``"ocr_fallback"`` (set by the OCR fallback pass) — retrieval-quality
             provenance beyond spec §8.1.
@@ -100,6 +108,8 @@ class ChunkRecord(BaseModel):
     n_tokens: int
     content_hash: str
     created_at: datetime
+    file_created_at: datetime | None = None
+    file_modified_at: datetime | None = None
     extraction: str = "text"
     heading_path: str | None = None
 
@@ -121,6 +131,8 @@ class ChunkRecord(BaseModel):
         chunking_strategy: str,
         embedding_model: str,
         content_hash: str,
+        file_created_at: datetime | None = None,
+        file_modified_at: datetime | None = None,
         extraction: str = "text",
         heading_path: str | None = None,
     ) -> "ChunkRecord":
@@ -147,6 +159,10 @@ class ChunkRecord(BaseModel):
             chunking_strategy: Registry name of the chunker used.
             embedding_model: Served embedding model name.
             content_hash: The parent document's content hash.
+            file_created_at: Filesystem birth time of the source file, or
+                ``None`` when the platform/filesystem doesn't expose one.
+            file_modified_at: Filesystem mtime of the source file, or
+                ``None`` when it couldn't be read.
             extraction: Extraction provenance (``"text"`` or ``"ocr_fallback"``).
             heading_path: Markdown heading breadcrumb, or ``None`` for
                 strategies without structure.
@@ -174,6 +190,8 @@ class ChunkRecord(BaseModel):
             n_tokens=count_tokens(content),
             content_hash=content_hash,
             created_at=datetime.now(UTC),
+            file_created_at=file_created_at,
+            file_modified_at=file_modified_at,
             extraction=extraction,
             heading_path=heading_path,
         )
