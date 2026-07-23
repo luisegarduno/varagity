@@ -107,6 +107,101 @@ describe("annotateCitations", () => {
   });
 });
 
+describe("annotateCitations with spaces in filenames", () => {
+  const spacedRefs: CitationSourceRef[] = [
+    { source: "/docs/AI Governance.md", fileName: "AI Governance.md" },
+    {
+      source: "/docs/Multi-modal Learning.md",
+      fileName: "Multi-modal Learning.md",
+    },
+    ...refs,
+  ];
+
+  it("chips the whole spaced filename in the trailing form", () => {
+    const { markdown, citations } = annotateCitations(
+      "AI governance [SOURCE]: /docs/AI Governance.md, and more.",
+      spacedRefs,
+    );
+    expect(citations).toHaveLength(1);
+    expect(citations[0]).toMatchObject({
+      path: "/docs/AI Governance.md",
+      label: "AI Governance.md",
+      chunkIndex: 0,
+    });
+    expect(markdown).toBe(
+      `AI governance [AI Governance.md](${CITATION_HREF_PREFIX}0), and more.`,
+    );
+  });
+
+  it("resolves a basename-only spaced citation", () => {
+    const { markdown, citations } = annotateCitations(
+      "See [SOURCE]: Multi-modal Learning.md for details.",
+      spacedRefs,
+    );
+    expect(citations[0]).toMatchObject({
+      path: "Multi-modal Learning.md",
+      chunkIndex: 1,
+    });
+    expect(markdown).toBe(
+      `See [Multi-modal Learning.md](${CITATION_HREF_PREFIX}0) for details.`,
+    );
+  });
+
+  it("consumes wrapping backticks around a spaced path", () => {
+    const { markdown, citations } = annotateCitations(
+      "Fact ([SOURCE]: `/docs/AI Governance.md`).",
+      spacedRefs,
+    );
+    expect(citations[0]?.path).toBe("/docs/AI Governance.md");
+    expect(markdown).toBe(
+      `Fact ([AI Governance.md](${CITATION_HREF_PREFIX}0)).`,
+    );
+  });
+
+  it("handles several spaced citations in one answer", () => {
+    const { markdown, citations } = annotateCitations(
+      "A [SOURCE]: /docs/AI Governance.md, B [SOURCE]: /docs/Multi-modal Learning.md, C [SOURCE]: /docs/scans/survey.pdf.",
+      spacedRefs,
+    );
+    expect(citations.map((c) => c.chunkIndex)).toEqual([0, 1, 4]);
+    expect(markdown).toBe(
+      `A [AI Governance.md](${CITATION_HREF_PREFIX}0), ` +
+        `B [Multi-modal Learning.md](${CITATION_HREF_PREFIX}1), ` +
+        `C [survey.pdf](${CITATION_HREF_PREFIX}2).`,
+    );
+  });
+
+  it("still supports spaced paths in the bracketed form", () => {
+    const { citations } = annotateCitations(
+      "See [SOURCE: /docs/AI Governance.md] for details.",
+      spacedRefs,
+    );
+    expect(citations[0]).toMatchObject({
+      path: "/docs/AI Governance.md",
+      chunkIndex: 0,
+    });
+  });
+
+  it("does not extend past a word boundary", () => {
+    // `.mdx` must not be cut into a match for `AI Governance.md`.
+    const { citations } = annotateCitations(
+      "Claim [SOURCE]: /docs/AI Governance.mdx here.",
+      spacedRefs,
+    );
+    expect(citations[0]).toMatchObject({ path: "/docs/AI", chunkIndex: null });
+  });
+
+  it("keeps the truncated grounding warning for unknown spaced paths", () => {
+    // Without a delimiter, only evidence can end a spaced path — an
+    // unknown one stays cut at the space and flags as ungrounded.
+    const { citations } = annotateCitations(
+      "Claim [SOURCE]: /docs/Not In Evidence.md here.",
+      spacedRefs,
+    );
+    expect(citations[0]).toMatchObject({ path: "/docs/Not", chunkIndex: null });
+  });
+});
+
 describe("matchSource", () => {
   it("matches an exact source path", () => {
     expect(matchSource("/docs/marine/kelp_corridor.md", refs)).toBe(0);

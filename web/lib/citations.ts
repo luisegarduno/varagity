@@ -14,6 +14,15 @@
  * line-initial `[SOURCE]: /path` is a CommonMark link-reference
  * *definition* and would otherwise be swallowed entirely by the renderer.
  *
+ * The `[SOURCE]: <path>` form has no closing delimiter, so its capture
+ * stops at the first whitespace — which truncates filenames containing
+ * spaces (`/docs/AI Governance.md` → `/docs/AI`). Those captures are
+ * *extended* against the evidence rows: if a known source path (full,
+ * `/`-suffix, or basename) continues the text at the capture, the whole
+ * path is consumed. Only evidence can end a spaced path unambiguously; a
+ * spaced path that matches no evidence stays truncated and surfaces as
+ * the grounding warning below.
+ *
  * A citation whose path matches no evidence row keeps `chunkIndex: null`
  * — the "cited but not in the retrieved evidence" grounding warning.
  */
@@ -55,7 +64,8 @@ export const CITATION_HREF_PREFIX = "#varagity-cite-";
 // Two marker shapes: `[SOURCE: <path>]` (path inside the bracket) and
 // `[SOURCE]: <path>` (path after; colon optional, spacing tolerant — the
 // prompt itself uses two spaces). The trailing capture stays on one line
-// and stops at whitespace/`]`/`,`/`;`.
+// and stops at whitespace/`]`/`,`/`;` — {@link extendFromEvidence} then
+// stretches it over spaces when a known evidence path continues it.
 const MARKER_RE =
   /\[SOURCE:\s*([^\]\n]+?)\s*\]|\[SOURCE\][ \t]*:?[ \t]{0,4}([^\s\],;]*)/gi;
 
@@ -142,35 +152,127 @@ export function matchSource(
   return hit === -1 ? null : hit;
 }
 
+/** Every string a row can be cited as: full path, `/`-suffixes, basename. */
+function candidatePaths(ref: CitationSourceRef): string[] {
+  const candidates: string[] = [];
+  if (ref.source) {
+    candidates.push(ref.source);
+    const parts = ref.source.split("/").filter(Boolean);
+    for (let i = 1; i < parts.length; i++) {
+      candidates.push(parts.slice(i).join("/"));
+    }
+  }
+  if (ref.fileName) candidates.push(ref.fileName);
+  return candidates;
+}
+
+/** A trailing-form capture stretched past its whitespace stop. */
+interface ExtendedCapture {
+  /** The full raw token for {@link cleanPath} (wrappers included). */
+  raw: string;
+  /** Index in the answer just past the consumed text. */
+  end: number;
+}
+
+/**
+ * Stretch a space-truncated `[SOURCE]: <path>` capture over a filename
+ * containing spaces.
+ *
+ * `token` (the regex capture starting at `start`) stopped at the first
+ * whitespace, so `/docs/AI Governance.md` arrives as `/docs/AI`. The rest
+ * of the line is compared against every way the evidence rows can be
+ * cited ({@link candidatePaths}); the longest candidate that continues
+ * the text — case-insensitive, ending at a word boundary — wins. Closers
+ * pairing any opening wrappers are consumed with it so `cleanPath` sees a
+ * balanced token. Returns `null` when no candidate extends the capture,
+ * which keeps the unextended behavior for space-free and unknown paths.
+ */
+function extendFromEvidence(
+  text: string,
+  start: number,
+  token: string,
+  refs: readonly CitationSourceRef[],
+): ExtendedCapture | null {
+  const newline = text.indexOf("\n", start);
+  const lineEnd = newline === -1 ? text.length : newline;
+  const openers = /^[`"'(<[]+/.exec(token)?.[0] ?? "";
+  const body = text.slice(start + openers.length, lineEnd);
+  const bodyLower = body.toLowerCase();
+  const captured = token.length - openers.length;
+  let matched = "";
+  for (const ref of refs) {
+    for (const candidate of candidatePaths(ref)) {
+      if (candidate.length <= captured || candidate.length <= matched.length)
+        continue;
+      if (!bodyLower.startsWith(candidate.toLowerCase())) continue;
+      // Reject mid-word cuts (`AI Governance.md` inside `…Governance.mdx`).
+      const after = body[candidate.length];
+      if (after !== undefined && /[\w-]/.test(after)) continue;
+      matched = body.slice(0, candidate.length);
+    }
+  }
+  if (!matched) return null;
+  let end = start + openers.length + matched.length;
+  for (const opener of openers) {
+    const closer = WRAPPER_PAIRS[opener];
+    if (closer && text[end] === closer) end += 1;
+  }
+  return { raw: text.slice(start, end), end };
+}
+
 /**
  * Extract the answer's `[SOURCE]` markers and rewrite them into chip
  * links, matching each against the evidence rows.
  *
- * Markers without a usable path (bare `[SOURCE]`, or a token that isn't
- * path-like) are left untouched. Fenced/inline code is not special-cased
- * — grounded answers don't cite from inside code blocks.
+ * Trailing-form captures truncated by a space in the filename are first
+ * extended against the evidence ({@link extendFromEvidence}), so
+ * `[SOURCE]: /docs/AI Governance.md` chips the whole filename instead of
+ * a dangling `/docs/AI`. Markers without a usable path (bare `[SOURCE]`,
+ * or a token that isn't path-like) are left untouched. Fenced/inline code
+ * is not special-cased — grounded answers don't cite from inside code
+ * blocks.
  */
 export function annotateCitations(
   text: string,
   refs: readonly CitationSourceRef[],
 ): AnnotatedAnswer {
   const citations: Citation[] = [];
-  const markdown = text.replace(
-    MARKER_RE,
-    (full: string, bracketed?: string, trailing?: string) => {
-      const { path, tail } = cleanPath(bracketed ?? trailing ?? "");
-      if (!path || !isPathLike(path)) return full;
-      const citation: Citation = {
-        id: citations.length,
-        path,
-        label: chipLabel(path),
-        chunkIndex: matchSource(path, refs),
-      };
-      citations.push(citation);
-      return `[${citation.label}](${CITATION_HREF_PREFIX}${citation.id})${tail}`;
-    },
-  );
-  return { markdown, citations };
+  let markdown = "";
+  let cursor = 0;
+  MARKER_RE.lastIndex = 0;
+  for (let m = MARKER_RE.exec(text); m !== null; m = MARKER_RE.exec(text)) {
+    // RegExpExecArray types captures as `string`, but an unmatched
+    // alternative's capture is `undefined` at runtime.
+    const bracketed = m[1] as string | undefined;
+    const trailing = m[2] as string | undefined;
+    let raw = bracketed ?? trailing ?? "";
+    let end = m.index + m[0].length;
+    if (bracketed === undefined && trailing) {
+      const extended = extendFromEvidence(
+        text,
+        end - trailing.length,
+        trailing,
+        refs,
+      );
+      if (extended) {
+        raw = extended.raw;
+        end = extended.end;
+      }
+    }
+    const { path, tail } = cleanPath(raw);
+    if (!path || !isPathLike(path)) continue;
+    const citation: Citation = {
+      id: citations.length,
+      path,
+      label: chipLabel(path),
+      chunkIndex: matchSource(path, refs),
+    };
+    citations.push(citation);
+    markdown += `${text.slice(cursor, m.index)}[${citation.label}](${CITATION_HREF_PREFIX}${citation.id})${tail}`;
+    cursor = end;
+    MARKER_RE.lastIndex = end;
+  }
+  return { markdown: markdown + text.slice(cursor), citations };
 }
 
 /** Parse a chip link's citation id (`null` for any other href). */
