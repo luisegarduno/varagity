@@ -15,6 +15,16 @@ Every pipeline stage is a tracked Prefect task.
 
 -----------------------------
 
+| Elegant Frontend | Codebase Map |
+| ---------------- | ------------ |
+| <img width="2542" height="1322" alt="image" src="https://github.com/user-attachments/assets/f864795d-f473-4af7-a1f6-23d958e01c54" /> | <img width="2292" height="1322" alt="image" src="https://github.com/user-attachments/assets/992c6a3c-25df-4035-9d73-26a7155edfa3" /> |
+
+| Prefect Server | Grafana |
+| -------------- | ------- |
+| <img width="2531" height="1313" alt="image" src="https://github.com/user-attachments/assets/721d639d-c25b-484d-9985-d4e0be22c26c" /> | <img width="2243" height="931" alt="image" src="https://github.com/user-attachments/assets/771f73d9-601e-4bc2-82f1-df8618ecb5d8" /> |
+
+-----------------------------
+
 # Instructions
 
 ## Pre-Req's
