@@ -26,6 +26,8 @@ _RANGES: dict[str, NumericRange] = {
     "top_k": NumericRange(min=1),
     "rerank_top_n": NumericRange(min=1),
     "rerank_candidates": NumericRange(min=1),
+    "hyde_max_tokens": NumericRange(min=1),
+    "hyde_max_chars": NumericRange(min=1),
     "semantic_weight": NumericRange(min=0.0, max=1.0),
     "bm25_weight": NumericRange(min=0.0, max=1.0),
     "llm_temperature": NumericRange(min=0.0, max=2.0),

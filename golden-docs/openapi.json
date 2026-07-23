@@ -48,7 +48,7 @@
       },
       "ChatOverrides": {
         "additionalProperties": false,
-        "description": "Per-request overrides of query-time settings (spec_v2 \u00a74.2).\n\nUnknown fields are rejected so a typo'd override fails loudly instead\nof silently running with defaults.\n\nAttributes:\n    retrieval_method: Registry name of the retrieval method for this\n        question only (``semantic`` | ``bm25`` | ``hybrid`` |\n        ``reranked``).\n    top_k: Number of chunks retrieved for this question only.\n    chat_engine: Registry name of the chat engine for this question\n        only (``simple`` | ``condense_context`` \u2014 spec_v3 \u00a74.2).",
+        "description": "Per-request overrides of query-time settings (spec_v2 \u00a74.2).\n\nUnknown fields are rejected so a typo'd override fails loudly instead\nof silently running with defaults.\n\nAttributes:\n    retrieval_method: Registry name of the retrieval method for this\n        question only (``semantic`` | ``bm25`` | ``hybrid`` |\n        ``reranked`` | ``hyde``).\n    top_k: Number of chunks retrieved for this question only.\n    chat_engine: Registry name of the chat engine for this question\n        only (``simple`` | ``condense_context`` \u2014 spec_v3 \u00a74.2).",
         "properties": {
           "chat_engine": {
             "anyOf": [

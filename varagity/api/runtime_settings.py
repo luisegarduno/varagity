@@ -117,8 +117,9 @@ def _chat_engine_names() -> list[str]:
 
 # The GUI-overridable settings (spec §4.7 groups; the Display group is
 # client-side — theme and panel preferences never reach the pipeline).
-# RERANK_BASE_METHOD's choices mirror config.py's validator ("reranked"
-# would recurse), not the retriever registry.
+# RERANK_BASE_METHOD's and HYDE_BASE_METHOD's choices mirror config.py's
+# validators ("reranked" would recurse; hyde composes *under* rerank and
+# never over bm25 — ADR-016), not the retriever registry.
 OVERRIDABLE: dict[str, OverridableSetting] = {
     "RETRIEVAL_METHOD": OverridableSetting("retrieval", choices=_retriever_names),
     "TOP_K": OverridableSetting("retrieval"),
@@ -127,9 +128,14 @@ OVERRIDABLE: dict[str, OverridableSetting] = {
     "RERANK_ENABLED": OverridableSetting("retrieval"),
     "RERANK_TOP_N": OverridableSetting("retrieval"),
     "RERANK_BASE_METHOD": OverridableSetting(
-        "retrieval", choices=lambda: ["semantic", "bm25", "hybrid"]
+        "retrieval", choices=lambda: ["semantic", "bm25", "hybrid", "hyde"]
     ),
     "RERANK_CANDIDATES": OverridableSetting("retrieval"),
+    "HYDE_ENABLED": OverridableSetting("retrieval"),
+    "HYDE_BASE_METHOD": OverridableSetting("retrieval", choices=lambda: ["semantic", "hybrid"]),
+    "HYDE_MODEL_TYPE": OverridableSetting("retrieval", choices=_llm_model_types),
+    "HYDE_MAX_TOKENS": OverridableSetting("retrieval"),
+    "HYDE_MAX_CHARS": OverridableSetting("retrieval"),
     "LLM_TEMPERATURE": OverridableSetting("generation"),
     "MAX_TOKENS": OverridableSetting("generation"),
     "CHAT_MODEL_TYPE": OverridableSetting("generation", choices=_llm_model_types),

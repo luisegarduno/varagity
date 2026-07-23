@@ -9,3 +9,5 @@
 ::: varagity.retrieval.hybrid
 
 ::: varagity.retrieval.reranked
+
+::: varagity.retrieval.hyde

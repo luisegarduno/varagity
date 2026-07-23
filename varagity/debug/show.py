@@ -180,6 +180,42 @@ def v_condensed(original: str, condensed: str, verbose: int) -> None:
     )
 
 
+def v_hyde(query: str, passage: str, verbose: int) -> None:
+    """Render the hypothetical passage (for ``HydeRetriever``, ADR-016).
+
+    The :func:`v_condensed` counterpart for the HyDE stage: whenever the
+    dense arm is about to search with generated text rather than the
+    user's words, the substitution is shown rather than silently applied.
+
+    Args:
+        query: The search query the passage was generated for (shown at
+            level 2).
+        passage: The hypothetical answer passage steering the dense arm.
+        verbose: 0 = nothing; 1 = a one-line notice with the passage's
+            head; 2 = a panel pairing the full passage with the query.
+
+    Raises:
+        ValueError: If ``verbose`` is invalid.
+    """
+    check_verbose(verbose)
+    if verbose == 0:
+        return
+    if verbose == 1:
+        head = passage if len(passage) <= 80 else passage[:79] + "…"
+        notice = ("Dense arm searching with hypothetical passage ", "bold")
+        console.print(Text.assemble(notice, (head, "italic")))
+        return
+    console.print(
+        Panel(
+            Text(passage, style="italic"),
+            title="HyDE hypothetical passage",
+            subtitle=f"query: {query}",
+            subtitle_align="left",
+            style="dim",
+        )
+    )
+
+
 def v_situate_context(chunk_text: str, context: str, verbose: int) -> None:
     """Render one situating blurb (for :func:`~varagity.context.contextual.situate_context`).
 

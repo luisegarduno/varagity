@@ -53,6 +53,8 @@ _MATRIX_KEYS = (
     "bm25_contextual",
     "hybrid_contextual",
     "hybrid_rerank_contextual",
+    "hyde_contextual",
+    "hyde_rerank_contextual",
 )
 
 
@@ -62,7 +64,7 @@ def matrix_doc(*, with_sweep: bool = True) -> dict[str, Any]:
         "n_queries": 11,
         "k_values": [5],
         "chunks_ingested": 42,
-        "configs": {key: _scores(0.5 + index / 10, (5,)) for index, key in enumerate(_MATRIX_KEYS)},
+        "configs": {key: _scores(0.4 + index / 10, (5,)) for index, key in enumerate(_MATRIX_KEYS)},
         "results_path": "/data/eval/results/20260721-matrix.json",
     }
     if with_sweep:
@@ -96,10 +98,25 @@ class TestEvalDispatch:
         assert "Retrieval matrix" in out
         assert "11 golden queries" in out
         assert "42 chunks" in out
-        # All five ladder rungs rendered with their scores.
-        assert "0.500" in out and "0.900" in out
+        # All seven ladder rungs rendered with their scores.
+        assert "0.400" in out and "1.000" in out
+        assert "HyDE" in out
         assert "recall@5" in out and "pass@5" in out
         assert "20260721-matrix.json" in out
+
+    def test_eval_renders_result_docs_predating_the_hyde_configs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 5-config document (pre-ADR-016) renders without its missing rows."""
+        doc = matrix_doc(with_sweep=False)
+        for key in ("hyde_contextual", "hyde_rerank_contextual"):
+            del doc["configs"][key]
+        monkeypatch.setattr(cli_app, "eval_flow", lambda verbose: doc)
+        with console.capture() as capture:
+            assert cli_app.run(["-v", "0", "eval"]) == 0
+        out = capture.get()
+        assert "Retrieval matrix" in out
+        assert "HyDE" not in out
 
     def test_eval_ocr_runs_benchmark_flow(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: list[int] = []

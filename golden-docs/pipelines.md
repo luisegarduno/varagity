@@ -143,8 +143,8 @@ frame. Tracking and streaming compose; there is no second pipeline.
 ```mermaid
 flowchart TB
     start(["query_flow(query, history) · query_stream_flow(query, history)"]) --> condense["condense_query<br/>chat engine: simple | condense_context — spec_v3 §4.2<br/>PreparedQuery: search_query / original_query"]
-    condense --> embed["embed_query<br/>retriever.encode_query(search_query) — None for bm25"]
-    embed --> retrieve["retrieve<br/>top-k via semantic | bm25 | hybrid | reranked<br/>(reranked: over-fetch → cross-encode → cut — spec_v2 §5)"]
+    condense --> embed["embed_query<br/>retriever.encode_query(search_query) — None for bm25<br/>(hyde: LLM passage → passage-mode embed — ADR-016)"]
+    embed --> retrieve["retrieve<br/>top-k via semantic | bm25 | hybrid | reranked | hyde<br/>(reranked: over-fetch → cross-encode → cut — spec_v2 §5)"]
     retrieve -.->|on_retrieved| hook["CLI matches table ·<br/>SSE retrieval event"]
     retrieve --> generate["generate_answer<br/>grounded, cited answer — §10.2 prompt"]
     retrieve --> generate_s["generate_answer_stream<br/>on_delta per fragment · should_abort<br/>polled between deltas — spec_v2 §4.3"]
@@ -189,6 +189,21 @@ Both flows share the staging — condense → embed → retrieve → generate, w
   Prometheus on its own (`stage="rerank"`), and the flow's `retrieve`
   observation deliberately *includes* it — total retrieval latency is what
   the user feels; rerank's share is subtractable.
+- **`hyde` composes inside `encode_query`** (ADR-016): the embed stage's
+  `retriever.encode_query(search_query)` is where the hypothetical answer
+  passage is generated (one non-streaming LLM call, `<think>`-stripped via
+  `clean_response` — the condense lesson) and embedded in e5 **passage
+  mode**; `retrieve` then hands `HYDE_BASE_METHOD` the original query text
+  plus that vector — dense-arm-only substitution, so a `hybrid` base's
+  BM25 arm keeps exact keyword recall and traces pass through untouched.
+  The generation sub-stage is timed into Prometheus on its own
+  (`stage="hyde"`) and the flow's `embed` observation deliberately
+  *includes* it, mirroring the rerank sub-stage. Every unusable generation
+  (raised call, empty, overlong) and `HYDE_ENABLED=false` degrade to the
+  base method's raw-query retrieval at `WARNING` — a degraded search still
+  answers; a failed turn answers nothing. Pairing with the cross-encoder
+  stacks rerank *outside* (`RETRIEVAL_METHOD=reranked` +
+  `RERANK_BASE_METHOD=hyde`), so the reranker judges the user's real query.
 - **`query_stream_flow` is the streaming twin** backing `POST /api/chat`
   (spec_v2 §4.3): identical embed/retrieve staging, then
   `generate_answer_stream_task` hands each delta to `on_delta` while it
@@ -233,14 +248,16 @@ per-stage task runs. All need Docker (ephemeral testcontainers stores) and
 the live GPU services.
 
 - **`eval-matrix`** (`main.py eval`): recall@k / pass@k (k ∈ {5, 10, 20})
-  across the five-configuration ladder — (1) semantic non-contextual,
+  across the seven-configuration ladder — (1) semantic non-contextual,
   (2) semantic contextual, (3) contextual BM25, (4) hybrid contextual,
-  (5) **hybrid + rerank contextual** (spec_v2 §5.5 — the ≈67% tier). Two
-  ingests into **ephemeral testcontainers stores** cover all five configs
-  (ingest A non-contextual → config 1; ingest B contextual, reingest →
-  configs 2–5); embeddings, the contextualizing LLM, and the reranker are
-  the live GPU services (stateless). The live corpus is never touched
-  (ADR-003).
+  (5) **hybrid + rerank contextual** (spec_v2 §5.5 — the ≈67% tier),
+  (6) HyDE → hybrid contextual, (7) **HyDE → hybrid + rerank contextual**
+  (the ADR-016 pairing). Two ingests into **ephemeral testcontainers
+  stores** cover all seven configs (ingest A non-contextual → config 1;
+  ingest B contextual, reingest → configs 2–7); embeddings, the
+  contextualizing LLM (which also writes the HyDE passages — one
+  generation per query per HyDE config), and the reranker are the live GPU
+  services (stateless). The live corpus is never touched (ADR-003).
 - **`eval-ocr`** (`main.py eval ocr`): the OCR engine benchmark behind
   ADR-004 — per engine: CER/WER against the fixtures' known ground truth,
   pages/sec, and (supplementary) retrieval recall on the scanned-doc golden
@@ -264,7 +281,7 @@ the live GPU services.
   topic shift, but costs a mean 8.6 s pre-retrieval LLM call on follow-ups
   — **the default stays `simple`**, a measured "no".
 
-How `eval-matrix` covers all five configs with only two ingests into the
+How `eval-matrix` covers all seven configs with only two ingests into the
 throwaway stores — and where the chunker sweep rides:
 
 ```mermaid
@@ -277,7 +294,9 @@ flowchart LR
         B --> c3["config 3 · contextual BM25"]
         B --> c4["config 4 · hybrid contextual"]
         B --> c5["config 5 · hybrid + rerank contextual"]
-        B --> sweep["chunker sweep — spec_v2 §7<br/>reingest per strategy ×<br/>{semantic, bm25, hybrid, reranked}"]
+        B --> c6["config 6 · HyDE → hybrid contextual — ADR-016"]
+        B --> c7["config 7 · HyDE → hybrid + rerank contextual"]
+        B --> sweep["chunker sweep — spec_v2 §7<br/>reingest per strategy ×<br/>{semantic, bm25, hybrid, reranked}<br/>(no HyDE re-measure: the passage depends on the query, not the boundaries)"]
     end
 
     gpu -.-> A
@@ -319,7 +338,7 @@ chunk id to its acceptable fact-carrying set.
 |---|---|---|
 | `uv run main.py ingest [--reingest]` | `ingest` | One tracked ingest run; exit 1 if any file failed |
 | `uv run main.py chat` *(default)* | `ingest`, then `query` per question | Spec §13 startup sequence: ingest first, then the Q&A loop (`:quit` exits). Since v3 the loop threads an **in-memory history** into each turn (session-scoped, cleared by `:quit`, never persisted) so the configured chat engine can condense |
-| `uv run --group eval main.py eval` | `eval-matrix` (+ ingest subflows) | 5-config retrieval matrix + the chunker sweep, on ephemeral stores |
+| `uv run --group eval main.py eval` | `eval-matrix` (+ ingest subflows) | 7-config retrieval matrix + the chunker sweep, on ephemeral stores |
 | `uv run --group eval main.py eval ocr` | `eval-ocr` (+ ingest subflows) | OCR engine benchmark (CER/WER, pages/s, recall) |
 | `uv run --group eval main.py eval chat` | `eval-chat` (+ ingest subflow) | Multi-turn chat-engine eval over the conversation fixtures ([above](#evaluation-flows)) |
 

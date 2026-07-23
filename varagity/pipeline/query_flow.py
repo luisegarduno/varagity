@@ -68,9 +68,9 @@ def _method_label(retriever: Retriever) -> str:
         retriever: The active retrieval method.
 
     Returns:
-        The registry name (``semantic``/``bm25``/``hybrid``/``reranked``),
-        or ``"custom"`` for an implementation the registry doesn't know
-        (injected test/eval doubles) — metric labels must stay
+        The registry name (``semantic``/``bm25``/``hybrid``/``reranked``/
+        ``hyde``), or ``"custom"`` for an implementation the registry
+        doesn't know (injected test/eval doubles) — metric labels must stay
         low-cardinality, so arbitrary class names never become labels.
     """
     for name, registered in RETRIEVER_REGISTRY.items():

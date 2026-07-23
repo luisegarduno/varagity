@@ -86,7 +86,7 @@ uv run main.py ingest              # ingest DOCS_PATH into both stores
 uv run main.py ingest --reingest   # re-process (config changes don't change content hashes)
 uv run main.py chat                # ingest, then terminal Q&A (default command; :quit exits)
 uv run uvicorn varagity.api.main:create_app --factory --port 8000   # API on the host
-uv run --group eval main.py eval       # 5-config retrieval matrix + chunker sweep (needs Docker + live GPU services)
+uv run --group eval main.py eval       # 7-config retrieval matrix + chunker sweep (needs Docker + live GPU services)
 uv run --group eval main.py eval ocr   # OCR engine benchmark
 uv run --group eval main.py eval chat  # multi-turn chat-engine eval (the ADR-011 decision harness)
 
@@ -116,7 +116,7 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
 
 - **Registries for pluggable families** (spec §5.1): parsers (`pdf`, `text`, `office`,
   `web`, `image`), chunking strategies (`recursive_character`, `token_based`, `markdown_aware`,
-  `semantic`, `docling_hybrid`), retrievers (`semantic`, `bm25`, `hybrid`, `reranked`),
+  `semantic`, `docling_hybrid`), retrievers (`semantic`, `bm25`, `hybrid`, `reranked`, `hyde`),
   and chat engines (`simple`, `condense_context`) self-register via `@register("name")`
   in their package; adding an implementation = one new file + its import line in the
   package `__init__`, zero caller edits. OCR engines use the same shape as a factory in
@@ -183,7 +183,10 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
   embedding-similarity boundaries instead).
 - `RERANK_ENABLED=false` is a kill switch, not a method: `RETRIEVAL_METHOD=reranked` then
   degrades to its base method (and logs it). Method selection and the toggle are
-  deliberately orthogonal.
+  deliberately orthogonal. `HYDE_ENABLED=false` is the same shape for `hyde`
+  (degrades to `HYDE_BASE_METHOD`); pair HyDE with reranking as
+  `RETRIEVAL_METHOD=reranked` + `RERANK_BASE_METHOD=hyde` — never hyde-over-reranked
+  (config-rejected: the cross-encoder must judge the real query).
 - `CONDENSE_ENABLED=false` is likewise a kill switch, not an engine:
   `CHAT_ENGINE=condense_context` then degrades to `simple` behavior (and logs it).
   Engine selection and the toggle are deliberately orthogonal — and the engine name is
@@ -192,6 +195,8 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
   `CONDENSE_QUERY_LABEL` echo strip): llama.cpp emits `<think>` blocks and the
   non-streaming `LLMClient.generate()` does **not** strip them — an unstripped one goes
   straight into the embedding model as the search query and silently destroys retrieval.
+  The HyDE passage has the identical trap (`clean_response()` + `HYDE_PASSAGE_LABEL`
+  strip in `retrieval/hyde.py`).
 - Line-initial `[SOURCE]: …` is a CommonMark link-reference *definition* and silently
   vanishes when rendered — the web app rewrites citations to chips **before** markdown
   parsing (`web/lib/citations.ts`). Mind this when touching answer rendering.

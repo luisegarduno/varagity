@@ -364,7 +364,10 @@ Notes:
   `condensed_query` means "not condensed" (a first turn, the `simple`
   engine, the kill switch, or the raw-query fallback); the engine name is
   persisted **even when degraded**, mirroring how `retrieval_method`
-  persists `reranked` under `RERANK_ENABLED=false`. Same
+  persists `reranked` under `RERANK_ENABLED=false` (and, post-v3, `hyde`
+  under `HYDE_ENABLED=false` or a failed passage generation —
+  [ADR-016](adr/ADR-016-hyde-retrieval.md); the hypothetical passage
+  itself is deliberately not persisted). Same
   snapshot-over-reference rationale as `message_sources.trace`: the columns
   explain a historical answer, so they must outlive the settings that
   produced it.

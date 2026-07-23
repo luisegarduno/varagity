@@ -154,9 +154,11 @@ def observe_query_stage(stage: str, method: str, seconds: float) -> None:
 
     Args:
         stage: Pipeline stage name (``condense``/``embed``/``retrieve``/
-            ``rerank``/``generate``). The ``retrieve`` observation of the
-            ``reranked`` method *includes* its ``rerank`` sub-stage, which
-            is also recorded separately by the reranked retriever.
+            ``rerank``/``hyde``/``generate``). The ``retrieve`` observation
+            of the ``reranked`` method *includes* its ``rerank`` sub-stage,
+            which is also recorded separately by the reranked retriever;
+            likewise the ``embed`` observation of the ``hyde`` method
+            includes its ``hyde`` (passage-generation) sub-stage.
         method: The retrieval method's registry name (low-cardinality
             label; injected non-registry implementations record as
             ``custom``).

@@ -1,4 +1,4 @@
-"""Retrieval evaluation: recall@k / pass@k over the 5-config matrix (spec §16).
+"""Retrieval evaluation: recall@k / pass@k over the 7-config matrix (spec §16).
 
 Quantifies the retrieval-quality ladder, on the golden set over
 ``tests/fixtures/corpus``:
@@ -8,7 +8,12 @@ Quantifies the retrieval-quality ladder, on the golden set over
 3. ``bm25_contextual`` — contextual BM25,
 4. ``hybrid_contextual`` — rank fusion (≈49% tier, the default),
 5. ``hybrid_rerank_contextual`` — + cross-encoder re-ranking (≈67% tier,
-   spec_v2 §5.5).
+   spec_v2 §5.5),
+6. ``hyde_contextual`` — HyDE over the same hybrid base (ADR-016): the
+   dense arm searches with an LLM-written hypothetical passage,
+7. ``hyde_rerank_contextual`` — the HyDE+rerank pairing (``reranked``
+   composing ``hyde``): HyDE steers the candidate pool, the cross-encoder
+   judges the real query.
 
 The **chunker sweep** (spec_v2 §7.4) follows the matrix: every
 registered chunking strategy gets its own contextual ingest over the same
@@ -23,11 +28,14 @@ foreign boundaries would measure nothing but the boundary mismatch.
 Measurement runs against **ephemeral testcontainers stores** (plan decision
 #4) so the live corpus is never touched, while embeddings, the
 contextualizing LLM, and the reranker are the real GPU services from the
-running compose stack (they are stateless). Two ingests cover all five
+running compose stack (they are stateless). Two ingests cover all seven
 configs: ingest A (``CONTEXTUALIZE=false``) backs config 1; ingest B
 (``CONTEXTUALIZE=true``, ``reingest`` over the same stores) backs configs
-2–5 against the same index — and doubles as the sweep's
+2–7 against the same index — and doubles as the sweep's
 ``recursive_character`` row. Each remaining strategy adds one reingest.
+The two HyDE configs additionally pay one live-LLM passage generation per
+query each (independent generations — sampling noise between configs 6 and
+7 is part of what the pairing comparison measures).
 
 Metric semantics: :func:`recall_at_k` is the Anthropic cookbook's
 evaluation number (there called *Pass@n*) — the per-query fraction of
@@ -93,6 +101,7 @@ from varagity.models.registry import get_model
 from varagity.retrieval.base import Retriever
 from varagity.retrieval.bm25 import BM25Retriever
 from varagity.retrieval.hybrid import HybridRetriever
+from varagity.retrieval.hyde import HydeRetriever
 from varagity.retrieval.reranked import RerankedRetriever
 from varagity.retrieval.semantic import SemanticRetriever
 from varagity.stores.records import RetrievedChunk
@@ -122,6 +131,9 @@ RESULTS_DIR = Path("data/eval/results")
 # pins (spec_v2 §5.5) hold RERANK_TOP_N at max(K_VALUES) so the reranked
 # config fills the deepest reported cut, and TOP_K alongside it so the
 # combination stays valid whatever RETRIEVAL_METHOD the host env selects.
+# The HyDE pins are the PINNED_CHAT_SETTINGS lesson over again: a host env
+# with HYDE_ENABLED=false would silently measure configs 6–7 as plain
+# hybrid(+rerank).
 PINNED_EVAL_SETTINGS: dict[str, str] = {
     "ALLOWED_EXTENSIONS": ".pdf,.txt,.md",
     "CHUNKING_STRATEGY": "recursive_character",
@@ -139,6 +151,10 @@ PINNED_EVAL_SETTINGS: dict[str, str] = {
     "RERANK_BASE_METHOD": "hybrid",
     "RERANK_CANDIDATES": "40",
     "RERANK_TOP_N": "20",
+    "HYDE_ENABLED": "true",
+    "HYDE_BASE_METHOD": "hybrid",
+    "HYDE_MAX_TOKENS": "1024",
+    "HYDE_MAX_CHARS": "2000",
 }
 
 # An ingest-compatible callable: `ingest_corpus` or the Prefect-tracked
@@ -704,13 +720,17 @@ def run_matrix(
     ingest: IngestCallable = ingest_corpus,
     verbose: int | None = None,
 ) -> dict[str, Any]:
-    """Run the 5-config retrieval matrix + the chunker sweep; persist results.
+    """Run the 7-config retrieval matrix + the chunker sweep; persist results.
 
-    Two ingests into ephemeral stores cover all five configs (see the
+    Two ingests into ephemeral stores cover all seven configs (see the
     module docstring); the chunker sweep then reingests once per remaining
     registered strategy (``recursive_character`` reuses ingest B) and
     measures each across :data:`SWEEP_RETRIEVAL_CONFIGS` with fact-anchored
-    golden resolution. Embeddings, the contextualizing LLM, and the
+    golden resolution — deliberately *without* the HyDE configs: the
+    hypothetical passage depends only on the query, never on chunk
+    boundaries, so a per-strategy re-measure would re-pay every LLM
+    generation to measure the same transformation. Embeddings, the
+    contextualizing LLM (which also writes the HyDE passages), and the
     reranker resolve from settings — the live GPU services (the ``semantic``
     strategy additionally embeds at ingest time through the same service).
 
@@ -752,6 +772,7 @@ def run_matrix(
 
     with ephemeral_stores() as stores:
         hybrid = HybridRetriever(store=stores.store, bm25=stores.bm25, embeddings=embeddings)
+        hyde = HydeRetriever(base=hybrid, llm=llm, embeddings=embeddings)
         retrievers: dict[str, Retriever] = {
             "semantic": SemanticRetriever(store=stores.store, embeddings=embeddings),
             "bm25": BM25Retriever(bm25=stores.bm25, store=stores.store),
@@ -759,6 +780,12 @@ def run_matrix(
             # Config 5 composes the same store-wired hybrid; the reranker
             # is the live infinity container's /rerank (spec_v2 §5.5).
             "reranked": RerankedRetriever(base=hybrid, rerank=rerank),
+            # Configs 6–7 (ADR-016): hyde steers the same hybrid's dense
+            # arm with a live-LLM hypothetical passage; the pairing stacks
+            # rerank OUTSIDE hyde, so the cross-encoder judges the real
+            # query while HyDE shapes the candidate pool.
+            "hyde": hyde,
+            "hyde_reranked": RerankedRetriever(base=hyde, rerank=rerank),
         }
 
         # Ingest A — non-contextual baseline → config 1.
@@ -780,7 +807,7 @@ def run_matrix(
                 measure_retriever(retrievers["semantic"], entries)
             )
 
-        # Ingest B — contextual (LLM blurbs) → configs 2–5 on one index.
+        # Ingest B — contextual (LLM blurbs) → configs 2–7 on one index.
         with pinned_eval_settings(CONTEXTUALIZE="true"):
             logger.info("ingest B (contextual) into the same ephemeral stores (reingest)")
             started = time.monotonic()
@@ -801,6 +828,8 @@ def run_matrix(
                 ("bm25_contextual", "bm25"),
                 ("hybrid_contextual", "hybrid"),
                 ("hybrid_rerank_contextual", "reranked"),
+                ("hyde_contextual", "hyde"),
+                ("hyde_rerank_contextual", "hyde_reranked"),
             ):
                 configs[config], ranks_by_config[config] = measure_retriever(
                     retrievers[retriever_name], entries

@@ -684,7 +684,7 @@ export interface components {
          *     Attributes:
          *         retrieval_method: Registry name of the retrieval method for this
          *             question only (``semantic`` | ``bm25`` | ``hybrid`` |
-         *             ``reranked``).
+         *             ``reranked`` | ``hyde``).
          *         top_k: Number of chunks retrieved for this question only.
          *         chat_engine: Registry name of the chat engine for this question
          *             only (``simple`` | ``condense_context`` — spec_v3 §4.2).

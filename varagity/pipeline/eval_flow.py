@@ -25,7 +25,7 @@ from varagity.pipeline.ingest_flow import ingest_flow
 
 @flow(name="eval-matrix", validate_parameters=False)
 def eval_flow(verbose: int | None = None) -> dict[str, Any]:
-    """Run the 5-configuration retrieval matrix as a tracked flow run.
+    """Run the 7-configuration retrieval matrix as a tracked flow run.
 
     Args:
         verbose: Console verbosity (0–2); defaults to

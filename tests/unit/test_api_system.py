@@ -27,7 +27,7 @@ class TestConfig:
         response = await get(app, "/api/config")
         assert response.status_code == 200
         data = response.json()
-        assert data["retrievers"] == ["bm25", "hybrid", "reranked", "semantic"]
+        assert data["retrievers"] == ["bm25", "hybrid", "hyde", "reranked", "semantic"]
         assert data["chunkers"] == [
             "docling_hybrid",
             "markdown_aware",
@@ -45,6 +45,8 @@ class TestConfig:
         assert ranges["verbose"] == {"min": 0, "max": 2}
         assert ranges["semantic_weight"] == {"min": 0.0, "max": 1.0}
         assert ranges["bm25_weight"] == {"min": 0.0, "max": 1.0}
+        assert ranges["hyde_max_tokens"]["min"] == 1
+        assert ranges["hyde_max_chars"]["min"] == 1
 
     async def test_llm_model_types_and_upload_constraints(
         self, app: FastAPI, settings_env: Any

@@ -140,7 +140,7 @@ uv run main.py ingest              # ingest DOCS_PATH into both stores
 uv run main.py ingest --reingest   # delete + re-process every discovered doc
 uv run main.py chat                # ingest, then the Q&A loop (the default)
 uv run main.py -v 2 chat           # verbose: full chunk/retrieval panels
-uv run --group eval main.py eval       # 5-config retrieval matrix + chunker sweep
+uv run --group eval main.py eval       # 7-config retrieval matrix + chunker sweep
 uv run --group eval main.py eval ocr   # OCR engine benchmark
 uv run --group eval main.py eval chat  # multi-turn chat-engine eval (ADR-011)
 ```
@@ -182,9 +182,21 @@ stale flag ([below](#runtime-settings-the-stale-corpus-flag)); the CLI
 variant does not.
 
 **Retrieval method** is an env toggle:
-`RETRIEVAL_METHOD=semantic|bm25|hybrid|reranked` (default `hybrid`) — or
-flip it live from the GUI settings drawer, no restart. Handy for A/B-ing a
-query that one method struggles with.
+`RETRIEVAL_METHOD=semantic|bm25|hybrid|reranked|hyde` (default `hybrid`) —
+or flip it live from the GUI settings drawer, no restart. Handy for A/B-ing
+a query that one method struggles with.
+
+**HyDE** (post-v3, [ADR-016](adr/ADR-016-hyde-retrieval.md)) rides that
+toggle: `RETRIEVAL_METHOD=hyde` has the chat LLM write a hypothetical
+answer passage per question and steers the dense arm with its passage-mode
+embedding — BM25 still sees your words. Pair it with the cross-encoder as
+`RETRIEVAL_METHOD=reranked` + `RERANK_BASE_METHOD=hyde` (rerank outside, so
+it judges the real query). Budget for the extra LLM round-trip before
+retrieval on every question — the same llama.cpp server that answers.
+`HYDE_ENABLED=false` is the **kill switch, not a method**: `hyde` then
+degrades to its `HYDE_BASE_METHOD` and logs it, exactly the
+`RERANK_ENABLED` shape — and any generation failure degrades the same way
+per-query, so a flaky LLM slows retrieval rather than breaking it.
 
 **Chat engine** is the same shape of toggle (v3,
 [ADR-011](adr/ADR-011-chat-engine-condense.md)):

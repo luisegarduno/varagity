@@ -164,8 +164,8 @@ class Settings(BaseSettings):
             import time), so flow/task runs are tracked by the compose
             ``prefect`` service.
         RETRIEVAL_METHOD: Registry name of the retrieval method (spec §10.1
-            + spec_v2 §5: ``semantic`` | ``bm25`` | ``hybrid`` |
-            ``reranked``; the default is ``hybrid``).
+            + spec_v2 §5 + ADR-016: ``semantic`` | ``bm25`` | ``hybrid`` |
+            ``reranked`` | ``hyde``; the default is ``hybrid``).
         TOP_K: Number of chunks retrieved per query.
         SEMANTIC_WEIGHT: Hybrid rank-fusion weight of the semantic (pgvector)
             arm (spec §11.4). Must sum to 1.0 with ``BM25_WEIGHT``.
@@ -188,12 +188,42 @@ class Settings(BaseSettings):
             ≤ ``RERANK_CANDIDATES``; with ``RETRIEVAL_METHOD=reranked``
             also ≤ ``TOP_K`` (rerank narrows; it can't invent candidates).
         RERANK_BASE_METHOD: Registry name of the retriever the ``reranked``
-            method composes (``semantic`` | ``bm25`` | ``hybrid``; not
-            ``reranked`` — no recursion).
+            method composes (``semantic`` | ``bm25`` | ``hybrid`` |
+            ``hyde``; not ``reranked`` — no recursion). ``hyde`` here is
+            the HyDE+rerank pairing (ADR-016): HyDE steers the candidate
+            pool, the cross-encoder judges the user's real query.
         RERANK_CANDIDATES: Candidate-pool size over-fetched from the base
             retriever and cross-encoded per query (v2 plan decision #3 —
             the Anthropic cookbook's 150→20 over-fetch, scaled to this
             corpus).
+        HYDE_ENABLED: Kill switch for the hypothetical-passage stage,
+            orthogonal to method selection (ADR-016 — the
+            ``RERANK_ENABLED`` pattern): with ``RETRIEVAL_METHOD=hyde`` and
+            this off, the ``hyde`` retriever degrades to its base method's
+            raw-query retrieval and logs it.
+        HYDE_BASE_METHOD: Registry name of the retriever the ``hyde``
+            method composes (``semantic`` | ``hybrid``). Not ``bm25`` —
+            it never consumes a query vector, so HyDE over it would be a
+            paid LLM call with zero effect; not ``reranked`` — the
+            cross-encoder must judge the user's real query, so rerank
+            composes hyde (``RERANK_BASE_METHOD=hyde``), never the
+            reverse; not ``hyde`` — no recursion.
+        HYDE_MODEL_TYPE: Model-registry type the passage generator
+            resolves its LLM with (``default`` | ``reasoning`` | ``tool``
+            — mirrors ``CONDENSE_MODEL_TYPE``, and like it is the seam for
+            pointing HyDE at a smaller model without a code change).
+        HYDE_MAX_TOKENS: Generation cap for the hypothetical passage —
+            sized for a reasoning preamble plus a 3–5 sentence passage
+            (the ``CONDENSE_MAX_TOKENS`` lesson: a cap a reasoning model
+            can't finish under returns empty content and silently degrades
+            the query to the raw-query fallback; measured live, 512
+            starved roughly a third of generations on this stack's
+            reasoning model — a passage needs more room than a
+            one-sentence condense).
+        HYDE_MAX_CHARS: Length ceiling on the cleaned passage; anything
+            longer means the generator misbehaved, and the raw query is
+            searched instead (roughly a chunk's worth — e5 truncates the
+            embedded probe at 512 tokens regardless).
         API_HOST: Bind address of the HTTP API server (spec_v2 §4.1).
         API_PORT: Port of the HTTP API server.
         API_CORS_ORIGINS: Comma-separated origins allowed CORS access to
@@ -293,6 +323,12 @@ class Settings(BaseSettings):
     RERANK_TOP_N: int = 5
     RERANK_BASE_METHOD: str = "hybrid"
     RERANK_CANDIDATES: int = 40
+
+    HYDE_ENABLED: bool = True
+    HYDE_BASE_METHOD: str = "hybrid"
+    HYDE_MODEL_TYPE: str = "default"
+    HYDE_MAX_TOKENS: int = 1024
+    HYDE_MAX_CHARS: int = 2000
 
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
@@ -540,11 +576,15 @@ class Settings(BaseSettings):
     @field_validator("RETRIEVAL_METHOD")
     @classmethod
     def _validate_retrieval_method(cls, value: str) -> str:
-        """Reject retrieval methods outside the spec §10.1 / spec_v2 §5 vocabulary.
+        """Reject retrieval methods outside the spec §10.1 / spec_v2 §5 / ADR-016 vocabulary.
 
         Membership in the vocabulary is validated here; registry membership
         is enforced by :func:`varagity.retrieval.get_retriever` at lookup
-        time.
+        time. The vocabulary is hard-coded (importing the retriever
+        registry here would be circular — the retrievers read this module
+        through their model/store clients); the tuple is regression-tested
+        to equal ``varagity.retrieval.RETRIEVER_REGISTRY`` and grows in
+        lockstep with it.
 
         Args:
             value: The configured ``RETRIEVAL_METHOD`` value.
@@ -554,9 +594,9 @@ class Settings(BaseSettings):
 
         Raises:
             ValueError: If ``value`` is not ``semantic``, ``bm25``,
-                ``hybrid``, or ``reranked``.
+                ``hybrid``, ``reranked``, or ``hyde``.
         """
-        allowed = ("semantic", "bm25", "hybrid", "reranked")
+        allowed = ("semantic", "bm25", "hybrid", "reranked", "hyde")
         if value not in allowed:
             raise ValueError(f"RETRIEVAL_METHOD must be one of {allowed}; got {value!r}")
         return value
@@ -576,16 +616,20 @@ class Settings(BaseSettings):
         Raises:
             ValueError: If ``RERANK_TOP_N`` is not in
                 ``(0, RERANK_CANDIDATES]``, if ``RERANK_BASE_METHOD`` is not
-                ``semantic``/``bm25``/``hybrid`` (``reranked`` would
-                recurse), or if ``RETRIEVAL_METHOD == "reranked"`` with
-                ``RERANK_TOP_N > TOP_K`` or ``RERANK_CANDIDATES < TOP_K``.
+                ``semantic``/``bm25``/``hybrid``/``hyde`` (``reranked``
+                would recurse), or if ``RETRIEVAL_METHOD == "reranked"``
+                with ``RERANK_TOP_N > TOP_K`` or
+                ``RERANK_CANDIDATES < TOP_K``.
         """
         if not 0 < self.RERANK_TOP_N <= self.RERANK_CANDIDATES:
             raise ValueError(
                 f"RERANK_TOP_N ({self.RERANK_TOP_N}) must be positive and at most "
                 f"RERANK_CANDIDATES ({self.RERANK_CANDIDATES})"
             )
-        allowed_bases = ("semantic", "bm25", "hybrid")
+        # `hyde` is a valid rerank base (ADR-016 — that composition *is*
+        # the HyDE+rerank pairing); the reverse nesting is rejected by
+        # `_validate_hyde`.
+        allowed_bases = ("semantic", "bm25", "hybrid", "hyde")
         if self.RERANK_BASE_METHOD not in allowed_bases:
             raise ValueError(
                 f"RERANK_BASE_METHOD must be one of {allowed_bases} (not 'reranked' — "
@@ -603,6 +647,46 @@ class Settings(BaseSettings):
                     f"RERANK_CANDIDATES ({self.RERANK_CANDIDATES}) must be at least "
                     f"TOP_K ({self.TOP_K}) when RETRIEVAL_METHOD is 'reranked'"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_hyde(self) -> "Settings":
+        """Reject HyDE parameters outside their domains (ADR-016).
+
+        ``HYDE_BASE_METHOD`` is deliberately narrower than the retriever
+        registry: ``bm25`` never consumes a query vector (HyDE over it
+        would be a paid LLM call with zero effect), ``reranked`` would
+        invert the stacking (the cross-encoder must judge the user's real
+        query — compose the pair as ``RERANK_BASE_METHOD=hyde`` instead),
+        and ``hyde`` would recurse. ``HYDE_MODEL_TYPE``'s vocabulary is
+        hard-coded for the same circular-import reason as
+        :meth:`_validate_chat_model_type`.
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If ``HYDE_BASE_METHOD`` is not ``semantic`` or
+                ``hybrid``, if ``HYDE_MAX_TOKENS`` or ``HYDE_MAX_CHARS`` is
+                not positive, or if ``HYDE_MODEL_TYPE`` is not ``default``,
+                ``reasoning``, or ``tool``.
+        """
+        allowed_bases = ("semantic", "hybrid")
+        if self.HYDE_BASE_METHOD not in allowed_bases:
+            raise ValueError(
+                f"HYDE_BASE_METHOD must be one of {allowed_bases} ('bm25' ignores query "
+                "vectors; 'reranked' must compose hyde via RERANK_BASE_METHOD=hyde, not "
+                f"the reverse); got {self.HYDE_BASE_METHOD!r}"
+            )
+        for name in ("HYDE_MAX_TOKENS", "HYDE_MAX_CHARS"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive; got {getattr(self, name)}")
+        allowed_model_types = ("default", "reasoning", "tool")
+        if self.HYDE_MODEL_TYPE not in allowed_model_types:
+            raise ValueError(
+                f"HYDE_MODEL_TYPE must be one of {allowed_model_types}; "
+                f"got {self.HYDE_MODEL_TYPE!r}"
+            )
         return self
 
     @model_validator(mode="after")

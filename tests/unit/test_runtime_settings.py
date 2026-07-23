@@ -63,14 +63,17 @@ class TestCatalog:
             name: spec.choices() for name, spec in OVERRIDABLE.items() if spec.choices is not None
         }
         assert "reranked" in choices["RETRIEVAL_METHOD"]
+        assert "hyde" in choices["RETRIEVAL_METHOD"]
         assert {"markdown_aware", "recursive_character", "token_based"} <= set(
             choices["CHUNKING_STRATEGY"]
         )
-        assert choices["RERANK_BASE_METHOD"] == ["semantic", "bm25", "hybrid"]
+        assert choices["RERANK_BASE_METHOD"] == ["semantic", "bm25", "hybrid", "hyde"]
+        assert choices["HYDE_BASE_METHOD"] == ["semantic", "hybrid"]
         assert choices["CHAT_MODEL_TYPE"] == ["default", "reasoning", "tool"]
         assert "easyocr" in choices["OCR_ENGINE"]
         assert choices["CHAT_ENGINE"] == ["condense_context", "simple"]
         assert choices["CONDENSE_MODEL_TYPE"] == ["default", "reasoning", "tool"]
+        assert choices["HYDE_MODEL_TYPE"] == ["default", "reasoning", "tool"]
 
     def test_condense_knobs_are_overridable_but_never_reingest_affecting(self) -> None:
         """spec_v3 §9: the condense knobs change query-time behavior only.
@@ -87,6 +90,21 @@ class TestCatalog:
         }
         assert condense_knobs <= set(OVERRIDABLE)
         assert condense_knobs.isdisjoint(REINGEST_AFFECTING)
+
+    def test_hyde_knobs_are_overridable_but_never_reingest_affecting(self) -> None:
+        """ADR-016: HyDE transforms queries at retrieval time only.
+
+        A HyDE toggle must never demand a corpus re-ingest.
+        """
+        hyde_knobs = {
+            "HYDE_ENABLED",
+            "HYDE_BASE_METHOD",
+            "HYDE_MODEL_TYPE",
+            "HYDE_MAX_TOKENS",
+            "HYDE_MAX_CHARS",
+        }
+        assert hyde_knobs <= set(OVERRIDABLE)
+        assert hyde_knobs.isdisjoint(REINGEST_AFFECTING)
 
 
 class TestToEnvValue:

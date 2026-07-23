@@ -171,16 +171,29 @@ class TestSizeValidation:
 
 
 class TestRetrievalMethodValidation:
-    @pytest.mark.parametrize("method", ["semantic", "bm25", "hybrid", "reranked"])
+    @pytest.mark.parametrize("method", ["semantic", "bm25", "hybrid", "reranked", "hyde"])
     def test_spec_vocabulary_accepted(self, method: str) -> None:
-        """All spec §10.1 + spec_v2 §5 values pass config validation."""
+        """All spec §10.1 + spec_v2 §5 + ADR-016 values pass config validation."""
         settings = Settings(_env_file=None, RETRIEVAL_METHOD=method)
         assert method == settings.RETRIEVAL_METHOD
 
-    @pytest.mark.parametrize("bad", ["keyword", "SEMANTIC", "", "hybrid ", "rerank"])
+    @pytest.mark.parametrize("bad", ["keyword", "SEMANTIC", "", "hybrid ", "rerank", "HYDE"])
     def test_unknown_method_fails_fast(self, bad: str) -> None:
         with pytest.raises(ValidationError, match="RETRIEVAL_METHOD"):
             Settings(_env_file=None, RETRIEVAL_METHOD=bad)
+
+    def test_vocabulary_matches_the_registry(self) -> None:
+        """config.py hard-codes the tuple (circular import); keep them equal.
+
+        The guard that forces the validator tuple to grow in lockstep with
+        ``varagity/retrieval/`` — registering a method without widening the
+        vocabulary (or vice versa) fails here.
+        """
+        from varagity.retrieval import RETRIEVER_REGISTRY
+
+        for name in sorted(RETRIEVER_REGISTRY):
+            assert name == Settings(_env_file=None, RETRIEVAL_METHOD=name).RETRIEVAL_METHOD
+        assert len(RETRIEVER_REGISTRY) == 5  # semantic + bm25 + hybrid + reranked + hyde
 
 
 class TestChatModelTypeValidation:
@@ -288,8 +301,9 @@ class TestRerankValidation:
         with pytest.raises(ValidationError, match="RERANK_CANDIDATES"):
             Settings(_env_file=None, RERANK_TOP_N=50, RERANK_CANDIDATES=40)
 
-    @pytest.mark.parametrize("base", ["semantic", "bm25", "hybrid"])
+    @pytest.mark.parametrize("base", ["semantic", "bm25", "hybrid", "hyde"])
     def test_base_method_vocabulary_accepted(self, base: str) -> None:
+        """`hyde` included — RERANK_BASE_METHOD=hyde *is* the ADR-016 pairing."""
         settings = Settings(_env_file=None, RERANK_BASE_METHOD=base)
         assert base == settings.RERANK_BASE_METHOD
 
@@ -329,6 +343,61 @@ class TestRerankValidation:
             RERANK_CANDIDATES=40,
         )
         assert settings.RETRIEVAL_METHOD == "reranked"
+
+
+class TestHydeValidation:
+    """The HyDE knobs (ADR-016) and their domains."""
+
+    def test_defaults_are_valid_and_enabled(self) -> None:
+        settings = Settings(_env_file=None)
+        assert settings.HYDE_ENABLED is True
+        assert settings.HYDE_BASE_METHOD == "hybrid"
+        assert settings.HYDE_MODEL_TYPE == "default"
+        assert settings.HYDE_MAX_TOKENS == 1024
+        assert settings.HYDE_MAX_CHARS == 2000
+
+    def test_default_retrieval_method_is_still_hybrid(self) -> None:
+        """Adding hyde must not move the shipped default (ADR-016)."""
+        assert Settings(_env_file=None).RETRIEVAL_METHOD == "hybrid"
+
+    @pytest.mark.parametrize("base", ["semantic", "hybrid"])
+    def test_base_method_vocabulary_accepted(self, base: str) -> None:
+        settings = Settings(_env_file=None, HYDE_BASE_METHOD=base)
+        assert base == settings.HYDE_BASE_METHOD
+
+    @pytest.mark.parametrize("bad", ["bm25", "reranked", "hyde", "keyword", ""])
+    def test_bad_base_method_fails_fast(self, bad: str) -> None:
+        """bm25 ignores vectors; reranked inverts the stacking; hyde recurses."""
+        with pytest.raises(ValidationError, match="HYDE_BASE_METHOD"):
+            Settings(_env_file=None, HYDE_BASE_METHOD=bad)
+
+    def test_rerank_over_hyde_pairing_is_valid(self) -> None:
+        """The ADR-016 pairing: reranked composing hyde composing hybrid."""
+        settings = Settings(
+            _env_file=None,
+            RETRIEVAL_METHOD="reranked",
+            RERANK_BASE_METHOD="hyde",
+            HYDE_BASE_METHOD="hybrid",
+        )
+        assert settings.RERANK_BASE_METHOD == "hyde"
+
+    @pytest.mark.parametrize("name", ["HYDE_MAX_TOKENS", "HYDE_MAX_CHARS"])
+    @pytest.mark.parametrize("bad", [0, -5])
+    def test_nonpositive_caps_fail_fast(self, name: str, bad: int) -> None:
+        with pytest.raises(ValidationError, match=name):
+            Settings(_env_file=None, **{name: bad})
+
+    @pytest.mark.parametrize("bad", ["embedding", "rerank", "DEFAULT", "", "chat"])
+    def test_non_llm_hyde_model_types_fail_fast(self, bad: str) -> None:
+        with pytest.raises(ValidationError, match="HYDE_MODEL_TYPE"):
+            Settings(_env_file=None, HYDE_MODEL_TYPE=bad)
+
+    def test_hyde_model_vocabulary_matches_the_registry_aliases(self) -> None:
+        """Hard-coded for the same circular-import reason as CHAT_MODEL_TYPE."""
+        from varagity.models.registry import LLM_MODEL_TYPES
+
+        for alias in LLM_MODEL_TYPES:
+            assert alias == Settings(_env_file=None, HYDE_MODEL_TYPE=alias).HYDE_MODEL_TYPE
 
 
 class TestFusionWeightValidation:

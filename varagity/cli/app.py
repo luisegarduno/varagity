@@ -105,10 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_verbose_option(chat, default=argparse.SUPPRESS)
     evaluate = subparsers.add_parser(
         "eval",
-        help="measure retrieval quality (recall@k/pass@k, 5-config matrix) on ephemeral stores",
+        help="measure retrieval quality (recall@k/pass@k, 7-config matrix) on ephemeral stores",
         description="Run the spec §16 evaluation harness against ephemeral testcontainers "
         "stores (Docker required) and the live GPU services. Without a target, runs the "
-        "5-configuration retrieval matrix; `eval ocr` benchmarks the OCR engines; "
+        "7-configuration retrieval matrix; `eval ocr` benchmarks the OCR engines; "
         "`eval chat` compares the chat engines on multi-turn conversations.",
     )
     _add_verbose_option(evaluate, default=argparse.SUPPRESS)
@@ -237,7 +237,7 @@ def _run_chat(verbose: int) -> int:
 
 
 def _run_eval(verbose: int) -> int:
-    """Execute the ``eval`` subcommand: the 5-configuration retrieval matrix.
+    """Execute the ``eval`` subcommand: the 7-configuration retrieval matrix.
 
     Args:
         verbose: Effective console verbosity.
@@ -279,13 +279,15 @@ def _run_eval_chat(verbose: int) -> int:
 
 
 # Matrix config keys in ladder order, with their table labels (spec §16 +
-# spec_v2 §5.5).
+# spec_v2 §5.5 + ADR-016).
 _MATRIX_CONFIG_LABELS: tuple[tuple[str, str], ...] = (
     ("semantic_noncontextual", "1. semantic, non-contextual"),
     ("semantic_contextual", "2. semantic, contextual"),
     ("bm25_contextual", "3. BM25, contextual"),
     ("hybrid_contextual", "4. hybrid, contextual"),
     ("hybrid_rerank_contextual", "5. hybrid + rerank, contextual"),
+    ("hyde_contextual", "6. HyDE → hybrid, contextual"),
+    ("hyde_rerank_contextual", "7. HyDE → hybrid + rerank, contextual"),
 )
 
 
@@ -306,7 +308,9 @@ def _show_matrix_results(results: dict[str, Any]) -> None:
     for k in k_values:
         table.add_column(f"pass@{k}", justify="right", style="dim")
     for key, label in _MATRIX_CONFIG_LABELS:
-        scores = results["configs"][key]
+        scores = results["configs"].get(key)
+        if scores is None:  # result files from before the ADR-016 hyde configs
+            continue
         table.add_row(
             label,
             *(f"{scores['recall'][str(k)]:.3f}" for k in k_values),

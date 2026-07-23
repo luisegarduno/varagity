@@ -166,7 +166,7 @@ flowchart LR
 
     subgraph query["Query (RETRIEVAL_METHOD · CHAT_ENGINE)"]
         direction LR
-        condense["condense<br/>(chat engine)"] --> retrieve["retrieve<br/>semantic · bm25 · hybrid · reranked"] --> generate["generate<br/>grounded + cited"]
+        condense["condense<br/>(chat engine)"] --> retrieve["retrieve<br/>semantic · bm25 · hybrid · reranked · hyde"] --> generate["generate<br/>grounded + cited"]
     end
 
     question(["question"]) --> condense
@@ -192,11 +192,12 @@ flowchart LR
   and BM25 while the **original** question always reaches the answer prompt.
   Retrieval method is config-selected (`RETRIEVAL_METHOD`): `semantic`
   (pgvector cosine), `bm25` (Elasticsearch), `hybrid` (weighted
-  reciprocal-rank fusion of both — the default), or `reranked` (a base
+  reciprocal-rank fusion of both — the default), `reranked` (a base
   method's candidates re-ordered by a cross-encoder — see
-  [below](#reranking-wired-in-v2)). The API front-end runs the same path as a
-  streaming flow (`query-stream`), delivering evidence and answer deltas over
-  SSE.
+  [below](#reranking-wired-in-v2)), or `hyde` (an LLM-written hypothetical
+  passage steering the dense arm — see [below](#hyde-post-v3)). The API
+  front-end runs the same path as a streaming flow (`query-stream`),
+  delivering evidence and answer deltas over SSE.
 
 Since v2 every retrieved chunk carries an optional **`RetrievalTrace`** —
 per-arm ranks and scores, fused score and rank, rerank delta, final rank —
@@ -261,7 +262,7 @@ caller edits:
 |---|---|---|---|
 | Parsers | `varagity/ingest/parsers/base.py` | discovery bucket | `text` (`.txt`/`.md`/`.rst`), `pdf` (Docling two-pass OCR), `office` (OOXML families / `.csv` / OpenDocument), `web` (`.html`/`.htm`/`.xhtml`), `image` (bitmaps, OCR-only) |
 | Chunking strategies | `varagity/chunking/base.py` | `CHUNKING_STRATEGY` | `recursive_character` (default — [ADR-008](adr/ADR-008-chunking-default.md)), `token_based`, `markdown_aware`, `semantic`, `docling_hybrid` |
-| Retrievers | `varagity/retrieval/base.py` | `RETRIEVAL_METHOD` | `semantic`, `bm25`, `hybrid`, `reranked` |
+| Retrievers | `varagity/retrieval/base.py` | `RETRIEVAL_METHOD` | `semantic`, `bm25`, `hybrid` (default), `reranked`, `hyde` ([ADR-016](adr/ADR-016-hyde-retrieval.md)) |
 | Chat engines | `varagity/chat/base.py` | `CHAT_ENGINE` | `simple` (default — [ADR-011](adr/ADR-011-chat-engine-condense.md)), `condense_context` |
 | OCR engines | `varagity/ingest/parsers/pdf.py` (a factory, deliberately not a registry) | `OCR_ENGINE` | `easyocr` (default, ADR-004), `tesseract` |
 | Model clients | `varagity/models/registry.py` | `model_type` argument | `embedding`, `rerank`, `default` (+ `reasoning`/`tool` aliases) |
@@ -317,6 +318,37 @@ the method. Operational notes on serving the reranker and the embedder from
 one 8 GB GPU are in the
 [runbook](runbook.md#the-reranker-rides-the-embedding-container).
 
+## HyDE (post-v3)
+
+HyDE — Hypothetical Document Embeddings (Gao et al. 2022) — is the `hyde`
+retriever (`varagity/retrieval/hyde.py`;
+[ADR-016](adr/ADR-016-hyde-retrieval.md)), added to be *evaluated* against
+the ladder rather than to move the default (`RETRIEVAL_METHOD` stays
+`hybrid`). Like `reranked` it **composes** a base retriever
+(`HYDE_BASE_METHOD`: `semantic` | `hybrid`):
+
+1. one non-streaming LLM call writes a hypothetical answer passage for the
+   query (the same llama.cpp server that answers; `<think>`-stripped via
+   `clean_response`, label-echo stripped, empty/overlong guarded);
+2. the passage — not the query — is embedded in e5 **passage mode**
+   (`embed_passages`, the paper's document-encoder choice), landing it in
+   the corpus's own vector space where passage↔passage neighbors are the
+   chunks that *look like* the answer;
+3. the base retriever runs with the **original query text** plus that
+   vector via the `query_vector` seam — dense-arm-only substitution: a
+   `hybrid` base's BM25 arm keeps exact keyword recall, and traces pass
+   through untouched.
+
+Pairing with the cross-encoder stacks rerank *outside*:
+`RETRIEVAL_METHOD=reranked` + `RERANK_BASE_METHOD=hyde`, so HyDE shapes the
+candidate pool while the reranker judges the user's real query (the
+reverse nesting is config-rejected, as are `bm25` — it ignores query
+vectors — and recursion). `HYDE_ENABLED=false` is the same kill-switch
+shape as `RERANK_ENABLED`: `hyde` degrades to its base method's raw-query
+retrieval and logs it — and every generation failure degrades identically
+at `WARNING`. Matrix configs 6–7 (`hyde_contextual`,
+`hyde_rerank_contextual`) measure both forms.
+
 ## The codebase map
 
 This page explains Varagity in prose and Mermaid fragments; the web GUI also
@@ -370,7 +402,7 @@ varagity/
 │   ├── conversation_store.py   # conversations / groups / messages / message_sources snapshots
 │   ├── app_settings_store.py   # persisted runtime overrides + the _corpus_stale flag
 │   └── migrate.py, migrations/ # idempotent NNN_*.sql runner (runs on API startup)
-├── retrieval/            # semantic.py, bm25.py (+ hydrate), hybrid.py, reranked.py
+├── retrieval/            # semantic.py, bm25.py (+ hydrate), hybrid.py, reranked.py, hyde.py
 ├── chat/                 # chat-engine registry (ADR-011): base.py (PreparedQuery, Turn),
 │                         #   simple.py, condense.py + prompts.py
 ├── preview/              # evidence-panel page previews (ADR-010): normalize, locate
@@ -386,7 +418,7 @@ varagity/
 │   ├── streaming.py      # EventBridge — sync flow callbacks → SSE frames
 │   ├── ingest_runner.py  # one-at-a-time background ingest + status stream replay
 │   └── runtime_settings.py, deps.py
-├── eval/                 # golden set, 5-config matrix, chunker sweep, OCR benchmark, testcontainers
+├── eval/                 # golden set, 7-config matrix, chunker sweep, OCR benchmark, testcontainers
 ├── cli/                  # argparse subcommands: ingest / chat / eval [ocr]
 └── debug/show.py         # v_<name>() rich renderers behind the verbose= convention
 

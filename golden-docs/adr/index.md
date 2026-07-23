@@ -20,3 +20,4 @@ conversation that produced it. Format: Context → Decision → Consequences.
 | [ADR-013](ADR-013-corpus-gauges-vs-counters.md) | Store-derived corpus gauges over ingest-counter arithmetic | Accepted |
 | [ADR-014](ADR-014-bun-package-manager.md) | bun as the package manager, Node as the runtime | Accepted |
 | [ADR-015](ADR-015-codebase-map.md) | In-app codebase map (`/map` + developer mode) — curated TS data, condensed foglamp-style canvas | Accepted (amended) |
+| [ADR-016](ADR-016-hyde-retrieval.md) | HyDE as a composing retriever, paired under rerank (default stays `hybrid`) | Accepted |
