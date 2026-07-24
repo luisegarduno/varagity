@@ -15,6 +15,7 @@ import {
   formatTokensPerSecond,
   latencyRecord,
   LIVE_EVIDENCE_KEY,
+  metadataRows,
   usageFromDone,
 } from "@/lib/evidence";
 
@@ -301,6 +302,48 @@ describe("fileClock", () => {
     expect(
       fileClock({ fileCreatedAt: null, fileModifiedAt: "not-a-date" }),
     ).toBeNull();
+  });
+});
+
+describe("metadataRows", () => {
+  it("lists the provenance record in order, timestamps localized", () => {
+    const [chunk] = evidenceFromRetrieval(retrieval).chunks;
+    // Locale-dependent output: build the expectation with the same API.
+    expect(metadataRows(chunk)).toEqual([
+      { label: "Chunk ID", value: "a398491c7441925f::0" },
+      { label: "Document ID", value: "a398491c7441925f" },
+      { label: "Source path", value: "/docs/marine/kelp_corridor.md" },
+      { label: "File name", value: "kelp_corridor.md" },
+      { label: "File type", value: "md" },
+      { label: "Extraction", value: "text" },
+      {
+        label: "File created",
+        value: new Date("2024-01-02T08:00:00Z").toLocaleString(),
+      },
+      {
+        label: "File modified",
+        value: new Date("2024-05-04T12:30:45Z").toLocaleString(),
+      },
+    ]);
+  });
+
+  it("omits absent fields and stringifies the page number", () => {
+    // chunkB: page 7, no timestamps — the omission mirror of chunkA.
+    const [, chunk] = evidenceFromRetrieval(retrieval).chunks;
+    const rows = metadataRows(chunk);
+    expect(rows).toContainEqual({ label: "Page", value: "7" });
+    const labels = rows.map((row) => row.label);
+    expect(labels).not.toContain("File created");
+    expect(labels).not.toContain("File modified");
+  });
+
+  it("falls back to the stored string for an unparseable timestamp", () => {
+    const [chunk] = evidenceFromRetrieval(retrieval).chunks;
+    const rows = metadataRows({ ...chunk, fileModifiedAt: "not-a-date" });
+    expect(rows).toContainEqual({
+      label: "File modified",
+      value: "not-a-date",
+    });
   });
 });
 

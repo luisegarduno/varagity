@@ -182,6 +182,35 @@ export function fileClock(
   return { text: `modified ${modified.toLocaleDateString()}`, title };
 }
 
+/**
+ * The "Show metadata" disclosure's rows (one card's raw provenance
+ * record as label/value pairs, absent fields omitted). Deliberately
+ * limited to the normalized {@link EvidenceChunk} fields — the ones both
+ * wire shapes carry (live `retrieval` event and persisted
+ * `message_sources` snapshot) — so a just-streamed turn and its reload
+ * render the identical list. Timestamps localize; an unparseable one
+ * falls back to the stored string (it's a raw view — show what's there).
+ */
+export function metadataRows(
+  chunk: EvidenceChunk,
+): { label: string; value: string }[] {
+  const stamp = (iso: string): string => asDate(iso)?.toLocaleString() ?? iso;
+  const record: [string, string | null][] = [
+    ["Chunk ID", chunk.key],
+    ["Document ID", chunk.docId],
+    ["Source path", chunk.source],
+    ["File name", chunk.fileName],
+    ["File type", chunk.fileType],
+    ["Page", chunk.page === null ? null : String(chunk.page)],
+    ["Extraction", chunk.extraction],
+    ["File created", chunk.fileCreatedAt === null ? null : stamp(chunk.fileCreatedAt)],
+    ["File modified", chunk.fileModifiedAt === null ? null : stamp(chunk.fileModifiedAt)],
+  ];
+  return record
+    .filter((entry): entry is [string, string] => entry[1] !== null)
+    .map(([label, value]) => ({ label, value }));
+}
+
 /** A loosely-typed persisted snapshot's serialized retrieval trace. */
 function traceFromSnapshot(value: unknown): RetrievalTrace | null {
   if (value === null || typeof value !== "object") return null;

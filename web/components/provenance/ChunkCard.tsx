@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRightIcon, ScanTextIcon } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 
 import { PagePreview } from "@/components/provenance/PagePreview";
 import { RankBadges } from "@/components/provenance/RankBadges";
@@ -13,7 +13,7 @@ import {
   CollapsiblePanel,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { fileClock, type EvidenceChunk } from "@/lib/evidence";
+import { fileClock, metadataRows, type EvidenceChunk } from "@/lib/evidence";
 import { highlightTerms } from "@/lib/highlight";
 import { previewEligible } from "@/lib/preview";
 import { configQuery } from "@/lib/queries";
@@ -54,8 +54,9 @@ export function HighlightedText({
 /**
  * One evidence row (spec_v2 §4.6): rank + final score, the trace badges,
  * source provenance (file, page, the file's modified date, format, OCR
- * fallback), the contextual blurb, and the expandable full chunk text
- * with query-term highlights.
+ * fallback), the contextual blurb, the expandable full chunk text with
+ * query-term highlights, and a second disclosure with the chunk's raw
+ * metadata record.
  * `className`/`style` pass through for the panel's arrival stagger.
  */
 export function ChunkCard({
@@ -70,6 +71,7 @@ export function ChunkCard({
   style?: React.CSSProperties;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [metadataOpen, setMetadataOpen] = useState(false);
   const { data: config = null } = useQuery(configQuery());
   const ocr = chunk.extraction === "ocr_fallback" || chunk.extraction === "ocr";
   const clock = fileClock(chunk);
@@ -175,6 +177,34 @@ export function ChunkCard({
               <HighlightedText text={chunk.content} query={query} />
             </p>
           )}
+        </CollapsiblePanel>
+      </Collapsible>
+
+      <Collapsible open={metadataOpen} onOpenChange={setMetadataOpen}>
+        <CollapsibleTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="xs"
+              className="-ml-1 text-muted-foreground"
+            />
+          }
+        >
+          <ChevronRightIcon
+            aria-hidden
+            className="motion-safe:transition-transform group-aria-expanded/button:rotate-90"
+          />
+          {metadataOpen ? "Hide metadata" : "Show metadata"}
+        </CollapsibleTrigger>
+        <CollapsiblePanel>
+          <dl className="mt-1 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 rounded-md bg-muted/50 p-2 text-xs leading-relaxed">
+            {metadataRows(chunk).map((row) => (
+              <Fragment key={row.label}>
+                <dt className="text-muted-foreground">{row.label}</dt>
+                <dd className="min-w-0 font-mono break-all">{row.value}</dd>
+              </Fragment>
+            ))}
+          </dl>
         </CollapsiblePanel>
       </Collapsible>
     </article>
