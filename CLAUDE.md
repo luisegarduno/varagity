@@ -25,7 +25,8 @@ package manager only (ADR-014). Page previews shipped between v2 and v3 (ADR-010
 
 Where things live:
 - `spec.md` / `spec_v2.md` / `spec_v3.md` — the v1/v2/v3 designs (§ references in
-  docstrings point at them), untracked under `thoughts/shared/specs/`.
+  docstrings point at them), untracked under `thoughts/shared/tasks/<feature-or-version>/`
+  (`tasks/v1/`…`tasks/v3/`; feature specs like `spec_codebase_map.md` sit beside them).
 - `golden-docs/` — **as-built** documentation, rendered by MkDocs (`uv run mkdocs serve`):
   architecture, data model, pipelines, runbook, ADRs 001–014, Python API reference;
   `golden-docs/api.md` is the HTTP contract + SSE protocols, rendered from the
