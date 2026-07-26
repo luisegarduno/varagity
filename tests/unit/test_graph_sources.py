@@ -452,18 +452,22 @@ class TestTapbacks:
 class TestAttributedBody:
     """Decode of NULL-``text`` rows whose body lives in the typedstream blob.
 
-    The two round-trip tests need a real ``attributedBody`` blob captured in
-    this phase's manual R3 gate (``tests/fixtures/graph/attributed_body_hello.bin``,
-    innocuous owner-reviewed content); they skip until it lands. The decode
-    *logic* is unit-covered below without needing a real export.
+    The two round-trip tests use a real ``attributedBody`` blob captured from
+    the owner's export during the R3 gate
+    (``tests/fixtures/graph/attributed_body_sample.bin``, innocuous
+    owner-reviewed content). Besides the text, the blob carries an Apple
+    data-detector attribute run (an embedded keyed-archiver plist for the
+    word "tonight"), so the DFS walker's container fall-throughs run against
+    real Apple output — the decode *logic* is also unit-covered below
+    without the fixture.
     """
 
-    _FIXTURE = Path(__file__).parent.parent / "fixtures" / "graph" / "attributed_body_hello.bin"
+    _FIXTURE = Path(__file__).parent.parent / "fixtures" / "graph" / "attributed_body_sample.bin"
+    _FIXTURE_TEXT = "You gonna be home tonight"
 
     def test_attributed_body_row_decodes(
         self, tmp_path: Path, settings_env: Callable[..., None]
     ) -> None:
-        pytest.skip("fixture pending real-export capture")
         settings_env()
         blob = self._FIXTURE.read_bytes()
         db = _build_chat_db(
@@ -474,12 +478,11 @@ class TestAttributedBody:
         )
         messages = IMessageSource().parse(db)
         assert len(messages) == 1
-        assert messages[0].text  # the captured innocuous content, decoded
+        assert messages[0].text == self._FIXTURE_TEXT
 
     def test_corrupt_attributed_body_row_is_skipped_and_counted(
         self, tmp_path: Path, settings_env: Callable[..., None]
     ) -> None:
-        pytest.skip("fixture pending real-export capture")
         settings_env()
         blob = self._FIXTURE.read_bytes()
         db = _build_chat_db(
