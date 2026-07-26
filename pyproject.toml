@@ -34,6 +34,10 @@ dependencies = [
     # Multipart form parsing for the upload route (FastAPI requires it
     # at import time for File/UploadFile parameters).
     "python-multipart>=0.0.20",
+    # Pure-Python typedstream decoder for iMessage attributedBody blobs
+    # (varagity.graph.sources.imessage, spec_graphrag §10.1) — tiny, LGPL,
+    # imported as a library. PyPI name pytypedstream, import name typedstream.
+    "pytypedstream>=0.1.0",
     "rich>=15.0.0",
     "tenacity>=9.1.4",
     "tiktoken>=0.13.0",
@@ -109,6 +113,13 @@ ignore_missing_imports = true
 # Ships no py.typed marker; the varagity.preview pdfium wrappers keep the
 # untyped surface contained behind their own typed signatures.
 module = ["pypdfium2.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Ships no py.typed marker; the iMessage attributedBody decoder
+# (varagity.graph.sources.imessage) keeps the untyped surface behind its own
+# typed signatures.
+module = ["typedstream.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

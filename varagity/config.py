@@ -7,9 +7,45 @@ validated, and mockable in tests.
 """
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _parse_handle_name_pairs(text: str, *, source: str) -> dict[str, str]:
+    """Parse ``handle=Name`` pairs from comma- and/or newline-separated text.
+
+    The shared parser behind :attr:`Settings.graph_handle_name_map`: commas
+    and newlines both separate entries, so the inline setting and a contacts
+    file with one pair per line (with or without trailing commas) parse the
+    same way. Blank entries are skipped; handle and name are stripped; a
+    later duplicate handle wins.
+
+    Args:
+        text: The raw pairs text (the setting value or a file's content).
+        source: Where ``text`` came from — the setting name or the file
+            path — used in error messages.
+
+    Returns:
+        The parsed handle→display-name mapping.
+
+    Raises:
+        ValueError: If a non-empty entry lacks an ``=`` separator.
+    """
+    mapping: dict[str, str] = {}
+    for raw in text.replace("\r", "").replace("\n", ",").split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise ValueError(
+                f"{source} must contain handle=Name pairs, e.g. "
+                f"'+15551234567=Bob,jane@x.com=Jane'; entry {entry!r} has no '='"
+            )
+        handle, _, name = entry.partition("=")
+        mapping[handle.strip()] = name.strip()
+    return mapping
 
 
 class Settings(BaseSettings):
@@ -246,6 +282,24 @@ class Settings(BaseSettings):
             binds (compose interpolation; the app never dials it).
         GRAFANA_PORT: Host port the compose ``grafana`` service binds
             (compose interpolation; the container serves 3000 internally).
+        GRAPH_DOCS_PATH: Directory holding the GraphRAG message corpus
+            (copied iMessage ``chat.db`` files; spec_graphrag §10.2, Q4) — a
+            separate root from ``DOCS_PATH``, gitignored like it, never mixed
+            into the chunk-RAG corpus.
+        GRAPH_OWNER_ALIASES: Comma-separated names the owner is referred to
+            by *in message text* (e.g. ``"John,John Doe"``); the first is
+            the owner's display label (:attr:`graph_owner_label`). iMessage
+            ego is structural (``is_from_me``); these only cover in-text
+            mentions (spec_graphrag §10.1, Q6).
+        GRAPH_HANDLE_NAMES: Comma-separated ``handle=Name`` pairs mapping raw
+            iMessage handles (phone/email) to display names (e.g.
+            ``"+15551234567=Bob,jane@x.com=Jane"``); unmapped handles fall
+            back to the raw handle. Merged over the file's entries by
+            :attr:`graph_handle_name_map` (an inline pair wins).
+        GRAPH_HANDLE_NAMES_FILE: Optional path to a contacts file holding
+            the same ``handle=Name`` pairs, one per line (trailing commas
+            fine) — the bulk alternative to the inline setting (e.g.
+            ``"./graph-docs/contacts.txt"``). Empty = no file.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -342,6 +396,14 @@ class Settings(BaseSettings):
     PROMETHEUS_PORT: int = 9090
     GRAFANA_PORT: int = 3001
 
+    # Graph corpus (spec_graphrag §10) — the GraphRAG message corpus root and
+    # the owner/handle identity the iMessage parser consumes. Engine selection
+    # and runtime budgets land with their stage-2 consumer (no dead config).
+    GRAPH_DOCS_PATH: str = "./graph-docs"
+    GRAPH_OWNER_ALIASES: str = ""
+    GRAPH_HANDLE_NAMES: str = ""
+    GRAPH_HANDLE_NAMES_FILE: str = ""
+
     @property
     def allowed_extension_set(self) -> frozenset[str]:
         """Parsed ``ALLOWED_EXTENSIONS`` as a normalized set.
@@ -393,6 +455,72 @@ class Settings(BaseSettings):
             if origin and origin not in origins:
                 origins.append(origin)
         return origins
+
+    @property
+    def graph_owner_alias_list(self) -> list[str]:
+        """Parsed ``GRAPH_OWNER_ALIASES`` as an ordered, deduplicated list.
+
+        Order is preserved (the first alias is the owner's display label);
+        entries are stripped.
+
+        Returns:
+            The owner's aliases, e.g. ``["John", "John Doe"]`` (empty
+            when unset).
+        """
+        aliases: list[str] = []
+        for raw in self.GRAPH_OWNER_ALIASES.split(","):
+            alias = raw.strip()
+            if alias and alias not in aliases:
+                aliases.append(alias)
+        return aliases
+
+    @property
+    def graph_owner_label(self) -> str:
+        """The owner's display name for graph messages.
+
+        The first configured alias, or ``"Me"`` when ``GRAPH_OWNER_ALIASES``
+        is empty — the label the iMessage parser stamps on ``is_from_me``
+        messages.
+
+        Returns:
+            The owner label.
+        """
+        aliases = self.graph_owner_alias_list
+        return aliases[0] if aliases else "Me"
+
+    @property
+    def graph_handle_name_map(self) -> dict[str, str]:
+        """The merged handle→display-name mapping for graph message sources.
+
+        ``GRAPH_HANDLE_NAMES_FILE`` (when set) loads first, then the inline
+        ``GRAPH_HANDLE_NAMES`` pairs overlay it — an inline pair overrides
+        the file's for the same handle. Both accept ``handle=Name`` pairs
+        separated by commas and/or newlines (see
+        :func:`_parse_handle_name_pairs`). The file is read on access, not
+        at load time, so it only needs to exist where graph parsing runs.
+
+        Returns:
+            The mapping, e.g. ``{"+15551234567": "Bob", "jane@x.com":
+            "Jane"}`` (empty when neither setting is set).
+
+        Raises:
+            ValueError: If the configured file cannot be read, or an entry
+                in it lacks an ``=`` separator.
+        """
+        mapping: dict[str, str] = {}
+        if self.GRAPH_HANDLE_NAMES_FILE:
+            path = Path(self.GRAPH_HANDLE_NAMES_FILE)
+            try:
+                content = path.read_text(encoding="utf-8-sig")
+            except OSError as exc:
+                raise ValueError(
+                    f"GRAPH_HANDLE_NAMES_FILE {str(path)!r} cannot be read: {exc}"
+                ) from exc
+            mapping.update(_parse_handle_name_pairs(content, source=str(path)))
+        mapping.update(
+            _parse_handle_name_pairs(self.GRAPH_HANDLE_NAMES, source="GRAPH_HANDLE_NAMES")
+        )
+        return mapping
 
     @model_validator(mode="after")
     def _validate_api(self) -> "Settings":
@@ -831,6 +959,29 @@ class Settings(BaseSettings):
         """
         if value not in (0, 1, 2):
             raise ValueError(f"DEFAULT_VERBOSE must be 0 (off), 1 (low), or 2 (high); got {value}")
+        return value
+
+    @field_validator("GRAPH_HANDLE_NAMES")
+    @classmethod
+    def _validate_graph_handle_names(cls, value: str) -> str:
+        """Reject ``GRAPH_HANDLE_NAMES`` entries that are not ``handle=Name`` pairs.
+
+        Delegates to :func:`_parse_handle_name_pairs` so a typo surfaces at
+        load time, not as a silently mis-parsed handle. The file variant
+        (``GRAPH_HANDLE_NAMES_FILE``) is deliberately *not* validated here —
+        the file may not exist where settings load (e.g. in a container);
+        :attr:`graph_handle_name_map` validates it on access instead.
+
+        Args:
+            value: The configured ``GRAPH_HANDLE_NAMES`` value.
+
+        Returns:
+            The validated value, unchanged.
+
+        Raises:
+            ValueError: If any non-empty entry lacks a ``=`` separator.
+        """
+        _parse_handle_name_pairs(value, source="GRAPH_HANDLE_NAMES")
         return value
 
 

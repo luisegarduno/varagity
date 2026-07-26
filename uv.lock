@@ -3309,6 +3309,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pytypedstream"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/d2/4632904c21890b1f397e6e9ef823b216f6f0a3a767897b092f592f16b90e/pytypedstream-0.1.0.tar.gz", hash = "sha256:c3b01790e667189966e98fcfeb638cc0541358ea7348745619fe58e3e8c9fd51", size = 84192, upload-time = "2023-06-26T23:43:35.555Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0d/1a/dbbbad9690c24506aec4571bc6613a5625b163b1607777109c9dabdbec07/pytypedstream-0.1.0-py3-none-any.whl", hash = "sha256:499920d4cb8bec8fd9d9cdd4c6312765eb418c398c10371ab1c9c0051104d278", size = 65857, upload-time = "2023-06-26T23:43:32.197Z" },
+]
+
+[[package]]
 name = "pytz"
 version = "2026.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4820,6 +4829,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pypdfium2" },
     { name = "python-multipart" },
+    { name = "pytypedstream" },
     { name = "rich" },
     { name = "tenacity" },
     { name = "tiktoken" },
@@ -4870,6 +4880,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pypdfium2", specifier = ">=5.11,<6" },
     { name = "python-multipart", specifier = ">=0.0.20" },
+    { name = "pytypedstream", specifier = ">=0.1.0" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "tenacity", specifier = ">=9.1.4" },
     { name = "tiktoken", specifier = ">=0.13.0" },
