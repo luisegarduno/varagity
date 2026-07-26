@@ -26,6 +26,16 @@ a golden entry plus a scripted ``assistant`` reply and a ``kind`` tag on
 follow-up turns (``pronoun`` / ``elliptical`` / ``topic_shift``). The
 scripted replies are what both chat engines see as history — identical by
 construction, so the chat eval compares engines, never their answers.
+
+The **graph golden set** (``data/eval/graph_golden_qa.jsonl``,
+spec_graphrag §12) anchors differently again, because a graph engine
+returns prose rather than chunk ids: each entry carries
+``expected_facts`` (an AND of OR-groups matched case-insensitively against
+the answer — :func:`resolve_golden_by_fact`'s substring trick applied to
+answers instead of chunks) and ``required_guids`` (the messages a
+provenance-surfacing engine should cite). Its ``kind`` slices the report
+into the question shapes the bake-off discriminates on and is golden
+metadata only — never shown to an engine.
 """
 
 import json
@@ -43,6 +53,13 @@ logger = logging.getLogger(__name__)
 # pronoun follow-ups, elliptical refinements, and topic shifts (where
 # condensing must NOT drag the old topic along).
 CONVERSATION_KINDS: tuple[str, ...] = ("pronoun", "elliptical", "topic_shift")
+
+# The question shapes the graph bake-off is sliced by (spec_graphrag §12):
+# Q1 aggregation ("what does X think about Y" — many messages, many
+# threads, many years), Q2 verification ("did X ever say Y, and when" —
+# one message, exact date), Q3 relation lookup ("who told me Z"). Kept in
+# lockstep with GraphGoldenEntry.kind by a unit test.
+GRAPH_GOLDEN_KINDS: tuple[str, ...] = ("aggregation", "verification", "relation")
 
 
 class GoldenChunkRef(BaseModel):
@@ -291,3 +308,105 @@ def load_conversations(directory: Path) -> list[ConversationFixture]:
         conversations.append(fixture)
     logger.info("loaded %d conversation fixture(s) from %s", len(conversations), directory)
     return conversations
+
+
+class GraphGoldenEntry(BaseModel):
+    """One golden question over the synthetic message corpus (spec_graphrag §12).
+
+    Scoring is fact-anchored and house style — no LLM judge (plan decision
+    #10). :attr:`expected_facts` is an **AND of OR-groups**: every group
+    must be satisfied, and a group is satisfied when any of its variants is
+    a case-insensitive substring of the engine's answer. Variants exist so
+    that a right answer phrased differently still scores (``"march 14"`` /
+    ``"3/14"``), not so that a wrong one squeaks through — keep them
+    specific enough that a distractor-fooled answer fails.
+
+    Attributes:
+        query: The question, exactly as it is put to the engine.
+        kind: The question shape this entry exercises (one of
+            :data:`GRAPH_GOLDEN_KINDS`) — report metadata only; engines
+            never see it.
+        expected_facts: One OR-group of acceptable variants per fact the
+            answer must contain (≥ 1 group, each ≥ 1 non-blank variant).
+        required_guids: Message guids a perfect provenance answer would
+            cite (≥ 1). Engines that surface no source ids score ``null``
+            provenance rather than zero — the honesty criterion.
+        notes: Why the entry is discriminative — which distractors it is
+            built to defeat. Authoring documentation, never scored.
+    """
+
+    query: str = Field(min_length=1)
+    kind: Literal["aggregation", "verification", "relation"]
+    expected_facts: list[list[str]] = Field(min_length=1)
+    required_guids: list[str] = Field(min_length=1)
+    notes: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _check_fact_groups(self) -> "GraphGoldenEntry":
+        """Reject empty OR-groups and blank variants.
+
+        Returns:
+            The validated entry.
+
+        Raises:
+            ValueError: If a group holds no variants (it could never be
+                satisfied, guaranteeing a 0 score for every engine) or a
+                variant is blank (which every answer trivially contains).
+        """
+        for index, group in enumerate(self.expected_facts):
+            if not group:
+                raise ValueError(
+                    f"golden query {self.query!r}: fact group {index} is empty — "
+                    "an unsatisfiable group scores every engine 0"
+                )
+            for variant in group:
+                if not variant.strip():
+                    raise ValueError(
+                        f"golden query {self.query!r}: fact group {index} has a blank "
+                        "variant, which every answer trivially matches"
+                    )
+        return self
+
+
+def load_graph_golden(path: Path) -> list[GraphGoldenEntry]:
+    """Load and validate the graph golden dataset from a JSONL file.
+
+    Mirrors :func:`load_golden` — blank lines ignored, any malformed line
+    fails the load loudly with its 1-based line number — and additionally
+    rejects a repeated ``query``, which would silently double-weight one
+    question in the per-kind averages.
+
+    Args:
+        path: The ``graph_golden_qa.jsonl`` file.
+
+    Returns:
+        The validated entries, in file order.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+        ValueError: If a line is not valid JSON, fails schema validation, or
+            repeats an earlier entry's query, or if the file holds no
+            entries.
+    """
+    entries: list[GraphGoldenEntry] = []
+    seen: dict[str, int] = {}
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            entry = GraphGoldenEntry.model_validate(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path}:{line_no}: not valid JSON — {exc}") from exc
+        except ValidationError as exc:
+            raise ValueError(f"{path}:{line_no}: invalid graph golden entry — {exc}") from exc
+        if entry.query in seen:
+            raise ValueError(
+                f"{path}:{line_no}: query {entry.query!r} already appears on line "
+                f"{seen[entry.query]}"
+            )
+        seen[entry.query] = line_no
+        entries.append(entry)
+    if not entries:
+        raise ValueError(f"{path}: graph golden dataset is empty")
+    logger.info("loaded %d graph golden queries from %s", len(entries), path)
+    return entries
