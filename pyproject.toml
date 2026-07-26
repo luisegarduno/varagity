@@ -71,6 +71,45 @@ eval = [
     "jiwer>=3.1.0",
     "testcontainers[elasticsearch,postgres]>=4.14.2",
 ]
+# The three ADR-017 bake-off engines (spec_graphrag §8). Deliberately NOT
+# included in `dev`: CI installs dev only, so this group's weight never
+# reaches the pipeline. The adapters in varagity/graph/engines import these
+# libs *inside* `session()` (plan decision #8), so the registry costs nothing
+# without them — `tests/unit/test_graph_engines.py` enforces that.
+# Local use: `uv run --group bakeoff main.py eval graph`,
+# `uv run --group bakeoff pytest -m bakeoff`.
+#
+# The three DO co-resolve (plan decision #8's per-engine-group fallback is
+# not needed), but uv locks one version per package across every group, so
+# their transitive caps pull five shared packages down from what the app
+# alone would pick: pandas 3.0.3→2.3.3 and packaging 26.2→24.2 (lightrag-hku),
+# websockets 16.0→15.0.1 and jiter 0.16.0→0.13.0 (cognee, the latter via
+# instructor), redis 8.0.1→7.4.1 (graphiti-core/falkordb). None is imported by
+# varagity itself — they reach us through docling (pandas), uvicorn/prefect
+# (websockets), openai (jiter) and prefect's optional docket backend (redis) —
+# and all five resolved versions are ones those packages declare support for.
+# The isolation alternative, if that ever stops being acceptable, is
+# `[tool.uv] conflicts` between `dev` and `bakeoff` (two resolution forks,
+# production untouched) at the cost of duplicating pytest into this group and
+# running every bake-off command with `--no-dev`.
+bakeoff = [
+    "lightrag-hku>=1.5.4",
+    "cognee>=1.4.0",
+    "graphiti-core[falkordblite]>=0.29.2",
+]
+
+# cognee 1.4.0 → instructor <1.15.3 → `rich>=13.7,<15`, which collides with
+# this project's own `rich>=15`. The collision is between the bakeoff group
+# and a *main* dependency, so `[tool.uv] conflicts` (which forks group
+# resolutions but shares the project's own requirements) cannot express it —
+# the only knobs are downgrading the app's rich for everyone or overriding
+# the transitive bound. instructor uses rich solely for its optional CLI
+# pretty-printer (never reached from cognee's extraction path), so the
+# override is the contained choice: the app keeps rich 15 and the bake-off
+# gets its engines. Delete this line when the loser adapters are removed in
+# stage 2 (plan decision #14) if the winner is not cognee.
+[tool.uv]
+override-dependencies = ["rich>=15.0.0"]
 
 # v1 OCR runs on CPU (plan decision #10), so pull CPU-only torch wheels for
 # docling/EasyOCR — the default CUDA wheels add multiple GB to the venv/image
@@ -122,6 +161,13 @@ ignore_missing_imports = true
 module = ["typedstream.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# The `bakeoff` dependency group (ADR-017 candidates), which CI never
+# installs — the adapters import them lazily inside `session()` and keep the
+# untyped surface behind their own typed signatures.
+module = ["lightrag.*", "cognee.*", "graphiti_core.*", "redislite.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Async tests (the httpx.AsyncClient API suites) run under pytest-asyncio
@@ -130,9 +176,11 @@ asyncio_mode = "auto"
 markers = [
     "integration: needs real backing services via testcontainers (Docker)",
     "e2e: full ingest→query pipeline over the fixtures corpus (Docker)",
+    "bakeoff: needs the graph engines (--group bakeoff) and the live GPU services",
 ]
-# Default run is unit-only; select the other layers with `-m integration` / `-m e2e`.
-addopts = "--cov=varagity --cov-report=term-missing -m 'not integration and not e2e'"
+# Default run is unit-only; select the other layers with `-m integration` /
+# `-m e2e` / `-m bakeoff` (the last also needs `uv run --group bakeoff`).
+addopts = "--cov=varagity --cov-report=term-missing -m 'not integration and not e2e and not bakeoff'"
 
 [tool.coverage.report]
 # Ratcheted from the spec §15.3 floor of 80 as coverage grew (unit suite ~93%).

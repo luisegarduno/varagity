@@ -48,7 +48,11 @@ repos:
     hooks:
       - id: pytest-unit
         name: pytest (unit, fast)
-        entry: uv run pytest -m "not integration and not e2e"
+        # A command-line -m overrides the addopts one, so every layer the
+        # default run excludes must be repeated here — `bakeoff` selects the
+        # live-GPU engine builds, which take half an hour with the group
+        # installed and fail on import without it.
+        entry: uv run pytest -m "not integration and not e2e and not bakeoff"
         language: system
         pass_filenames: false
         always_run: true
