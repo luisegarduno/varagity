@@ -925,7 +925,6 @@ class FakeGraphiti:
 
     search_results: Any = None
     fail_episodes: set[str] = field(default_factory=set)
-    fail_communities: bool = False
     fail_search: bool = False
     fail_close: bool = False
     episodes: list[dict[str, Any]] = field(default_factory=list)
@@ -940,8 +939,6 @@ class FakeGraphiti:
         return SimpleNamespace(episode=SimpleNamespace(uuid=f"uuid-{kwargs['name']}"))
 
     async def build_communities(self) -> None:
-        if self.fail_communities:
-            raise RuntimeError("communities exploded")
         self.communities_built += 1
 
     async def search(self, question: str) -> Any:
@@ -997,10 +994,11 @@ class TestGraphitiAdapter:
         assert [episode["name"] for episode in engine.episodes] == ["g1", "g2"]
         assert {episode["group_id"] for episode in engine.episodes} == {graphiti_adapter.GROUP_ID}
         assert engine.episodes[0]["source"] == "message"
-        # Communities are built once at the end, never per episode — the
-        # per-episode path is broken in graphiti-core 0.29.2 (Phase 3 gate).
+        # Communities are never built — the per-episode path is broken in
+        # graphiti-core 0.29.2 (Phase 3 gate) and the end-of-build pass can
+        # hang forever in an uncapped label-propagation loop (Phase 4 gate).
         assert "update_communities" not in engine.episodes[0]
-        assert engine.communities_built == 1
+        assert engine.communities_built == 0
 
     def test_a_second_build_skips_episodes_already_added(self) -> None:
         """Episode identity is message identity — an overlapping batch upserts."""
@@ -1023,18 +1021,21 @@ class TestGraphitiAdapter:
         assert [episode["name"] for episode in session._graphiti.episodes] == ["g2"]
         assert report.failures and "episode g1" in report.failures[0]
 
-    def test_a_failed_community_pass_is_recorded(self) -> None:
-        session = graphiti_adapter._GraphitiSession(
-            FakeGraphiti(fail_communities=True), "message", llm=ScriptedLLM()
-        )
+    def test_the_community_pass_is_skipped_and_the_skip_is_recorded(self) -> None:
+        """★ Phase 4 gate: 0.29.2's uncapped label propagation can hang forever."""
+        session = graphiti_adapter._GraphitiSession(FakeGraphiti(), "message", llm=ScriptedLLM())
         report = session.build([batch(message("g1"))])
         session.close()
+        assert session._graphiti.communities_built == 0
         assert report.failures and "build_communities" in report.failures[0]
+        assert "skipped" in report.failures[0]
 
-    def test_an_empty_corpus_skips_the_community_pass(self) -> None:
+    def test_an_empty_corpus_records_no_community_skip(self) -> None:
         session = graphiti_adapter._GraphitiSession(FakeGraphiti(), "message", llm=ScriptedLLM())
-        assert session.build([]).messages_seen == 0
+        report = session.build([])
         session.close()
+        assert report.messages_seen == 0
+        assert report.failures == []
         assert session._graphiti.communities_built == 0
 
     def test_query_synthesizes_an_answer_over_the_retrieved_facts(self) -> None:

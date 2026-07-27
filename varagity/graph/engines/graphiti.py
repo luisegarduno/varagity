@@ -288,11 +288,14 @@ class _GraphitiSession:
         return self._loop.run_until_complete(awaitable)
 
     def build(self, batches: Sequence[MessageBatch], *, verbose: int = 0) -> BuildReport:
-        """Add one episode per merged message, then rebuild communities.
+        """Add one episode per merged message; the community pass is skipped.
 
         Episode identity is the message guid, and guids already added in this
         session are skipped — which is how a second build over an overlapping
-        batch stays an upsert rather than a duplication.
+        batch stays an upsert rather than a duplication. Communities are never
+        built: both of graphiti-core 0.29.2's community paths are defective
+        (see the body comments), and the skip is recorded on the report so the
+        bake-off scores the absence honestly.
 
         Args:
             batches: Parsed source files (guid-merged before rendering).
@@ -336,11 +339,18 @@ class _GraphitiSession:
             if uuid is not None:
                 self._guid_by_uuid[uuid] = payload.name
         if payloads:
-            try:
-                self.run(self._graphiti.build_communities())
-            except Exception as exc:
-                logger.warning("Graphiti build_communities failed", exc_info=True)
-                failures.append(f"build_communities: {exc!r}")
+            # Never build_communities() either: 0.29.2's label_propagation is
+            # a synchronous while-True with no iteration cap, and oscillating
+            # labelings spin it forever (verified live, Phase 4 gate: 9 h of
+            # pure CPU on the 226-message smoke corpus; the 30-message Phase 3
+            # corpus happened to converge). With the per-episode path broken
+            # too (above), the community tier is unusable as shipped — the
+            # skip is recorded per build as criterion §8.2#2 data.
+            failures.append(
+                "build_communities: skipped — graphiti-core 0.29.2 label_propagation has "
+                "no iteration cap and oscillates on non-trivial graphs (hung 9 h on the "
+                "226-message smoke corpus)"
+            )
         return BuildReport(
             messages_seen=len(messages),
             wall_clock_s=time.perf_counter() - started,
