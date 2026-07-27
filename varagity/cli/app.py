@@ -1,7 +1,8 @@
 """CLI argument parsing, subcommand dispatch, and the terminal Q&A loop.
 
 Subcommands: ``ingest``, ``chat`` (the default when no subcommand is
-given), and ``eval`` / ``eval ocr``. ``chat`` follows the spec §13
+given), and ``eval`` / ``eval ocr`` / ``eval chat`` / ``eval graph``.
+``chat`` follows the spec §13
 startup sequence: ingest the
 corpus first, then loop — prompt → retrieve → show matches → grounded
 answer — until ``:quit`` (or end-of-input, e.g. in a non-interactive
@@ -32,6 +33,7 @@ from varagity.models.registry import get_model
 from varagity.pipeline import (
     chat_eval_flow,
     eval_flow,
+    graph_eval_flow,
     ingest_flow,
     ocr_benchmark_flow,
     query_flow,
@@ -109,7 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the spec §16 evaluation harness against ephemeral testcontainers "
         "stores (Docker required) and the live GPU services. Without a target, runs the "
         "7-configuration retrieval matrix; `eval ocr` benchmarks the OCR engines; "
-        "`eval chat` compares the chat engines on multi-turn conversations.",
+        "`eval chat` compares the chat engines on multi-turn conversations; "
+        "`eval graph` runs the GraphRAG bake-off (no stores — engines self-store).",
     )
     _add_verbose_option(evaluate, default=argparse.SUPPRESS)
     eval_targets = evaluate.add_subparsers(dest="eval_command", metavar="TARGET")
@@ -128,6 +131,41 @@ def build_parser() -> argparse.ArgumentParser:
         "decides the shipped CHAT_ENGINE default (spec_v3 §4.9).",
     )
     _add_verbose_option(eval_chat, default=argparse.SUPPRESS)
+    eval_graph = eval_targets.add_parser(
+        "graph",
+        help="run the GraphRAG bake-off over the synthetic message corpus (ADR-017)",
+        description="Build the synthetic iMessage fixture corpus, index it with every "
+        "registered graph engine, and score their answers by fact and provenance recall "
+        "(spec_graphrag §12). Needs the `bakeoff` dependency group and the live GPU "
+        "services — but no Docker stores: graph engines self-store.",
+    )
+    _add_verbose_option(eval_graph, default=argparse.SUPPRESS)
+    eval_graph.add_argument(
+        "--profile",
+        choices=("smoke", "full"),
+        default="smoke",
+        help="corpus size: smoke (~226 scripted messages, minutes per engine) or "
+        "full (>10,000 messages across a decade — hours per engine)",
+    )
+    eval_graph.add_argument(
+        "--engine",
+        action="append",
+        metavar="NAME",
+        help="run only this engine (repeatable); defaults to every registered engine. "
+        "One engine per session is how the full profile is scheduled",
+    )
+    eval_graph.add_argument(
+        "--mode",
+        metavar="NAME",
+        help="engine query mode for every question, overriding each adapter's primary "
+        "mode (e.g. lightrag's `global` on aggregation questions)",
+    )
+    eval_graph.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="reuse the existing corpus and each engine's already-built working directory "
+        "(and skip the incremental check): re-scores in seconds without re-paying an index",
+    )
     return parser
 
 
@@ -154,6 +192,14 @@ def run(argv: list[str] | None = None) -> int:
             return _run_eval_ocr(verbose)
         if getattr(args, "eval_command", None) == "chat":
             return _run_eval_chat(verbose)
+        if getattr(args, "eval_command", None) == "graph":
+            return _run_eval_graph(
+                verbose,
+                profile=args.profile,
+                engines=args.engine,
+                mode=args.mode,
+                skip_build=args.skip_build,
+            )
         return _run_eval(verbose)
     # chat is the default subcommand (spec §13).
     return _run_chat(verbose)
@@ -275,6 +321,40 @@ def _run_eval_chat(verbose: int) -> int:
     """
     results = chat_eval_flow(verbose=verbose)
     _show_chat_results(results)
+    return 0
+
+
+def _run_eval_graph(
+    verbose: int,
+    *,
+    profile: str,
+    engines: list[str] | None,
+    mode: str | None,
+    skip_build: bool,
+) -> int:
+    """Execute the ``eval graph`` subcommand: the GraphRAG bake-off.
+
+    Args:
+        verbose: Effective console verbosity.
+        profile: Fixture corpus profile (``smoke`` or ``full``).
+        engines: Engine names from repeated ``--engine`` flags (``None``
+            runs every registered engine).
+        mode: Engine query mode override, or ``None`` for each adapter's
+            primary mode.
+        skip_build: Reuse the corpus and working directories instead of
+            re-indexing.
+
+    Returns:
+        ``0`` on success (a failed run raises).
+    """
+    results = graph_eval_flow(
+        profile=profile,
+        engines=engines,
+        mode=mode,
+        skip_build=skip_build,
+        verbose=verbose,
+    )
+    _show_graph_results(results)
     return 0
 
 
@@ -470,6 +550,103 @@ def _show_chat_results(results: dict[str, Any]) -> None:
             f"[yellow]{len(results['unresolved_facts'])} golden fact(s) not found in any "
             f"chunk (guaranteed misses): {results['unresolved_facts']}[/]"
         )
+    console.print(f"Results written to [bold]{results['results_path']}[/]")
+
+
+def _fixed(value: float | None, digits: int = 3) -> str:
+    """Format an optional score for a table cell.
+
+    Args:
+        value: The score, or ``None`` where the measurement doesn't exist
+            (an engine that surfaces no provenance, a skipped build).
+        digits: Decimal places.
+
+    Returns:
+        The formatted number, or an em dash for ``None`` — which reads as
+        "not reported", never as zero (criterion §8.2#4).
+    """
+    return "—" if value is None else f"{value:.{digits}f}"
+
+
+def _show_graph_results(results: dict[str, Any]) -> None:
+    """Render the graph bake-off: per-engine headline numbers and kind slices.
+
+    Args:
+        results: The :func:`varagity.eval.graph_eval.run_graph_eval` document.
+    """
+    engines: dict[str, Any] = results["engines"]
+    corpus = results["corpus"]
+    headline = Table(
+        title=f"GraphRAG bake-off — {results['profile']} corpus, {corpus['messages']} messages "
+        f"in {corpus['threads']} threads, {results['n_queries']} golden queries"
+    )
+    headline.add_column("Engine", style="bold")
+    headline.add_column("Version", style="dim")
+    headline.add_column("Index s", justify="right")
+    headline.add_column("E/R/C", justify="right", style="dim")
+    headline.add_column("Δ index s", justify="right")
+    headline.add_column("Fact recall", justify="right")
+    headline.add_column("Provenance", justify="right")
+    headline.add_column("Query s", justify="right")
+    headline.add_column("Fail", justify="right", style="dim")
+    for engine, data in engines.items():
+        build = data["build"]
+        summary = data["summary"]
+        stats = (build or {}).get("stats") or {}
+        counts = "/".join(
+            "—" if stats.get(key) is None else str(stats[key])
+            for key in ("entities", "relations", "communities")
+        )
+        failures = len((build or {}).get("failures") or []) + summary["errors"]
+        headline.add_row(
+            engine,
+            str(results["engine_versions"].get(engine) or "—"),
+            _fixed(None if build is None else build["wall_clock_s"], 1),
+            counts,
+            _fixed(None if data["incremental"] is None else data["incremental"]["wall_clock_s"], 1),
+            _fixed(summary["fact_recall"]),
+            _fixed(summary["provenance_recall"]),
+            _fixed(summary["mean_latency_s"], 1),
+            str(failures) if failures else "0",
+        )
+    console.print(headline)
+
+    slices = Table(title="By question kind — the shapes the bake-off discriminates on")
+    slices.add_column("Engine", style="bold")
+    slices.add_column("Kind")
+    slices.add_column("Queries", justify="right", style="dim")
+    slices.add_column("Fact recall", justify="right")
+    slices.add_column("Provenance", justify="right")
+    slices.add_column("Query s", justify="right", style="dim")
+    for engine, data in engines.items():
+        for row, (kind, scores) in enumerate(data["by_kind"].items()):
+            slices.add_row(
+                engine if row == 0 else "",
+                kind,
+                str(scores["n_queries"]),
+                _fixed(scores["fact_recall"]),
+                _fixed(scores["provenance_recall"]),
+                _fixed(scores["mean_latency_s"], 1),
+            )
+    console.print(slices)
+
+    for engine, data in engines.items():
+        summary = data["summary"]
+        if not summary["n_provenance_reported"]:
+            console.print(
+                f"[yellow]{engine}: surfaced no message provenance on any question — "
+                f"reported as null, not zero[/]"
+            )
+        build_failures = (data["build"] or {}).get("failures") or []
+        if build_failures:
+            console.print(
+                f"[yellow]{engine}: {len(build_failures)} indexing failure(s), first: "
+                f"{_snippet(str(build_failures[0]))}[/]"
+            )
+        if summary["errors"]:
+            console.print(f"[yellow]{engine}: {summary['errors']} query(ies) raised[/]")
+    if results["skip_build"]:
+        console.print("[dim]--skip-build: reused each engine's existing graph[/]")
     console.print(f"Results written to [bold]{results['results_path']}[/]")
 
 

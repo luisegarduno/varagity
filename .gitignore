@@ -13,6 +13,10 @@
 # Timestamped eval results (the golden set and OCR ground truth ARE tracked)
 /data/eval/results/
 
+# `eval graph` scratch: the generated fixture chat.db corpora and each graph
+# engine's self-stored working directory (spec_graphrag §12)
+/data/eval/graph/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

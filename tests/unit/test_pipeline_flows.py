@@ -495,6 +495,31 @@ class TestEvalFlows:
         assert captured["ingest"] is ingest_flow  # eval ingests are tracked subflows
         assert captured["verbose"] == 0
 
+    def test_graph_eval_flow_forwards_its_parameters(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The graph bake-off has no ingest seam — engines self-store."""
+        eval_flow_module = importlib.import_module("varagity.pipeline.eval_flow")
+        from varagity.pipeline import graph_eval_flow
+
+        captured: dict[str, object] = {}
+
+        def fake_run_graph_eval(**kwargs: object) -> dict[str, str]:
+            captured.update(kwargs)
+            return {"kind": "graph_eval"}
+
+        monkeypatch.setattr(eval_flow_module, "run_graph_eval", fake_run_graph_eval)
+        result = graph_eval_flow(
+            profile="full", engines=["lightrag"], mode="global", skip_build=True, verbose=2
+        )
+
+        assert result == {"kind": "graph_eval"}
+        assert captured == {
+            "profile": "full",
+            "engines": ["lightrag"],
+            "mode": "global",
+            "skip_build": True,
+            "verbose": 2,
+        }
+
     def test_ocr_benchmark_flow_passes_the_tracked_ingest_seam(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

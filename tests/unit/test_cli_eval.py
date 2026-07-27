@@ -5,7 +5,8 @@ are stubbed at the CLI module boundary (like ``test_cli.py`` does for the
 ingest/query flows); these tests cover the ``eval`` subcommand routing and
 the table renderers over faithful result documents — the exact shapes
 :func:`varagity.eval.evaluate.run_matrix`,
-:func:`varagity.eval.evaluate.run_chat_eval`, and
+:func:`varagity.eval.evaluate.run_chat_eval`,
+:func:`varagity.eval.graph_eval.run_graph_eval`, and
 :func:`varagity.eval.ocr_benchmark.run_ocr_benchmark` return.
 
 Documents carry a single k value to keep the tables narrow, and the shared
@@ -137,6 +138,67 @@ class TestEvalDispatch:
             assert cli_app.run(["-v", "0", "eval", "chat"]) == 0
         assert seen == [0]
         assert "Chat-engine eval" in capture.get()
+
+    def test_eval_graph_defaults_to_the_smoke_profile_and_every_engine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            cli_app, "graph_eval_flow", lambda **kwargs: seen.append(kwargs) or graph_doc()
+        )
+        with console.capture() as capture:
+            assert cli_app.run(["-v", "0", "eval", "graph"]) == 0
+        assert seen == [
+            {
+                "profile": "smoke",
+                "engines": None,  # every registered engine
+                "mode": None,
+                "skip_build": False,
+                "verbose": 0,
+            }
+        ]
+        assert "GraphRAG bake-off" in capture.get()
+
+    def test_eval_graph_passes_every_flag_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``--engine`` is repeatable; the rest are the Phase-5 scheduling knobs."""
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            cli_app, "graph_eval_flow", lambda **kwargs: seen.append(kwargs) or graph_doc()
+        )
+        with console.capture():
+            assert (
+                cli_app.run(
+                    [
+                        "eval",
+                        "graph",
+                        "-v",
+                        "0",
+                        "--profile",
+                        "full",
+                        "--engine",
+                        "lightrag",
+                        "--engine",
+                        "cognee",
+                        "--mode",
+                        "global",
+                        "--skip-build",
+                    ]
+                )
+                == 0
+            )
+        assert seen == [
+            {
+                "profile": "full",
+                "engines": ["lightrag", "cognee"],
+                "mode": "global",
+                "skip_build": True,
+                "verbose": 0,
+            }
+        ]
+
+    def test_eval_graph_rejects_an_unknown_profile(self) -> None:
+        with pytest.raises(SystemExit):
+            cli_app.run(["eval", "graph", "--profile", "enormous"])
 
 
 class TestShowMatrixResults:
@@ -314,6 +376,145 @@ class TestShowChatResults:
         assert "no condense calls" in out  # the simple engine
         assert "ghost-fact" in out
         assert "20260721-chat.json" in out
+
+
+# ── graph bake-off ───────────────────────────────────────────────────────
+
+
+def _graph_engine(
+    *,
+    fact_recall: float,
+    provenance: float | None,
+    reported: int,
+    build: dict[str, Any] | None,
+    incremental: dict[str, Any] | None,
+    errors: int = 0,
+) -> dict[str, Any]:
+    def summary(scale: float, n: int) -> dict[str, Any]:
+        return {
+            "n_queries": n,
+            "fact_recall": round(fact_recall * scale, 4),
+            "provenance_recall": None if provenance is None else round(provenance * scale, 4),
+            "n_provenance_reported": reported,
+            "mean_latency_s": 12.5,
+            "errors": errors,
+        }
+
+    return {
+        "workdir": "data/eval/graph/smoke/lightrag",
+        "build": build,
+        "incremental": incremental,
+        "session_wall_clock_s": 640.0,
+        "summary": summary(1.0, 3),
+        "by_kind": {"aggregation": summary(1.0, 2), "relation": summary(0.5, 1)},
+        "queries": [],
+    }
+
+
+def graph_doc() -> dict[str, Any]:
+    return {
+        "kind": "graph_eval",
+        "profile": "smoke",
+        "seed": 13,
+        "n_queries": 3,
+        "kinds": ["aggregation", "verification", "relation"],
+        "mode": None,
+        "skip_build": False,
+        "incremental_new_messages": 10,
+        "corpus": {
+            "messages": 226,
+            "scripted": 226,
+            "filler": 0,
+            "tapbacks": 7,
+            "threads": 10,
+            "first_timestamp": "2014-03-04T18:22:00+00:00",
+            "last_timestamp": "2024-08-09T09:00:00+00:00",
+        },
+        "engine_versions": {"lightrag": "1.5.4", "graphiti": None},
+        "engines": {
+            "lightrag": _graph_engine(
+                fact_recall=0.667,
+                provenance=0.85,
+                reported=3,
+                build={
+                    "messages_seen": 226,
+                    "wall_clock_s": 310.1,
+                    "failures": ["transcript 4 timed out after 600s"],
+                    "stats": {"entities": 9, "relations": 5, "communities": None},
+                },
+                incremental={
+                    "messages_seen": 236,
+                    "wall_clock_s": 41.2,
+                    "failures": [],
+                    "stats": {"entities": 11, "relations": 6, "communities": None},
+                    "new_messages": 10,
+                    "stats_before": {"entities": 9, "relations": 5, "communities": None},
+                },
+            ),
+            # The honest-null engine: correct answers, no citable provenance.
+            "graphiti": _graph_engine(
+                fact_recall=0.5,
+                provenance=None,
+                reported=0,
+                errors=1,
+                build={
+                    "messages_seen": 226,
+                    "wall_clock_s": 1084.7,
+                    "failures": [],
+                    "stats": {"entities": 10, "relations": 7, "communities": 4},
+                },
+                incremental=None,
+            ),
+        },
+        "results_path": "/data/eval/results/20260726-graph.json",
+    }
+
+
+class TestShowGraphResults:
+    def test_headline_covers_every_engine_and_its_numbers(self) -> None:
+        with console.capture() as capture:
+            cli_app._show_graph_results(graph_doc())
+        out = capture.get()
+        assert "GraphRAG bake-off" in out
+        assert "226 messages" in out and "10 threads" in out
+        assert "lightrag" in out and "graphiti" in out
+        assert "1.5.4" in out
+        assert "310.1" in out and "1084.7" in out  # index wall clock
+        assert "9/5/—" in out  # entities/relations/communities, — where absent
+        assert "10/7/4" in out
+        assert "41.2" in out  # the incremental delta's wall clock
+        assert "0.667" in out and "0.850" in out
+
+    def test_an_engine_without_provenance_reads_as_null_not_zero(self) -> None:
+        with console.capture() as capture:
+            cli_app._show_graph_results(graph_doc())
+        out = capture.get()
+        assert "surfaced no message provenance" in out
+        assert "reported as null, not zero" in out
+
+    def test_kind_slices_and_failure_notes(self) -> None:
+        with console.capture() as capture:
+            cli_app._show_graph_results(graph_doc())
+        out = capture.get()
+        assert "By question kind" in out
+        assert "aggregation" in out and "relation" in out
+        assert "1 indexing failure(s)" in out
+        assert "timed out" in out
+        assert "1 query(ies) raised" in out
+        assert "20260726-graph.json" in out
+
+    def test_a_skip_build_run_renders_without_build_numbers(self) -> None:
+        doc = graph_doc()
+        doc["skip_build"] = True
+        for engine in doc["engines"].values():
+            engine["build"] = None
+            engine["incremental"] = None
+        with console.capture() as capture:
+            cli_app._show_graph_results(doc)
+        out = capture.get()
+        assert "reused each engine's existing graph" in out
+        assert "310.1" not in out
+        assert "0.667" in out  # scores still render
 
 
 # ── OCR benchmark ────────────────────────────────────────────────────────
