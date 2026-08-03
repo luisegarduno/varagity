@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from varagity.graph import answer as graph_answer
 from varagity.graph.base import (
     GRAPH_ENGINE_REGISTRY,
     GraphEngine,
@@ -40,6 +41,7 @@ from varagity.graph.render import (
     thread_transcripts,
 )
 from varagity.graph.sources.base import MessageBatch, SourceMessage, Tapback
+from varagity.models.embeddings import format_query
 
 THREAD = "iMessage;-;+15125550101"
 START = datetime(2016, 3, 4, 18, 22, tzinfo=UTC)
@@ -71,6 +73,30 @@ def message(
 
 def batch(*messages: SourceMessage, doc_id: str = "doc-1", path: str = "chat.db") -> MessageBatch:
     return MessageBatch(doc_id=doc_id, relative_path=path, messages=list(messages))
+
+
+class ScriptedLLM:
+    """Records generate() calls; returns a scripted response or raises.
+
+    Shared by both adapters that compose their own answers: Graphiti (its
+    search returns facts) and LightRAG's ``+synthesis`` modes (ADR-017's
+    retrieval-only design).
+    """
+
+    def __init__(self, response: str | Exception = "Bob prefers mechanical keyboards.") -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, messages: Any, **kwargs: Any) -> str:
+        self.calls.append({"messages": list(messages), **kwargs})
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+    @property
+    def prompt(self) -> str:
+        """The prompt text of the first recorded call."""
+        return str(self.calls[0]["messages"][0]["content"])
 
 
 class TestRegistry:
@@ -374,16 +400,22 @@ class FakeRag:
         *,
         answer: str = "Bob loves mechanical keyboards.",
         context: Any = None,
+        query_data: Any = None,
         fail_insert: bool = False,
         fail_context: bool = False,
+        fail_query_data: bool = False,
         fail_finalize: bool = False,
     ) -> None:
         self.answer = answer
         self.context = context
+        self.query_data = query_data
         self.fail_insert = fail_insert
         self.fail_context = fail_context
+        self.fail_query_data = fail_query_data
         self.fail_finalize = fail_finalize
         self.inserted: list[tuple[list[str], list[str]]] = []
+        self.queries: list[FakeQueryParam] = []
+        self.data_queries: list[FakeQueryParam] = []
         self.finalized = False
         self.chunk_entity_relation_graph = FakeGraphStore()
 
@@ -393,11 +425,18 @@ class FakeRag:
         self.inserted.append((ids, file_paths))
 
     async def aquery(self, question: str, *, param: FakeQueryParam) -> Any:
+        self.queries.append(param)
         if param.only_need_context:
             if self.fail_context:
                 raise RuntimeError("context exploded")
             return self.context
         return self.answer
+
+    async def aquery_data(self, question: str, *, param: FakeQueryParam) -> Any:
+        self.data_queries.append(param)
+        if self.fail_query_data:
+            raise RuntimeError("structured retrieval exploded")
+        return self.query_data
 
     async def finalize_storages(self) -> None:
         if self.fail_finalize:
@@ -422,9 +461,51 @@ LIGHTRAG_CONTEXT = {
     "chunks": [{"file_path": f"{THREAD}::2016-03-04"}],
 }
 
+# `aquery_data`'s envelope, keyed exactly as lightrag 1.5.4 documents it
+# (lightrag/lightrag.py:2135-2200): sections under `data`, chunks carrying the
+# `file_path` the adapter inserted them under.
+LIGHTRAG_QUERY_DATA = {
+    "status": "success",
+    "message": "Query executed successfully",
+    "data": {
+        "entities": [
+            {
+                "entity_name": "Bob",
+                "entity_type": "person",
+                "description": "a friend",
+                "file_path": f"{THREAD}::2016-03-04",
+            },
+            {"no_name": True},
+        ],
+        "relationships": [
+            {
+                "src_id": "Bob",
+                "tgt_id": "mechanical keyboard",
+                "keywords": "prefers",
+                "description": "Bob prefers mechanical keyboards",
+                "file_path": f"{THREAD}::2016-03-04",
+            },
+            {"src_id": "dangling"},
+        ],
+        "chunks": [
+            {
+                "content": (
+                    "Thread: Hardware Talk (participants: Bob, Me)\n\n"
+                    "[2016-03-04 18:22] Bob: I built the PC"
+                ),
+                "file_path": f"{THREAD}::2016-03-04",
+                "chunk_id": "chunk-1",
+            },
+            {"file_path": f"{THREAD}::2016-03-04", "chunk_id": "chunk-2"},
+        ],
+        "references": [{"reference_id": "1", "file_path": f"{THREAD}::2016-03-04"}],
+    },
+    "metadata": {"query_mode": "hybrid"},
+}
 
-def lightrag_session(**kwargs: Any) -> Any:
-    session = lightrag_adapter._LightRAGSession(FakeRag(**kwargs), FakeQueryParam)
+
+def lightrag_session(*, llm: Any = None, **kwargs: Any) -> Any:
+    session = lightrag_adapter._LightRAGSession(FakeRag(**kwargs), FakeQueryParam, llm=llm)
     session.build([batch(message("g1"), message("g2", when=START + timedelta(minutes=1)))])
     return session
 
@@ -481,6 +562,97 @@ class TestLightRAGAdapter:
         assert session.query("q", mode="global").mode == "global"
         session.close()
 
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [
+            ("hybrid", ("hybrid", False)),
+            ("global", ("global", False)),
+            ("hybrid+synthesis", ("hybrid", True)),
+            ("global+synthesis", ("global", True)),
+            ("synthesis", ("", True)),  # "" = the session's own primary
+            ("+synthesis", ("", True)),
+            ("  mix+synthesis  ", ("mix", True)),
+        ],
+    )
+    def test_the_synthesis_suffix_splits_off_the_base_mode(
+        self, mode: str, expected: tuple[str, bool]
+    ) -> None:
+        assert lightrag_adapter._split_mode(mode) == expected
+
+    def test_a_synthesis_mode_retrieves_once_and_writes_the_answer_itself(self) -> None:
+        """★ ADR-017's retrieval-only design: no engine answer call at all."""
+        llm = ScriptedLLM()
+        session = lightrag_session(query_data=LIGHTRAG_QUERY_DATA, llm=llm)
+        answer = session.query("What does Bob think about computers?", mode="hybrid+synthesis")
+        session.close()
+        assert answer.answer == "Bob prefers mechanical keyboards."
+        assert answer.mode == "hybrid+synthesis"  # the full string is what ran
+        assert session._rag.queries == []  # aquery is never touched
+        assert [param.mode for param in session._rag.data_queries] == ["hybrid"]
+        assert [e.name for e in answer.evidence.entities] == ["Bob"]
+        assert answer.evidence.message_guids == ["g1", "g2"]
+
+    def test_the_synthesis_prompt_grounds_on_facts_and_transcript_excerpts(self) -> None:
+        """★ Decision #6: measure the diet the shipped path will actually see."""
+        llm = ScriptedLLM()
+        session = lightrag_session(query_data=LIGHTRAG_QUERY_DATA, llm=llm)
+        session.query("What does Bob think about computers?", mode="hybrid+synthesis")
+        session.close()
+        assert "- Bob prefers mechanical keyboards" in llm.prompt
+        assert "[Hardware Talk (2016-03-04)]" in llm.prompt
+        assert "I built the PC" in llm.prompt
+        assert "What does Bob think about computers?" in llm.prompt
+
+    def test_a_bare_synthesis_mode_retrieves_with_the_sessions_primary(self) -> None:
+        session = lightrag_session(query_data=LIGHTRAG_QUERY_DATA, llm=ScriptedLLM())
+        answer = session.query("q", mode="synthesis")
+        session.close()
+        assert [param.mode for param in session._rag.data_queries] == [
+            lightrag_adapter.PRIMARY_MODE
+        ]
+        assert answer.mode == "synthesis"
+
+    def test_an_unsuffixed_mode_keeps_the_engines_own_answer_pipeline(self) -> None:
+        """★ The bake-off numbers stay reproducible until the gate says otherwise."""
+        session = lightrag_session(context=LIGHTRAG_CONTEXT, query_data=LIGHTRAG_QUERY_DATA)
+        answer = session.query("q", mode="global")
+        session.close()
+        assert answer.answer == "Bob loves mechanical keyboards."
+        assert session._rag.data_queries == []
+        assert [param.mode for param in session._rag.queries] == ["global", "global"]
+
+    def test_the_chat_client_is_built_once_and_only_when_synthesis_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An engine-composed session never opens a chat connection at all."""
+        built: list[object] = []
+
+        def fake_client() -> Any:
+            built.append(object())
+            return ScriptedLLM()
+
+        monkeypatch.setattr(lightrag_adapter, "LLMClient", fake_client)
+        session = lightrag_session(context=LIGHTRAG_CONTEXT, query_data=LIGHTRAG_QUERY_DATA)
+        session.query("q")  # unsuffixed: the engine answers
+        assert built == []
+        session.query("q", mode="hybrid+synthesis")
+        session.query("q", mode="hybrid+synthesis")
+        session.close()
+        assert len(built) == 1
+
+    def test_a_failed_structured_retrieval_still_produces_a_scored_answer(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        llm = ScriptedLLM()
+        session = lightrag_session(fail_query_data=True, llm=llm)
+        with caplog.at_level(logging.WARNING, logger="varagity.graph.engines.lightrag"):
+            answer = session.query("q", mode="hybrid+synthesis")
+        session.close()
+        assert answer.answer == graph_answer.NO_EVIDENCE_ANSWER
+        assert answer.evidence == GraphEvidence()
+        assert llm.calls == []  # nothing to ground on, so no call is spent
+        assert "structured retrieval failed" in caplog.text
+
     def test_a_reasoning_stage_never_reaches_the_answer(self) -> None:
         session = lightrag_session(answer="<think>hmm</think>Bob likes ARM.")
         assert session.query("q").answer == "Bob likes ARM."
@@ -527,6 +699,65 @@ class TestLightRAGAdapter:
             '{"entities": [{"entity_name": "Jane"}]}', {}
         )
         assert [e.name for e in evidence.entities] == ["Jane"]
+
+    def test_structured_retrieval_maps_entities_relations_and_excerpts(self) -> None:
+        """★ The production evidence path: structured end to end, no re-parsing."""
+        index = {f"{THREAD}::2016-03-04": ["g1", "g2"]}
+        evidence, excerpts = lightrag_adapter.retrieval_from_query_data(LIGHTRAG_QUERY_DATA, index)
+        assert [e.name for e in evidence.entities] == ["Bob"]
+        assert evidence.relations[0].target == "mechanical keyboard"
+        assert evidence.communities == []  # LightRAG has no community layer
+        assert evidence.message_guids == ["g1", "g2"]
+        (excerpt,) = excerpts  # the second chunk carries no text
+        assert excerpt.doc_key == f"{THREAD}::2016-03-04"
+        assert excerpt.span == "2016-03-04"
+        assert excerpt.message_guids == ["g1", "g2"]
+        assert "I built the PC" in excerpt.text
+
+    def test_an_excerpts_thread_label_is_read_off_the_transcript_header(self) -> None:
+        """The doc_key only carries the thread *id*; the text carries its name."""
+        _, (excerpt,) = lightrag_adapter.retrieval_from_query_data(LIGHTRAG_QUERY_DATA, {})
+        assert excerpt.thread_name == "Hardware Talk"
+
+    def test_a_headerless_excerpt_falls_back_to_its_thread_id(self) -> None:
+        payload = {
+            "data": {
+                "chunks": [{"content": "[18:25] Me: nice", "file_path": f"{THREAD}::2016-03-04"}]
+            }
+        }
+        _, (excerpt,) = lightrag_adapter.retrieval_from_query_data(payload, {})
+        assert excerpt.thread_name == THREAD
+        assert excerpt.span == "2016-03-04"
+
+    def test_a_chunk_without_text_cannot_ground_anything(self) -> None:
+        payload = {"data": {"chunks": [{"file_path": f"{THREAD}::2016-03-04"}]}}
+        _, excerpts = lightrag_adapter.retrieval_from_query_data(payload, {})
+        assert excerpts == []
+
+    def test_sections_are_read_at_the_top_level_when_there_is_no_envelope(self) -> None:
+        evidence, _ = lightrag_adapter.retrieval_from_query_data(
+            {"entities": [{"entity_name": "Jane"}]}, {}
+        )
+        assert [e.name for e in evidence.entities] == ["Jane"]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            "not json at all",
+            "[]",
+            {"data": {}},
+            {"data": "nope"},
+            {"status": "failure", "message": "Query returned no results", "data": {}},
+            {"data": {"entities": "not a list", "chunks": [1, 2]}},
+        ],
+    )
+    def test_unknown_structured_shapes_degrade_instead_of_raising(self, payload: Any) -> None:
+        evidence, excerpts = lightrag_adapter.retrieval_from_query_data(payload, {})
+        assert evidence.entities == []
+        assert evidence.relations == []
+        assert evidence.message_guids == []
+        assert excerpts == []
 
     def test_prose_context_is_kept_raw_for_the_adr_autopsy(self) -> None:
         evidence = lightrag_adapter.evidence_from_context("Bob said so.", {})
@@ -630,10 +861,33 @@ class TestLightRAGModelFuncs:
         assert self.run(func("anything")) == ""
 
     def test_embeddings_come_back_in_order_without_a_query_prefix(self) -> None:
-        """The recorded e5 deviation: LightRAG has one function for both sides."""
+        """The default: unprefixed, exactly as the ADR-017 bake-off ran."""
         client = self.client("unused")
         embed = lightrag_adapter.make_embedding_func(client, model="e5")
         assert self.run(embed(["a passage"])) == [[0.5, 0.25]]
+        assert client.embeddings.calls[0]["input"] == ["a passage"]
+
+    def test_the_prefix_setting_off_ignores_the_side_lightrag_declared(self) -> None:
+        client = self.client("unused")
+        embed = lightrag_adapter.make_embedding_func(client, model="e5")
+        self.run(embed(["what did bob say"], context="query"))
+        assert client.embeddings.calls[0]["input"] == ["what did bob say"]
+
+    def test_queries_are_e5_instruction_wrapped_when_the_prefix_is_on(self) -> None:
+        """★ The asymmetric seam: only the query side, only when asked."""
+        client = self.client("unused")
+        embed = lightrag_adapter.make_embedding_func(client, model="e5", query_prefix=True)
+        assert self.run(embed(["what did bob say"], context="query")) == [[0.5, 0.25]]
+        assert client.embeddings.calls[0]["input"] == [format_query("what did bob say")]
+
+    @pytest.mark.parametrize("context", [None, "document"])
+    def test_passages_are_never_prefixed_even_with_the_setting_on(
+        self, context: str | None
+    ) -> None:
+        """e5 requires documents unprefixed — which is why no re-embed is needed."""
+        client = self.client("unused")
+        embed = lightrag_adapter.make_embedding_func(client, model="e5", query_prefix=True)
+        self.run(embed(["a passage"], context=context))
         assert client.embeddings.calls[0]["input"] == ["a passage"]
 
 
@@ -1066,20 +1320,6 @@ class FakeGraphiti:
         self.closed = True
 
 
-class ScriptedLLM:
-    """Records generate() calls; returns a scripted response or raises."""
-
-    def __init__(self, response: str | Exception = "Bob prefers mechanical keyboards.") -> None:
-        self.response = response
-        self.calls: list[dict[str, Any]] = []
-
-    def generate(self, messages: Any, **kwargs: Any) -> str:
-        self.calls.append({"messages": list(messages), **kwargs})
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
-
-
 GRAPHITI_EDGES = [
     {
         "source_node_uuid": "n-bob",
@@ -1262,7 +1502,7 @@ class TestGraphitiAdapter:
 
     def test_facts_with_no_content_are_not_offered_to_the_synthesizer(self) -> None:
         evidence = graphiti_adapter.evidence_from_search([{"source_node_uuid": "n1"}], {})
-        assert graphiti_adapter.facts_block(evidence) == ""
+        assert graph_answer.facts_block(evidence) == ""
 
     def test_community_summaries_join_the_facts(self) -> None:
         evidence = GraphEvidence(
@@ -1270,7 +1510,7 @@ class TestGraphitiAdapter:
                 graphiti_adapter.GraphCommunity(id="c1", title="Hardware", summary="PC talk")
             ]
         )
-        assert graphiti_adapter.facts_block(evidence) == "- community Hardware: PC talk"
+        assert graph_answer.facts_block(evidence) == "- community Hardware: PC talk"
 
     def test_the_semaphore_pin_lands_before_the_engine_import(
         self, monkeypatch: pytest.MonkeyPatch

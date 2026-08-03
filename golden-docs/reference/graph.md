@@ -23,6 +23,10 @@ path, and web surfaces are stage 2.
 - **Rendering** is pure and shared: the same messages become thread-day
   transcripts for document-shaped engines and one episode per message for
   episode-shaped ones, so the bake-off compares engines rather than diets.
+- **Answer synthesis is the repo's, not the engine's** (ADR-017 chose
+  retrieval-only): an adapter returns entities, relations, and transcript
+  excerpts, and `varagity.graph.answer` writes the grounded, capped,
+  `<think>`-stripped answer over them.
 
 ## Message sources
 
@@ -30,13 +34,15 @@ path, and web surfaces are stage 2.
 
 ::: varagity.graph.sources.imessage
 
-## Records, engine seam, and rendering
+## Records, engine seam, rendering, and synthesis
 
 ::: varagity.graph.records
 
 ::: varagity.graph.base
 
 ::: varagity.graph.render
+
+::: varagity.graph.answer
 
 ## Bake-off adapters
 

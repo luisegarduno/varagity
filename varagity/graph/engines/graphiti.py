@@ -14,11 +14,11 @@ Three things make this adapter structurally different from the other two:
   ``Graphiti.close()`` reaches the client's ``aclose()``, which shuts the
   subprocess down. No compose service is added in stage 1 (plan decision #9).
 * **Its search returns facts, not prose.** ``search`` yields edge facts, so the
-  answer is *our* synthesis over them: one grounded
-  :meth:`~varagity.models.llm.LLMClient.generate` call plus
-  :func:`~varagity.models.llm.clean_response` (plan decision #12). LightRAG and
-  cognee are scored on their own answer pipelines, so this asymmetry is
-  recorded in the ADR rather than papered over.
+  answer is *our* synthesis over them — :mod:`varagity.graph.answer`, which
+  started here and is now the shared seam ADR-017's retrieval-only design
+  runs on (plan decision #12). LightRAG and cognee were scored on their own
+  answer pipelines, so this asymmetry is recorded in the ADR rather than
+  papered over.
 * **``SEMAPHORE_LIMIT`` defaults to 20 in source** (its docs say 10 — trust the
   source), which would fire twenty concurrent extraction calls at a
   single-slot llama.cpp. It is read at import time, so the pin lands before
@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from varagity.config import get_settings
+from varagity.graph.answer import synthesis_context, synthesis_max_chars, synthesize
 from varagity.graph.base import GraphSession, register
 from varagity.graph.records import (
     BuildReport,
@@ -52,7 +53,7 @@ from varagity.graph.records import (
 )
 from varagity.graph.render import episode_payloads, merge_batches
 from varagity.graph.sources.base import MessageBatch
-from varagity.models.llm import LLMClient, clean_response
+from varagity.models.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -72,81 +73,8 @@ _ENV_PINS: dict[str, str] = {"SEMAPHORE_LIMIT": "1"}
 # injects the JSON schema into the prompt for local models, so replies are
 # long, and its own default is 16384.
 _LLM_MAX_TOKENS = 4096
-# Cap for our synthesis call — an answer, not a document.
-_SYNTHESIS_MAX_TOKENS = 1024
 
 _EMBEDDING_DIM = 1024
-
-SYNTHESIS_PROMPT = """\
-You are answering a question about a personal message archive, using only the
-facts retrieved from its knowledge graph.
-
-Rules:
-- Use ONLY the facts below. Do not invent people, events, dates, or opinions.
-- If the facts do not answer the question, say so plainly.
-- Answer in a few sentences, naming the people involved.
-
-FACTS:
-{facts}
-
-QUESTION: {question}
-
-ANSWER:"""
-
-
-def facts_block(evidence: GraphEvidence) -> str:
-    """Render retrieved relations and communities as the synthesis prompt's facts.
-
-    Args:
-        evidence: The normalized evidence from a Graphiti search.
-
-    Returns:
-        One ``- fact`` line per relation (community summaries appended after
-        them), or ``""`` when the search found nothing — which is what makes
-        the synthesis call skippable.
-    """
-    lines = [
-        f"- {relation.description or relation.label or ''}".rstrip()
-        for relation in evidence.relations
-        if relation.description or relation.label
-    ]
-    lines.extend(
-        f"- community {community.title or community.id}: {community.summary}"
-        for community in evidence.communities
-        if community.summary
-    )
-    return "\n".join(lines)
-
-
-def synthesize(llm: LLMClient, question: str, evidence: GraphEvidence) -> str:
-    """Turn retrieved facts into a grounded answer (plan decision #12).
-
-    Args:
-        llm: The chat client (:class:`~varagity.models.llm.LLMClient`, reused
-            rather than a bespoke HTTP call, so the app's retry, clamp, and
-            context-window discipline all apply).
-        question: The question, verbatim.
-        evidence: What the search retrieved.
-
-    Returns:
-        The ``<think>``-stripped answer, or a plain "no facts" sentence when
-        the search returned nothing (the honest empty answer a fact-shaped
-        engine produces, scored as-is).
-    """
-    facts = facts_block(evidence)
-    if not facts:
-        return "The graph returned no facts for this question."
-    prompt = SYNTHESIS_PROMPT.format(facts=facts, question=question)
-    try:
-        raw = llm.generate(
-            [{"role": "user", "content": prompt}], max_tokens=_SYNTHESIS_MAX_TOKENS, verbose=0
-        )
-    except Exception:  # a failed synthesis is a scored miss, not a dead run
-        logger.warning("Graphiti answer synthesis failed", exc_info=True)
-        return ""
-    # Mandatory: generate() returns reasoning stages verbatim (the condense and
-    # HyDE precedents), and an unstripped block would be scored as the answer.
-    return clean_response(raw)
 
 
 def evidence_from_search(results: Any, guid_by_uuid: Mapping[str, str]) -> GraphEvidence:
@@ -371,8 +299,11 @@ class _GraphitiSession:
         used = mode or self._mode
         started = time.perf_counter()
         evidence = evidence_from_search(self._search(question), self._guid_by_uuid)
+        context = synthesis_context(
+            evidence, max_chars=synthesis_max_chars(get_settings().LLM_CONTEXT_TOKENS)
+        )
         return GraphAnswer(
-            answer=synthesize(self._llm, question, evidence),
+            answer=synthesize(self._llm, question, context),
             evidence=evidence,
             mode=used,
             latency_s=time.perf_counter() - started,

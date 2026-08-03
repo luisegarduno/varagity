@@ -73,6 +73,41 @@ class GraphCommunity(BaseModel):
     summary: str
 
 
+class TranscriptExcerpt(BaseModel):
+    """One retrieved transcript passage, normalized across engines.
+
+    The document-grain unit of graph evidence: a document-shaped engine
+    retrieves *text* alongside its entities and relations, and that text is
+    what a grounded answer is actually written from (plan decision #6 — the
+    shipped query path grounds on the full retrieval payload, so the gate
+    measures the same diet).
+
+    Grain is the transcript day-span, not the message: that is what the
+    engines can honestly attribute (ADR-017's priced regret), which is why
+    :attr:`message_guids` is a *span* of guids rather than one.
+
+    Attributes:
+        doc_key: The :attr:`~varagity.graph.render.TranscriptDoc.doc_key`
+            the passage came from — the join key back to the corpus.
+        thread_name: Human-facing thread label, for the answer's citation
+            (falls back to the thread id when the passage does not carry the
+            transcript header).
+        span: The document's day span (``YYYY-MM-DD`` or ``first..last``),
+            parsed from the key.
+        text: The retrieved passage, verbatim.
+        message_guids: Per-message provenance for the passage's document, or
+            ``[]`` when the guid index does not know the key (a
+            ``--skip-build`` re-score, until stage 2's workdir manifest makes
+            the index durable).
+    """
+
+    doc_key: str
+    thread_name: str
+    span: str
+    text: str
+    message_guids: list[str] = []
+
+
 class GraphEvidence(BaseModel):
     """What the engine retrieved to support one answer (spec_graphrag §10.2).
 

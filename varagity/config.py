@@ -300,6 +300,13 @@ class Settings(BaseSettings):
             the same ``handle=Name`` pairs, one per line (trailing commas
             fine) — the bulk alternative to the inline setting (e.g.
             ``"./graph-docs/contacts.txt"``). Empty = no file.
+        GRAPH_QUERY_PREFIX: Whether graph-engine *queries* are wrapped in
+            e5's asymmetric instruction format (spec §9.5;
+            :func:`varagity.models.embeddings.format_query` owns the format).
+            Passages are never prefixed either way — which is what e5
+            requires of documents — so this changes retrieval **without**
+            re-embedding the graph. Off is the ADR-017 bake-off's recorded
+            behavior; the shipped default is whatever the gate measured.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -403,6 +410,7 @@ class Settings(BaseSettings):
     GRAPH_OWNER_ALIASES: str = ""
     GRAPH_HANDLE_NAMES: str = ""
     GRAPH_HANDLE_NAMES_FILE: str = ""
+    GRAPH_QUERY_PREFIX: bool = False
 
     @property
     def allowed_extension_set(self) -> frozenset[str]:
