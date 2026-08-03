@@ -1,8 +1,8 @@
-"""The LightRAG bake-off adapter (spec_graphrag §8; ADR-017 candidate).
+"""The LightRAG adapter — the shipped graph engine (spec_graphrag §8; ADR-017).
 
-LightRAG is the document-shaped candidate with the cleanest injection points:
+LightRAG is the document-shaped engine with the cleanest injection points:
 a custom async ``llm_model_func`` and an ``EmbeddingFunc(embedding_dim=1024)``
-are first-class constructor arguments, so this is the one engine where the
+are first-class constructor arguments, so this is an engine where the
 ``<think>``-strip template applies **fully** — every extraction, gleaning, and
 answer completion passes through :func:`~varagity.models.llm.clean_response`
 before LightRAG parses it. A reasoning model's unstripped ``<think>`` block
@@ -10,24 +10,44 @@ breaks its delimiter grammar silently, which is exactly the trap the condense
 and HyDE features already paid for.
 
 Storage is the file-based default (``NetworkXStorage`` + ``NanoVectorDBStorage``
-+ JSON KV/doc-status) inside the session's working directory: LightRAG's
-Postgres graph plane needs the Apache AGE extension (R1 correction), which is a
-different image and therefore an ADR-017 storage question, not a stage-1 one.
++ JSON KV/doc-status) inside the session's working directory (ADR-017 pinned
+all four classes): LightRAG's Postgres graph plane needs the Apache AGE
+extension, which is a different image than this stack runs.
+
+**One process, one writer, queries live throughout.** The session drives a
+private event loop on a daemon thread and submits every engine call with
+``asyncio.run_coroutine_threadsafe``, so a chat query is answered while a
+multi-day backfill is still extracting — which is how LightRAG's own server
+behaves, and why :class:`~varagity.graph.service.GraphService` keeps exactly
+one session per process (stage-2 decisions #10/#11). The engine's storages
+are single-writer per workspace by explicit invariant, so nothing outside
+this process may write the workdir; that is the reason there is no CLI graph
+build.
+
+**Builds are diffing upserts, not appends.** LightRAG's enqueue stage drops
+a re-submitted ``doc_id`` in *any* status, so a re-exported ``chat.db`` whose
+newest thread-day grew would silently keep the stale transcript.
+:mod:`varagity.graph.manifest` records what was indexed; :meth:`_LightRAGSession.build`
+deletes the genuinely changed documents before re-enqueueing them and pays
+extraction for nothing else. Enqueue and process are separate engine calls,
+and process re-selects every in-flight/failed document at the top of each
+batch — so a killed build resumes by calling :meth:`_LightRAGSession.resume`.
 
 Two more things this adapter owns, both recorded rather than hidden (spec §6):
 
-* **e5's asymmetric prefix is opt-in behind ``GRAPH_QUERY_PREFIX``.** The
-  bake-off ran unprefixed (a recorded stage-1 deviation) because LightRAG
-  appeared to call one embedding function for passages and queries alike. It
-  does not: ``EmbeddingFunc(supports_asymmetric=True)`` forwards a
+* **e5's asymmetric prefix rides ``GRAPH_QUERY_PREFIX``.** The bake-off ran
+  unprefixed (a recorded stage-1 deviation) because LightRAG appeared to call
+  one embedding function for passages and queries alike. It does not:
+  ``EmbeddingFunc(supports_asymmetric=True)`` forwards a
   ``context="document"|"query"`` keyword to the hook
   (``lightrag/utils.py:596-602``), and the pinned vector store passes it on
   every search (``kg/nano_vector_db_impl.py:429-431``; also
   ``operate.py:4382`` for the dual-level keyword embeddings). Passages stay
   unprefixed either way — which is *correct* under e5 discipline — so the
-  setting is measurable on an already-built graph without re-embedding
-  anything. :func:`varagity.models.embeddings.format_query` stays the single
-  owner of the query format.
+  setting was measurable on the already-built bake-off graph without
+  re-embedding anything, and the acceptance gate shipped it **on**.
+  :func:`varagity.models.embeddings.format_query` stays the single owner of
+  the query format.
 * **Concurrency knobs are pinned through ``os.environ``.** They are read at
   import time by LightRAG's own settings, so they must be set *before* the
   lazy import — the one place in this repo where writing environment
@@ -47,8 +67,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -59,17 +80,27 @@ from openai.types.chat import ChatCompletionMessageParam
 from varagity.config import get_settings
 from varagity.graph.answer import synthesis_context, synthesis_max_chars, synthesize
 from varagity.graph.base import GraphSession, register
+from varagity.graph.manifest import (
+    WorkdirManifest,
+    load_manifest,
+    load_summary,
+    save_manifest,
+    save_summary,
+)
 from varagity.graph.records import (
     BuildReport,
     GraphAnswer,
     GraphEntity,
     GraphEvidence,
+    GraphExport,
+    GraphExportEdge,
+    GraphExportNode,
     GraphRelation,
     GraphStats,
     TranscriptExcerpt,
 )
 from varagity.graph.render import (
-    doc_guid_index,
+    TranscriptDoc,
     guids_in_payload,
     merge_batches,
     thread_transcripts,
@@ -84,7 +115,10 @@ logger = logging.getLogger(__name__)
 # LightRAG's own query modes: local / global / hybrid / naive / mix. `hybrid`
 # fuses its dual-level (entity + relation) keyword retrieval and is the
 # adapter's primary; `--mode global` is the recorded extra pass the
-# aggregation questions get (plan decision #13).
+# aggregation questions get (stage-1 decision #13). The *shipped* query mode
+# is a setting (`mix`, the acceptance gate's winner) and lands with its
+# consumer in the query-path phase; this constant stays what the bake-off
+# ran, so its numbers stay reproducible.
 PRIMARY_MODE = "hybrid"
 
 # Mode suffix selecting ADR-017's retrieval-only design: `hybrid+synthesis`
@@ -121,10 +155,19 @@ _CTX_HEADROOM_TOKENS = 512
 _LLM_TIMEOUT_S = 1800.0
 _EMBEDDING_TIMEOUT_S = 600.0
 
-# Documents per insert call. LightRAG resumes from its doc-status store, so
-# chunking the insert turns a mid-run failure into a recorded partial rather
+# Documents per enqueue call. LightRAG resumes from its doc-status store, so
+# chunking the enqueue turns a mid-run failure into a recorded partial rather
 # than a lost multi-hour index.
 _INSERT_BATCH = 20
+
+# How long `close()` waits for the session's loop thread to wind down. The
+# loop is stopped, not cancelled, so the wait covers only callbacks already
+# scheduled; a thread that overruns it is a daemon and dies with the process
+# rather than wedging an API shutdown.
+_LOOP_JOIN_TIMEOUT_S = 30.0
+
+# Whole-graph selector for `get_knowledge_graph` (degree-ordered, capped).
+_ALL_NODES_LABEL = "*"
 
 # Read by LightRAG at import time, so they are pinned before the lazy import.
 # Storage classes are pinned to the file-based defaults so a stray environment
@@ -344,6 +387,66 @@ def retrieval_from_query_data(
     return evidence, excerpts
 
 
+def export_from_knowledge_graph(graph: Any) -> GraphExport:
+    """Flatten LightRAG's ``KnowledgeGraph`` into the wire-ready export.
+
+    The engine's own shape keeps everything it knows in a free-form
+    ``properties`` dict and reports no degree at all, so this projects the
+    two fields the view actually draws with (type, description) and counts
+    each node's edges **within the returned slice** — an export is capped and
+    degree-ordered, so a slice-local degree is the honest number for the
+    picture being drawn.
+
+    Args:
+        graph: Whatever ``get_knowledge_graph`` returned (or ``None``).
+
+    Returns:
+        The export. An unknown shape degrades to an empty one rather than
+        raising — the same rule the evidence normalizers follow.
+    """
+    nodes = _attr(graph, "nodes") or []
+    edges = _attr(graph, "edges") or []
+    exported_edges: list[GraphExportEdge] = []
+    degrees: dict[str, int] = {}
+    for edge in edges:
+        source, target = _attr(edge, "source"), _attr(edge, "target")
+        if not isinstance(source, str) or not isinstance(target, str):
+            continue
+        properties = _attr(edge, "properties")
+        properties = properties if isinstance(properties, Mapping) else {}
+        exported_edges.append(
+            GraphExportEdge(
+                id=str(_attr(edge, "id") or f"{source}-{target}"),
+                source=source,
+                target=target,
+                label=_text(properties, "keywords", "label", "relation"),
+                description=_text(properties, "description", "summary", "content"),
+            )
+        )
+        degrees[source] = degrees.get(source, 0) + 1
+        degrees[target] = degrees.get(target, 0) + 1
+    exported_nodes: list[GraphExportNode] = []
+    for node in nodes:
+        identifier = _attr(node, "id")
+        if not isinstance(identifier, str) or not identifier:
+            continue
+        properties = _attr(node, "properties")
+        properties = properties if isinstance(properties, Mapping) else {}
+        exported_nodes.append(
+            GraphExportNode(
+                id=identifier,
+                entity_type=_text(properties, "entity_type", "type", "category"),
+                description=_text(properties, "description", "summary", "content"),
+                degree=degrees.get(identifier, 0),
+            )
+        )
+    return GraphExport(
+        nodes=exported_nodes,
+        edges=exported_edges,
+        truncated=bool(_attr(graph, "is_truncated")),
+    )
+
+
 @register("lightrag")
 class LightRAGEngine:
     """LightRAG behind the :class:`~varagity.graph.base.GraphEngine` protocol."""
@@ -361,9 +464,10 @@ class LightRAGEngine:
         """
         settings = get_settings()
         _pin_env()
-        # Lazy, so the registry costs nothing without the bakeoff group
-        # installed (plan decision #8) — numpy included: LightRAG's
-        # EmbeddingFunc expects an array, and numpy is not a declared
+        # Lazy even though lightrag is a main dependency now (stage-1
+        # decision #8): the registry stays free to import, so unit tests and
+        # CI never pay for the engine — numpy included, since LightRAG's
+        # EmbeddingFunc expects an array and numpy is not a declared
         # dependency of this project, only a transitive one.
         import numpy as np
         from lightrag import LightRAG, QueryParam
@@ -410,7 +514,7 @@ class LightRAGEngine:
                 supports_asymmetric=asymmetric,
             ),
         )
-        session = _LightRAGSession(rag, QueryParam)
+        session = _LightRAGSession(rag, QueryParam, workdir=workdir)
         try:
             session.run(rag.initialize_storages())
             session.run(initialize_pipeline_status())
@@ -427,10 +531,11 @@ class _LightRAGSession:
         rag: Any,
         query_param: Callable[..., Any],
         *,
+        workdir: Path,
         mode: str = PRIMARY_MODE,
         llm: LLMClient | None = None,
     ) -> None:
-        """Wrap an initialized LightRAG instance.
+        """Wrap an initialized LightRAG instance and start its loop thread.
 
         Args:
             rag: The ``LightRAG`` instance (injected so the session's logic is
@@ -438,6 +543,11 @@ class _LightRAGSession:
                 touching the real library).
             query_param: LightRAG's ``QueryParam`` class, called with
                 ``mode=`` / ``only_need_context=``.
+            workdir: The engine's working directory — where the manifest and
+                summary sidecars live. It is read here (the manifest becomes
+                the provenance index, so a re-opened session can still map
+                citations back to messages) and written by every method that
+                changes the graph.
             mode: Primary query mode for this session.
             llm: Chat client for ``+synthesis`` answers; ``None`` builds one
                 on first use, so a session that only ever runs engine-composed
@@ -445,63 +555,199 @@ class _LightRAGSession:
         """
         self._rag = rag
         self._query_param = query_param
+        self._workdir = workdir
         self._mode = mode
         self._llm = llm
-        self._index: dict[str, list[str]] = {}
-        # One event loop per session: LightRAG's async primitives bind to the
-        # running loop, so a fresh asyncio.run() per call would strand them.
+        self._manifest = load_manifest(workdir)
+        self._index: dict[str, list[str]] = self._manifest.guid_index()
+        self._closed = False
+        # One event loop per session, **driven by its own daemon thread**:
+        # LightRAG's async primitives bind to the running loop, and running it
+        # from the calling thread (`run_until_complete`) would serialize the
+        # whole process behind a multi-day build. Submitting work to a loop
+        # that is always running is what lets a chat query overtake an
+        # in-flight extraction — the engine's own concurrency model.
         self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._loop.run_forever, name="lightrag-loop", daemon=True
+        )
+        self._thread.start()
 
-    def run[T](self, awaitable: Awaitable[T]) -> T:
-        """Run one coroutine on the session's event loop.
+    def run[T](self, coroutine: Coroutine[Any, Any, T]) -> T:
+        """Run one coroutine on the session's loop and wait for it.
 
         Args:
-            awaitable: The coroutine to drive.
+            coroutine: The coroutine to drive.
 
         Returns:
             Whatever it returned.
+
+        Raises:
+            RuntimeError: If the session is already closed (its loop is gone,
+                so the call could never complete).
         """
-        return self._loop.run_until_complete(awaitable)
+        if self._closed:
+            coroutine.close()
+            raise RuntimeError("this LightRAG session is closed")
+        return asyncio.run_coroutine_threadsafe(coroutine, self._loop).result()
 
-    def build(self, batches: Sequence[MessageBatch], *, verbose: int = 0) -> BuildReport:
-        """Index the batches' merged messages as thread transcripts.
+    def build(
+        self,
+        batches: Sequence[MessageBatch],
+        *,
+        verbose: int = 0,
+        prune_removed: bool = True,
+    ) -> BuildReport:
+        """Upsert the batches' merged messages as thread transcripts.
 
-        Documents are inserted under their :attr:`~varagity.graph.render.TranscriptDoc.doc_key`,
-        which is LightRAG's document id: re-inserting an unchanged transcript
-        is a doc-status hit, so an overlapping upload or a second build costs
-        nothing and duplicates nothing.
+        The diff against the workdir manifest is what makes this an upsert
+        rather than an append (stage-2 decision #9):
+
+        * **unchanged** documents are skipped — the expensive part of a
+          build is extraction, and their content already produced entities;
+        * **changed** documents are deleted from the graph *first*, because
+          LightRAG's enqueue stage drops a re-submitted ``doc_id`` in any
+          status and would otherwise keep the stale transcript forever;
+        * **removed** documents (in the manifest, absent from this render)
+          are deleted only when ``prune_removed`` says the render covered the
+          whole corpus.
+
+        Enqueue and process are separate engine calls, and process re-selects
+        every in-flight or failed document, so **a killed build resumes by
+        calling this again** (or :meth:`resume`, which skips the render).
 
         Args:
             batches: Parsed source files (guid-merged before rendering).
             verbose: Validated console verbosity (0–2).
+            prune_removed: Whether this render is the whole corpus. A bounded
+                build (message cap, date floor) must pass ``False``: its
+                render is deliberately partial, and pruning on its say-so
+                would delete the rest of the archive.
 
         Returns:
-            The build report; a failed insert chunk is recorded and the rest
-            of the corpus still indexes.
+            The build report; a failed enqueue chunk or delete is recorded
+            and the rest of the corpus still indexes.
         """
         messages = merge_batches(batches)
         docs = thread_transcripts(messages)
-        self._index.update(doc_guid_index(docs))
-        failures: list[str] = []
+        diff = self._manifest.diff(docs)
+        stale = [*diff.changed, *(diff.removed if prune_removed else ())]
+        logger.info(
+            "graph build: %d new, %d changed, %d unchanged, %d removed (%s)",
+            len(diff.new),
+            len(diff.changed),
+            len(diff.unchanged),
+            len(diff.removed),
+            "pruning removed" if prune_removed else "bounded render — keeping removed",
+        )
         started = time.perf_counter()
-        for start in range(0, len(docs), _INSERT_BATCH):
-            chunk = docs[start : start + _INSERT_BATCH]
-            try:
-                self.run(
-                    self._rag.ainsert(
-                        [doc.text for doc in chunk],
-                        ids=[doc.doc_key for doc in chunk],
-                        file_paths=[doc.doc_key for doc in chunk],
-                    )
-                )
-            except Exception as exc:  # a failed chunk is data, not the end of the run
-                logger.warning("LightRAG insert failed for %d document(s)", len(chunk))
-                failures.append(f"insert {chunk[0].doc_key}…(+{len(chunk) - 1}): {exc!r}")
+        undeleted = self._delete(stale)
+        failures = list(undeleted.values())
+        pending = set(diff.pending)
+        failures.extend(self._enqueue([doc for doc in docs if doc.doc_key in pending]))
+        failures.extend(self._process())
+        # The manifest is rewritten even after a failed *enqueue or process*:
+        # those documents were offered, and they sit in LightRAG's doc-status
+        # store where the next pass retries them. A failed **delete** is the
+        # exception — its old content is still in the graph, so `retain`
+        # keeps its old record and the next build still sees it as stale.
+        self._remember(self._manifest.merged(docs, prune=prune_removed, retain=undeleted.keys()))
         return BuildReport(
             messages_seen=len(messages),
             wall_clock_s=time.perf_counter() - started,
             failures=failures,
         )
+
+    def resume(self, *, verbose: int = 0) -> BuildReport:
+        """Finish whatever a killed build left in flight, without re-rendering.
+
+        LightRAG's process pass re-selects every document in a pending,
+        parsing, analyzing, processing, or failed state, so this is the whole
+        of resume: no corpus, no diff, no re-enqueue.
+
+        Args:
+            verbose: Validated console verbosity (0–2).
+
+        Returns:
+            The report. ``messages_seen`` is the corpus the manifest accounts
+            for — nothing was handed to the engine this time, so reporting a
+            hand-off count would be a lie.
+        """
+        started = time.perf_counter()
+        failures = self._process()
+        self._refresh_summary()
+        return BuildReport(
+            messages_seen=self._manifest.message_guid_count(),
+            wall_clock_s=time.perf_counter() - started,
+            failures=failures,
+        )
+
+    def document_statuses(self) -> dict[str, int]:
+        """Count the engine's documents by processing status.
+
+        Returns:
+            Status name → document count (LightRAG's own vocabulary:
+            ``pending``, ``processing``, ``processed``, ``failed``, …), or an
+            empty mapping when the engine would not say — the progress
+            sampler treats that as "no news", never as "zero documents".
+        """
+        try:
+            statuses = self.run(self._rag.get_processing_status())
+        except Exception:
+            logger.warning("LightRAG document statuses unavailable", exc_info=True)
+            return {}
+        if not isinstance(statuses, Mapping):
+            return {}
+        return {str(name): int(count) for name, count in statuses.items()}
+
+    def delete_documents(self, doc_keys: Sequence[str]) -> int:
+        """Remove documents (and their derived graph elements) from the graph.
+
+        Args:
+            doc_keys: The transcript keys to delete. Unknown keys are handed
+                to the engine anyway — it answers "not found" harmlessly, and
+                filtering against the manifest would make a manifest drift
+                permanent.
+
+        Returns:
+            How many deletes the engine accepted.
+
+        Raises:
+            RuntimeError: If the session is closed.
+        """
+        undeleted = self._delete(doc_keys)
+        self._remember(self._manifest.without([key for key in doc_keys if key not in undeleted]))
+        return len(doc_keys) - len(undeleted)
+
+    def export(
+        self,
+        label: str = _ALL_NODES_LABEL,
+        *,
+        max_depth: int = 3,
+        max_nodes: int = 1000,
+    ) -> GraphExport:
+        """Read a renderable slice of the graph out of the engine.
+
+        Args:
+            label: Entity name to centre the slice on; ``"*"`` takes the
+                whole graph, degree-ordered.
+            max_depth: Hops to walk out from ``label`` (ignored for ``"*"``).
+            max_nodes: Node cap. The engine clamps it to its own
+                ``max_graph_nodes`` ceiling and reports ``is_truncated`` when
+                it bites.
+
+        Returns:
+            The slice, or an empty export when the graph would not answer (a
+            view that cannot draw is better than a 500).
+        """
+        try:
+            graph = self.run(
+                self._rag.get_knowledge_graph(label, max_depth=max_depth, max_nodes=max_nodes)
+            )
+        except Exception:
+            logger.warning("LightRAG graph export failed", exc_info=True)
+            return GraphExport()
+        return export_from_knowledge_graph(graph)
 
     def query(self, question: str, *, mode: str | None = None, verbose: int = 0) -> GraphAnswer:
         """Answer one question, with either the engine's pipeline or ours.
@@ -555,30 +801,188 @@ class _LightRAGSession:
         )
 
     def stats(self) -> GraphStats:
+        """Report the graph's size, from the summary sidecar when there is one.
+
+        The sidecar is refreshed by every build and delete, so the common
+        case answers without walking a multi-megabyte graphml — which is what
+        makes this cheap enough for a status poll and a metrics scrape. A
+        workdir without one (a graph built before the sidecar existed, or one
+        mutated behind this adapter's back) falls back to asking the graph.
+
+        Returns:
+            Entity/relation counts, or ``None`` for each if neither source
+            would say. ``communities`` is always ``None``: LightRAG builds no
+            community layer at all (R1), which is itself an ADR-017 datum.
+        """
+        summary = load_summary(self._workdir)
+        if summary is not None:
+            return GraphStats(
+                entities=summary.entities, relations=summary.relations, communities=None
+            )
+        return self._graph_stats()
+
+    def close(self) -> None:
+        """Finalize LightRAG's storages and stop the session's loop thread.
+
+        Idempotent: a second call is a no-op, so a service teardown racing a
+        context manager's ``finally`` cannot raise on the closed loop.
+        """
+        if self._closed:
+            return
+        try:
+            self.run(self._rag.finalize_storages())
+        except Exception:
+            logger.warning("LightRAG teardown failed", exc_info=True)
+        finally:
+            self._closed = True
+            self._drain_loop_tasks()
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=_LOOP_JOIN_TIMEOUT_S)
+            if self._thread.is_alive():
+                # Daemon thread: it dies with the process. Closing the loop
+                # out from under it would be the noisier failure.
+                logger.warning("LightRAG loop thread did not stop within %ss", _LOOP_JOIN_TIMEOUT_S)
+            else:
+                self._loop.close()
+
+    def _drain_loop_tasks(self) -> None:
+        """Cancel LightRAG's own background tasks before the loop goes away.
+
+        ``finalize_storages`` flushes data but leaves the library's long-lived
+        workers (its priority-queue rate limiters, its health check) parked on
+        the loop. Stopping and closing the loop under them strands each one
+        mid-await: asyncio logs "Task was destroyed but it is pending!" and
+        their cleanup throws "Event loop is closed" into the unraisable hook
+        on every shutdown — live noise, not a data problem, but ERROR-grade
+        spew in the API's logs. Cancelling them while the loop is still
+        running lets them unwind properly; one that will not die within the
+        join timeout is logged and abandoned to the daemon thread.
+        """
+
+        async def drain() -> None:
+            """Cancel every task on the loop but ourselves, then let them end."""
+            tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        try:
+            asyncio.run_coroutine_threadsafe(drain(), self._loop).result(
+                timeout=_LOOP_JOIN_TIMEOUT_S
+            )
+        except Exception:
+            logger.warning("LightRAG loop drain failed", exc_info=True)
+
+    def _graph_stats(self) -> GraphStats:
         """Count the graph's nodes and edges from LightRAG's graph storage.
 
         Returns:
             Entity/relation counts, or ``None`` for each if the storage would
-            not say. ``communities`` is always ``None``: LightRAG builds no
-            community layer at all (R1), which is itself an ADR-017 datum.
+            not say.
         """
         entities = relations = None
         try:
-            graph = self.run(self._rag.chunk_entity_relation_graph.get_knowledge_graph("*"))
+            graph = self.run(
+                self._rag.chunk_entity_relation_graph.get_knowledge_graph(_ALL_NODES_LABEL)
+            )
             entities = len(graph.nodes)
             relations = len(graph.edges)
         except Exception:  # an engine that won't report is reported as unknown
             logger.warning("LightRAG graph stats unavailable", exc_info=True)
         return GraphStats(entities=entities, relations=relations, communities=None)
 
-    def close(self) -> None:
-        """Finalize LightRAG's storages and close the session's event loop."""
+    def _enqueue(self, docs: Sequence[TranscriptDoc]) -> list[str]:
+        """Hand documents to LightRAG's durable pending queue, in chunks.
+
+        Args:
+            docs: The transcripts to (re-)index. Each is enqueued under its
+                ``doc_key`` as both document id and ``file_path`` — the id
+                makes the upsert recognizable, the path is what a retrieved
+                chunk carries back as provenance.
+
+        Returns:
+            Human-readable failures, one per failed chunk.
+        """
+        failures: list[str] = []
+        for start in range(0, len(docs), _INSERT_BATCH):
+            chunk = docs[start : start + _INSERT_BATCH]
+            try:
+                self.run(
+                    self._rag.apipeline_enqueue_documents(
+                        [doc.text for doc in chunk],
+                        ids=[doc.doc_key for doc in chunk],
+                        file_paths=[doc.doc_key for doc in chunk],
+                    )
+                )
+            except Exception as exc:  # a failed chunk is data, not the end of the run
+                logger.warning("LightRAG enqueue failed for %d document(s)", len(chunk))
+                failures.append(f"enqueue {chunk[0].doc_key}…(+{len(chunk) - 1}): {exc!r}")
+        return failures
+
+    def _process(self) -> list[str]:
+        """Run LightRAG's extraction pass over everything it has pending.
+
+        Returns:
+            A single-entry failure list if the pass raised, else empty. The
+            pass is all-or-nothing from here; per-document failures live in
+            the engine's doc-status store, where the next pass retries them.
+        """
         try:
-            self.run(self._rag.finalize_storages())
-        except Exception:
-            logger.warning("LightRAG teardown failed", exc_info=True)
-        finally:
-            self._loop.close()
+            self.run(self._rag.apipeline_process_enqueue_documents())
+        except Exception as exc:
+            logger.warning("LightRAG document processing failed", exc_info=True)
+            return [f"process: {exc!r}"]
+        return []
+
+    def _delete(self, doc_keys: Sequence[str]) -> dict[str, str]:
+        """Delete documents from the graph one at a time.
+
+        One call per document on purpose: the engine rebuilds the entities a
+        deleted document partly supported, and a failure on one key must not
+        strand the rest of a re-index.
+
+        Args:
+            doc_keys: The transcript keys to remove.
+
+        Returns:
+            ``doc_key`` → failure text, for the keys that would not delete.
+            The caller needs the *keys*, not just the messages: a document
+            still in the graph must keep its old manifest record, or the
+            next build will think it is up to date.
+        """
+        failures: dict[str, str] = {}
+        for key in doc_keys:
+            try:
+                self.run(self._rag.adelete_by_doc_id(key))
+            except Exception as exc:
+                logger.warning("LightRAG delete failed for %s", key, exc_info=True)
+                failures[key] = f"delete {key}: {exc!r}"
+        return failures
+
+    def _remember(self, manifest: WorkdirManifest) -> None:
+        """Adopt a new manifest: persist it, re-derive the provenance index.
+
+        Args:
+            manifest: The manifest describing what the graph now holds.
+        """
+        self._manifest = manifest
+        self._index = manifest.guid_index()
+        save_manifest(self._workdir, manifest)
+        self._refresh_summary()
+
+    def _refresh_summary(self) -> None:
+        """Rewrite the summary sidecar from a fresh graph walk.
+
+        Called only after a write (build, resume, delete) — never on a read
+        path, which is the whole point of having a sidecar.
+        """
+        stats = self._graph_stats()
+        save_summary(
+            self._workdir,
+            self._manifest,
+            entities=stats.entities,
+            relations=stats.relations,
+        )
 
     def _llm_client(self) -> LLMClient:
         """Return the session's chat client, building it on first use.
@@ -711,6 +1115,24 @@ def _section(raw: Mapping[str, Any] | None, *names: str) -> list[Mapping[str, An
         if isinstance(value, Sequence) and not isinstance(value, str):
             return [item for item in value if isinstance(item, Mapping)]
     return []
+
+
+def _attr(item: Any, name: str) -> Any:
+    """Read one field from a payload that may be a model or a mapping.
+
+    ``get_knowledge_graph`` returns pydantic models, but a JSON round-trip
+    (a cached export, a test fixture) returns dicts of the same shape.
+
+    Args:
+        item: The record, or ``None``.
+        name: Field name.
+
+    Returns:
+        The field's value, or ``None`` when the record has no such field.
+    """
+    if isinstance(item, Mapping):
+        return item.get(name)
+    return getattr(item, name, None)
 
 
 def _text(item: Mapping[str, Any], *names: str) -> str | None:

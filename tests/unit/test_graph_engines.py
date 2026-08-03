@@ -1,19 +1,21 @@
-"""Unit tests for the graph-engine seam and the three bake-off adapters.
+"""Unit tests for the graph-engine seam and the shipped LightRAG adapter.
 
-Not one engine library is installed here — that is the point. The registry
+The engine library is never imported here — that is the point. The registry
 must be free (``import varagity.graph.engines`` pulls no engine), the pure
 rendering must be exact (it is where most adapter correctness lives), the
 evidence normalizers must map canned engine payloads and degrade rather than
-raise on shapes they have never seen, and the session classes must be
-drivable by doubles so the only untested surface left is the lazy-import
-block inside each ``session()``.
+raise on shapes they have never seen, and the session class must be drivable
+by doubles so the only untested surface left is the lazy-import block inside
+``session()``.
 """
 
+import asyncio
 import logging
 import os
 import sys
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+import threading
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,13 +31,17 @@ from varagity.graph.base import (
     get_graph_engine,
     register,
 )
-from varagity.graph.engines import cognee as cognee_adapter
-from varagity.graph.engines import graphiti as graphiti_adapter
 from varagity.graph.engines import lightrag as lightrag_adapter
+from varagity.graph.manifest import (
+    ManifestDoc,
+    WorkdirManifest,
+    load_manifest,
+    load_summary,
+    save_manifest,
+)
 from varagity.graph.records import BuildReport, GraphAnswer, GraphEvidence, GraphStats
 from varagity.graph.render import (
     doc_guid_index,
-    episode_payloads,
     guids_in_payload,
     merge_batches,
     thread_transcripts,
@@ -78,9 +84,8 @@ def batch(*messages: SourceMessage, doc_id: str = "doc-1", path: str = "chat.db"
 class ScriptedLLM:
     """Records generate() calls; returns a scripted response or raises.
 
-    Shared by both adapters that compose their own answers: Graphiti (its
-    search returns facts) and LightRAG's ``+synthesis`` modes (ADR-017's
-    retrieval-only design).
+    Drives the ``+synthesis`` modes — ADR-017's retrieval-only design, where
+    the answer is ours rather than the engine's.
     """
 
     def __init__(self, response: str | Exception = "Bob prefers mechanical keyboards.") -> None:
@@ -100,8 +105,9 @@ class ScriptedLLM:
 
 
 class TestRegistry:
-    def test_all_three_bakeoff_seats_are_registered(self) -> None:
-        assert set(GRAPH_ENGINE_REGISTRY) == {"lightrag", "cognee", "graphiti"}
+    def test_the_shipped_engine_is_the_only_seat(self) -> None:
+        """ADR-017 picked one; the losers went out with stage-2's start."""
+        assert set(GRAPH_ENGINE_REGISTRY) == {"lightrag"}
 
     def test_get_graph_engine_returns_the_registered_instance(self) -> None:
         assert get_graph_engine("lightrag") is GRAPH_ENGINE_REGISTRY["lightrag"]
@@ -111,8 +117,7 @@ class TestRegistry:
             get_graph_engine("made_up")
         message_text = str(excinfo.value)
         assert "made_up" in message_text
-        for name in ("lightrag", "cognee", "graphiti"):
-            assert name in message_text
+        assert "lightrag" in message_text
 
     def test_register_adds_an_instance_and_returns_the_class(self) -> None:
         @register("_test_probe")
@@ -132,16 +137,17 @@ class TestRegistry:
             assert isinstance(engine, GraphEngine)
 
     def test_importing_the_registry_imports_no_engine_library(self) -> None:
-        """★ The guard that keeps CI engine-free (plan decision #8).
+        """★ The guard that keeps collection engine-free (stage-1 decision #8).
 
-        This module has already imported every adapter; if any of them
-        touched its library at module level, the library would be in
-        sys.modules by now.
+        Still load-bearing now that ``lightrag-hku`` is a main dependency and
+        *is* installed: the adapter must import it inside ``session()``, or
+        every unit run and every ``import varagity`` pays for the engine.
+        This module has already imported the adapter; if it touched its
+        library at module level, the library would be in sys.modules by now.
         """
         import varagity.graph.engines  # noqa: F401  (the import under test)
 
-        for library in ("lightrag", "cognee", "graphiti_core", "falkordb", "redislite"):
-            assert library not in sys.modules
+        assert "lightrag" not in sys.modules
 
 
 class TestMergeBatches:
@@ -297,34 +303,6 @@ class TestThreadTranscripts:
         assert thread_transcripts([]) == []
 
 
-class TestEpisodePayloads:
-    def test_one_episode_per_message_carries_guid_identity(self) -> None:
-        (payload,) = episode_payloads([message("g1", text="I built the PC")])
-        assert payload.name == "g1"
-        assert payload.body == "Bob: I built the PC"
-        assert payload.reference_time == START
-        assert payload.source_description == "Hardware Talk"
-
-    def test_reactions_ride_along_so_the_engines_get_the_same_diet(self) -> None:
-        (payload,) = episode_payloads(
-            [message("g1", tapbacks=[Tapback(kind="loved", sender_name="Carol")])]
-        )
-        assert payload.body.splitlines()[-1] == "  [Carol loved this]"
-
-    def test_the_group_defaults_to_the_thread_and_can_be_pinned_corpus_wide(self) -> None:
-        """Entity resolution happens within a partition — Q1 needs one corpus-wide group."""
-        messages = [message("g1"), message("g2", thread_id="other")]
-        assert [p.group_id for p in episode_payloads(messages)] == [THREAD, "other"]
-        assert [p.group_id for p in episode_payloads(messages, group_id="varagity")] == [
-            "varagity",
-            "varagity",
-        ]
-
-    def test_payloads_are_chronological(self) -> None:
-        messages = [message("late", when=START + timedelta(hours=2)), message("early")]
-        assert [p.name for p in episode_payloads(messages)] == ["early", "late"]
-
-
 class TestProvenanceWalk:
     INDEX = {f"{THREAD}::2016-03-04": ["g1", "g2"], f"{THREAD}::2016-03-05": ["g3"]}
 
@@ -393,7 +371,12 @@ class FakeGraphStore:
 
 
 class FakeRag:
-    """Stand-in for an initialized ``LightRAG`` instance."""
+    """Stand-in for an initialized ``LightRAG`` instance.
+
+    ``calls`` records the *order* of the pipeline verbs, which is where the
+    upsert's correctness lives: a changed document must be deleted before it
+    is re-enqueued, or the engine's dedup silently keeps the stale one.
+    """
 
     def __init__(
         self,
@@ -401,28 +384,72 @@ class FakeRag:
         answer: str = "Bob loves mechanical keyboards.",
         context: Any = None,
         query_data: Any = None,
+        knowledge_graph: Any = None,
+        statuses: Any = None,
         fail_insert: bool = False,
         fail_context: bool = False,
         fail_query_data: bool = False,
         fail_finalize: bool = False,
+        fail_process: bool = False,
+        fail_delete: Sequence[str] = (),
+        fail_export: bool = False,
+        fail_statuses: bool = False,
     ) -> None:
         self.answer = answer
         self.context = context
         self.query_data = query_data
+        self.knowledge_graph = knowledge_graph
+        self.statuses = {"processed": 2} if statuses is None else statuses
         self.fail_insert = fail_insert
         self.fail_context = fail_context
         self.fail_query_data = fail_query_data
         self.fail_finalize = fail_finalize
+        self.fail_process = fail_process
+        self.fail_delete = set(fail_delete)
+        self.fail_export = fail_export
+        self.fail_statuses = fail_statuses
         self.inserted: list[tuple[list[str], list[str]]] = []
+        self.deleted: list[str] = []
+        self.processed = 0
+        self.exports: list[tuple[str, int, int]] = []
+        self.calls: list[str] = []
         self.queries: list[FakeQueryParam] = []
         self.data_queries: list[FakeQueryParam] = []
         self.finalized = False
         self.chunk_entity_relation_graph = FakeGraphStore()
 
-    async def ainsert(self, texts: list[str], *, ids: list[str], file_paths: list[str]) -> None:
+    async def apipeline_enqueue_documents(
+        self, texts: list[str], *, ids: list[str], file_paths: list[str]
+    ) -> str:
+        self.calls.append(f"enqueue:{','.join(ids)}")
         if self.fail_insert:
-            raise RuntimeError("insert exploded")
+            raise RuntimeError("enqueue exploded")
         self.inserted.append((ids, file_paths))
+        return "track-1"
+
+    async def apipeline_process_enqueue_documents(self) -> None:
+        self.calls.append("process")
+        if self.fail_process:
+            raise RuntimeError("process exploded")
+        self.processed += 1
+
+    async def adelete_by_doc_id(self, doc_id: str) -> Any:
+        self.calls.append(f"delete:{doc_id}")
+        if doc_id in self.fail_delete:
+            raise RuntimeError(f"delete exploded for {doc_id}")
+        self.deleted.append(doc_id)
+        return SimpleNamespace(status="success")
+
+    async def get_processing_status(self) -> Any:
+        if self.fail_statuses:
+            raise RuntimeError("status store closed")
+        return self.statuses
+
+    async def get_knowledge_graph(self, label: str, *, max_depth: int, max_nodes: int) -> Any:
+        self.exports.append((label, max_depth, max_nodes))
+        if self.fail_export:
+            raise RuntimeError("export exploded")
+        return self.knowledge_graph
 
     async def aquery(self, question: str, *, param: FakeQueryParam) -> Any:
         self.queries.append(param)
@@ -504,16 +531,172 @@ LIGHTRAG_QUERY_DATA = {
 }
 
 
-def lightrag_session(*, llm: Any = None, **kwargs: Any) -> Any:
-    session = lightrag_adapter._LightRAGSession(FakeRag(**kwargs), FakeQueryParam, llm=llm)
+LIGHTRAG_KNOWLEDGE_GRAPH = SimpleNamespace(
+    nodes=[
+        SimpleNamespace(
+            id="Bob",
+            labels=["Bob"],
+            properties={"entity_type": "person", "description": "a friend"},
+        ),
+        SimpleNamespace(id="mechanical keyboard", labels=["mechanical keyboard"], properties={}),
+        SimpleNamespace(id="", labels=[], properties={}),  # nameless: dropped
+    ],
+    edges=[
+        SimpleNamespace(
+            id="Bob-mechanical keyboard",
+            type="DIRECTED",
+            source="Bob",
+            target="mechanical keyboard",
+            properties={"keywords": "prefers", "description": "Bob prefers them"},
+        ),
+        SimpleNamespace(id="dangling", type="DIRECTED", source="Bob", target=None, properties={}),
+    ],
+    is_truncated=True,
+)
+
+
+def new_session(tmp_path: Path, *, llm: Any = None, **kwargs: Any) -> Any:
+    """An unbuilt session over a fresh workdir."""
+    return lightrag_adapter._LightRAGSession(
+        FakeRag(**kwargs), FakeQueryParam, workdir=tmp_path, llm=llm
+    )
+
+
+def lightrag_session(tmp_path: Path, *, llm: Any = None, **kwargs: Any) -> Any:
+    """A session whose graph already holds one two-message transcript."""
+    session = new_session(tmp_path, llm=llm, **kwargs)
     session.build([batch(message("g1"), message("g2", when=START + timedelta(minutes=1)))])
     return session
 
 
-class TestLightRAGAdapter:
-    def test_build_inserts_transcripts_under_their_doc_keys(self) -> None:
+class TestLightRAGSessionLoop:
+    """The threading model that lets a query overtake a multi-day build."""
+
+    def test_calls_run_on_the_sessions_own_thread_not_the_callers(self, tmp_path: Path) -> None:
+        """★ Stage-2 decision #10: the loop is not driven by the caller."""
+        session = new_session(tmp_path)
+        seen: list[int] = []
+
+        async def probe() -> int:
+            seen.append(threading.get_ident())
+            return 7
+
+        try:
+            assert session.run(probe()) == 7
+            assert seen == [session._thread.ident]
+            assert seen[0] != threading.get_ident()
+        finally:
+            session.close()
+
+    def test_a_query_lands_while_a_build_is_still_in_flight(self, tmp_path: Path) -> None:
+        """★ The point of the loop thread: the graph stays readable mid-backfill."""
+        rag = FakeRag(context=LIGHTRAG_CONTEXT)
+        released = threading.Event()
+        entered = threading.Event()
+
+        async def slow_process() -> None:
+            entered.set()
+            while not released.is_set():  # noqa: ASYNC110 (a test's hand-rolled gate)
+                await asyncio.sleep(0.001)
+
+        rag.apipeline_process_enqueue_documents = slow_process  # type: ignore[method-assign]
+        session = lightrag_adapter._LightRAGSession(rag, FakeQueryParam, workdir=tmp_path)
+        builder = threading.Thread(target=lambda: session.build([batch(message("g1"))]))
+        builder.start()
+        try:
+            assert entered.wait(timeout=5)
+            # The build thread is parked inside the engine; this call is made
+            # from the main thread and must still be answered.
+            assert session.query("q").answer == "Bob loves mechanical keyboards."
+        finally:
+            released.set()
+            builder.join(timeout=5)
+            session.close()
+
+    def test_a_closed_session_refuses_further_work(self, tmp_path: Path) -> None:
+        """The loop is gone, so a submitted call could never complete."""
+        session = new_session(tmp_path)
+        session.close()
+
+        async def probe() -> int:
+            return 1  # pragma: no cover - never scheduled
+
+        # The coroutine is closed on the way out, so this raises RuntimeError
+        # rather than leaving a "never awaited" warning behind it.
+        with pytest.raises(RuntimeError, match="closed"):
+            session.run(probe())
+
+    def test_close_is_idempotent(self, tmp_path: Path) -> None:
+        """A service teardown may race the context manager's finally."""
+        session = new_session(tmp_path)
+        session.close()
+        session.close()
+        assert session._rag.finalized is True
+
+    def test_close_cancels_the_engines_lingering_loop_tasks(self, tmp_path: Path) -> None:
+        """★ ``finalize_storages`` never reaps LightRAG's own worker tasks.
+
+        The library parks priority-queue rate limiters and a health check on
+        the loop for the session's lifetime. Closing the loop under them
+        spews "Task was destroyed but it is pending!" on every shutdown
+        (reproduced in both Phase-2 live runs), so ``close`` must cancel
+        whatever is still parked and let it unwind *before* the loop stops.
+        """
+        session = new_session(tmp_path)
+        unwound = threading.Event()
+
+        async def lingering_worker() -> None:
+            """Sleep forever, the shape of lightrag's queue workers."""
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                unwound.set()
+                raise
+
+        parked: list[asyncio.Task[None]] = []
+
+        async def park() -> None:
+            """Start the worker on the session's loop, as the library does."""
+            parked.append(asyncio.get_running_loop().create_task(lingering_worker()))
+
+        session.run(park())
+        session.close()
+        # The worker unwound through CancelledError while the loop was still
+        # running — not stranded mid-await by a closed loop.
+        assert unwound.wait(timeout=5)
+        assert parked[0].cancelled()
+        assert session._loop.is_closed()
+
+    def test_a_wedged_loop_thread_is_logged_not_waited_on_forever(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """★ An engine stuck mid-call must not wedge an API shutdown.
+
+        The thread is a daemon, so overrunning the join is survivable; what
+        must not happen is a silent hang. Staged with a stand-in thread
+        rather than a real wall-clock wedge — the branch is about what
+        ``close`` does when the join times out, not about how long it waits.
+        """
+        session = new_session(tmp_path)
+        real_thread = session._thread
+        session._thread = SimpleNamespace(  # type: ignore[assignment]
+            join=lambda timeout=None: None, is_alive=lambda: True
+        )
+        with caplog.at_level(logging.WARNING, logger="varagity.graph.engines.lightrag"):
+            session.close()
+        assert "did not stop" in caplog.text
+        # The real loop *was* asked to stop; tidy it up so nothing leaks.
+        real_thread.join(timeout=5)
+        session._loop.close()
+
+
+class TestLightRAGBuild:
+    def test_build_enqueues_transcripts_under_their_doc_keys_then_processes(
+        self, tmp_path: Path
+    ) -> None:
         rag = FakeRag()
-        session = lightrag_adapter._LightRAGSession(rag, FakeQueryParam)
+        session = lightrag_adapter._LightRAGSession(rag, FakeQueryParam, workdir=tmp_path)
         report = session.build(
             [
                 batch(message("g1"), message("g2", when=START + timedelta(days=9))),
@@ -525,27 +708,291 @@ class TestLightRAGAdapter:
         # LightRAG's document id IS the transcript key, which is what makes a
         # re-inserted unchanged transcript a doc-status hit rather than a copy.
         assert ids == file_paths == [f"{THREAD}::2016-03-04..2016-03-13", "other::2016-03-04"]
+        assert rag.processed == 1
         assert isinstance(report, BuildReport)
         assert report.messages_seen == 3
         assert report.failures == []
         assert report.wall_clock_s >= 0.0
 
-    def test_a_second_build_over_an_overlapping_batch_sees_the_union(self) -> None:
+    def test_a_second_build_over_an_overlapping_batch_sees_the_union(self, tmp_path: Path) -> None:
         rag = FakeRag()
-        session = lightrag_adapter._LightRAGSession(rag, FakeQueryParam)
+        session = lightrag_adapter._LightRAGSession(rag, FakeQueryParam, workdir=tmp_path)
         first = batch(message("g1"))
         second = batch(message("g1"), message("g2", when=START + timedelta(minutes=1)))
         assert session.build([first, second]).messages_seen == 2
         session.close()
 
-    def test_a_failed_insert_is_recorded_not_raised(self) -> None:
-        session = lightrag_adapter._LightRAGSession(FakeRag(fail_insert=True), FakeQueryParam)
+    def test_an_unchanged_corpus_costs_no_extraction_at_all(self, tmp_path: Path) -> None:
+        """★ The manifest's first job: skip what is already indexed."""
+        session = lightrag_session(tmp_path)
+        session._rag.calls.clear()
+        report = session.build(
+            [batch(message("g1"), message("g2", when=START + timedelta(minutes=1)))]
+        )
+        session.close()
+        assert session._rag.inserted == [
+            ([f"{THREAD}::2016-03-04"], [f"{THREAD}::2016-03-04"])
+        ]  # only the first build's
+        # `process` still runs: it is what picks up anything a previous build
+        # left pending or failed, which is the free half of resume.
+        assert session._rag.calls == ["process"]
+        assert report.failures == []
+
+    def test_a_changed_transcript_is_deleted_before_it_is_re_enqueued(self, tmp_path: Path) -> None:
+        """★ The trap: enqueue dedup drops a known doc_id, stale content and all."""
+        session = lightrag_session(tmp_path)
+        session._rag.calls.clear()
+        grown = batch(
+            message("g1"),
+            message("g2", when=START + timedelta(minutes=1)),
+            message("g3", text="and it boots", when=START + timedelta(minutes=2)),
+        )
+        session.build([grown])
+        session.close()
+        key = f"{THREAD}::2016-03-04"
+        assert session._rag.calls == [f"delete:{key}", f"enqueue:{key}", "process"]
+        assert session._rag.deleted == [key]
+
+    def test_a_source_that_vanished_is_deleted_on_a_full_corpus_build(self, tmp_path: Path) -> None:
+        session = lightrag_session(tmp_path)
+        session._rag.calls.clear()
+        session.build([batch(message("g9", thread_id="other", thread_name="Crew"))])
+        session.close()
+        assert session._rag.deleted == [f"{THREAD}::2016-03-04"]
+        assert set(load_manifest(tmp_path).docs) == {"other::2016-03-04"}
+
+    def test_a_bounded_build_never_deletes_what_it_did_not_render(self, tmp_path: Path) -> None:
+        """★ Decision #9: a partial render may not speak for the whole archive."""
+        session = lightrag_session(tmp_path)
+        session._rag.calls.clear()
+        session.build(
+            [batch(message("g9", thread_id="other", thread_name="Crew"))], prune_removed=False
+        )
+        session.close()
+        assert session._rag.deleted == []
+        assert set(load_manifest(tmp_path).docs) == {f"{THREAD}::2016-03-04", "other::2016-03-04"}
+
+    def test_the_manifest_records_content_guids_and_span(self, tmp_path: Path) -> None:
+        lightrag_session(tmp_path).close()
+        (key, doc) = next(iter(load_manifest(tmp_path).docs.items()))
+        assert key == f"{THREAD}::2016-03-04"
+        assert doc.message_guids == ["g1", "g2"]
+        assert doc.thread_name == "Hardware Talk"
+        assert doc.span == "2016-03-04"
+        assert len(doc.content_sha256) == 64
+
+    def test_the_summary_sidecar_is_refreshed_with_the_graph_size(self, tmp_path: Path) -> None:
+        lightrag_session(tmp_path).close()
+        summary = load_summary(tmp_path)
+        assert summary is not None
+        assert (summary.entities, summary.relations) == (3, 2)
+        assert (summary.docs, summary.message_guids) == (1, 2)
+
+    def test_a_failed_enqueue_is_recorded_not_raised(self, tmp_path: Path) -> None:
+        session = new_session(tmp_path, fail_insert=True)
         report = session.build([batch(message("g1"))])
         session.close()
-        assert report.failures and "insert exploded" in report.failures[0]
+        assert report.failures and "enqueue exploded" in report.failures[0]
 
-    def test_query_answers_with_normalized_evidence_and_provenance(self) -> None:
-        session = lightrag_session(context=LIGHTRAG_CONTEXT)
+    def test_a_failed_process_is_recorded_not_raised(self, tmp_path: Path) -> None:
+        session = new_session(tmp_path, fail_process=True)
+        report = session.build([batch(message("g1"))])
+        session.close()
+        assert report.failures == [f"process: {RuntimeError('process exploded')!r}"]
+        # The manifest still lands: the document was offered, and the engine's
+        # own doc-status store is where the next pass retries it.
+        assert set(load_manifest(tmp_path).docs) == {f"{THREAD}::2016-03-04"}
+
+    def test_a_document_whose_delete_failed_stays_stale_in_the_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        """★ Otherwise the next build calls it unchanged and the staleness sticks."""
+        key = f"{THREAD}::2016-03-04"
+        session = lightrag_session(tmp_path)
+        before = load_manifest(tmp_path).docs[key].content_sha256
+        session._rag.fail_delete = {key}
+        grown = batch(
+            message("g1"),
+            message("g2", when=START + timedelta(minutes=1)),
+            message("g3", text="and it boots", when=START + timedelta(minutes=2)),
+        )
+        session.build([grown])
+        session.close()
+        assert load_manifest(tmp_path).docs[key].content_sha256 == before
+        # …so a retry still sees it as changed and deletes it again.
+        retry = new_session(tmp_path)
+        retry._rag.calls.clear()
+        retry.build([grown])
+        retry.close()
+        assert retry._rag.deleted == [key]
+
+    def test_a_vanished_source_whose_delete_failed_is_retried_next_build(
+        self, tmp_path: Path
+    ) -> None:
+        key = f"{THREAD}::2016-03-04"
+        session = lightrag_session(tmp_path)
+        session._rag.fail_delete = {key}
+        session.build([batch(message("g9", thread_id="other", thread_name="Crew"))])
+        session.close()
+        assert set(load_manifest(tmp_path).docs) == {key, "other::2016-03-04"}
+
+    def test_a_failed_delete_is_recorded_and_the_rest_still_index(self, tmp_path: Path) -> None:
+        session = lightrag_session(tmp_path)
+        session._rag.fail_delete = {f"{THREAD}::2016-03-04"}
+        report = session.build(
+            [
+                batch(
+                    message("g1"),
+                    message("g2", when=START + timedelta(minutes=1)),
+                    message("g3", text="and it boots", when=START + timedelta(minutes=2)),
+                )
+            ]
+        )
+        session.close()
+        assert report.failures and "delete exploded" in report.failures[0]
+        assert session._rag.inserted[-1][0] == [f"{THREAD}::2016-03-04"]
+
+    def test_resume_only_processes_and_reports_the_indexed_corpus(self, tmp_path: Path) -> None:
+        """★ A killed build finishes without re-rendering a thing."""
+        session = lightrag_session(tmp_path)
+        session._rag.calls.clear()
+        report = session.resume()
+        session.close()
+        assert session._rag.calls == ["process"]
+        assert report.messages_seen == 2  # what the manifest accounts for
+        assert report.failures == []
+
+    def test_resume_records_a_failed_pass(self, tmp_path: Path) -> None:
+        session = lightrag_session(tmp_path)
+        session._rag.fail_process = True
+        report = session.resume()
+        session.close()
+        assert report.failures and "process exploded" in report.failures[0]
+
+    def test_a_reopened_session_still_resolves_provenance(self, tmp_path: Path) -> None:
+        """★ The manifest's second job: provenance outlives the process."""
+        lightrag_session(tmp_path).close()
+        reopened = lightrag_adapter._LightRAGSession(
+            FakeRag(context=LIGHTRAG_CONTEXT), FakeQueryParam, workdir=tmp_path
+        )
+        answer = reopened.query("q")
+        reopened.close()
+        assert answer.evidence.message_guids == ["g1", "g2"]
+
+    def test_an_unreadable_manifest_is_treated_as_an_empty_one(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (tmp_path / "varagity_manifest.json").write_text("{not json", encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger="varagity.graph.manifest"):
+            session = new_session(tmp_path)
+        session.close()
+        assert session._index == {}
+        assert "unreadable" in caplog.text
+
+    def test_a_foreign_schema_version_re_indexes_rather_than_mis_diffing(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-deriving costs a dedup pass; trusting the wrong fields costs the graph."""
+        save_manifest(
+            tmp_path,
+            WorkdirManifest(
+                version=99,
+                docs={f"{THREAD}::2016-03-04": ManifestDoc(content_sha256="whatever")},
+            ),
+        )
+        session = new_session(tmp_path)
+        session.build([batch(message("g1"))])
+        session.close()
+        assert session._rag.inserted[0][0] == [f"{THREAD}::2016-03-04"]
+        assert load_manifest(tmp_path).version == 1
+
+
+class TestLightRAGProductionSurface:
+    def test_document_statuses_pass_the_engines_counts_through(self, tmp_path: Path) -> None:
+        session = new_session(tmp_path, statuses={"pending": 3, "processed": 7})
+        assert session.document_statuses() == {"pending": 3, "processed": 7}
+        session.close()
+
+    @pytest.mark.parametrize("statuses", [None, "not a mapping", 17])
+    def test_unreadable_statuses_are_no_news_not_zero_documents(
+        self, tmp_path: Path, statuses: Any
+    ) -> None:
+        session = new_session(tmp_path, statuses=statuses, fail_statuses=statuses is None)
+        assert session.document_statuses() == {}
+        session.close()
+
+    def test_export_flattens_nodes_edges_and_slice_local_degree(self, tmp_path: Path) -> None:
+        session = new_session(tmp_path, knowledge_graph=LIGHTRAG_KNOWLEDGE_GRAPH)
+        export = session.export(max_nodes=50)
+        session.close()
+        assert session._rag.exports == [("*", 3, 50)]
+        assert [(node.id, node.entity_type, node.degree) for node in export.nodes] == [
+            ("Bob", "person", 1),
+            ("mechanical keyboard", None, 1),
+        ]  # the nameless node is dropped
+        (edge,) = export.edges  # the endpoint-less edge is dropped
+        assert (edge.source, edge.target, edge.label) == ("Bob", "mechanical keyboard", "prefers")
+        assert export.truncated is True
+
+    def test_export_centres_on_a_named_entity(self, tmp_path: Path) -> None:
+        session = new_session(tmp_path, knowledge_graph=LIGHTRAG_KNOWLEDGE_GRAPH)
+        session.export("Bob", max_depth=1, max_nodes=10)
+        session.close()
+        assert session._rag.exports == [("Bob", 1, 10)]
+
+    @pytest.mark.parametrize("graph", [None, "prose", SimpleNamespace(nodes=None, edges=None)])
+    def test_an_unusable_export_payload_draws_nothing_rather_than_raising(self, graph: Any) -> None:
+        export = lightrag_adapter.export_from_knowledge_graph(graph)
+        assert (export.nodes, export.edges, export.truncated) == ([], [], False)
+
+    def test_a_json_round_tripped_export_maps_identically(self, tmp_path: Path) -> None:
+        """The engine returns models; a cached/serialized export returns dicts."""
+        as_dicts = {
+            "nodes": [{"id": "Bob", "properties": {"entity_type": "person"}}],
+            "edges": [{"id": "e1", "source": "Bob", "target": "Ada", "properties": {}}],
+            "is_truncated": False,
+        }
+        export = lightrag_adapter.export_from_knowledge_graph(as_dicts)
+        assert [node.id for node in export.nodes] == ["Bob"]
+        assert export.nodes[0].entity_type == "person"
+        assert [edge.target for edge in export.edges] == ["Ada"]
+
+    def test_a_failed_export_draws_nothing_rather_than_raising(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = new_session(tmp_path, fail_export=True)
+        with caplog.at_level(logging.WARNING, logger="varagity.graph.engines.lightrag"):
+            export = session.export()
+        session.close()
+        assert export.nodes == []
+        assert "export failed" in caplog.text
+
+    def test_deleting_documents_drops_them_from_the_graph_and_the_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        session = lightrag_session(tmp_path)
+        key = f"{THREAD}::2016-03-04"
+        assert session.delete_documents([key]) == 1
+        session.close()
+        assert session._rag.deleted == [key]
+        assert load_manifest(tmp_path).docs == {}
+        assert session._index == {}
+
+    def test_a_failed_delete_is_not_counted_and_keeps_its_manifest_record(
+        self, tmp_path: Path
+    ) -> None:
+        """A document still in the graph must still be in the manifest."""
+        session = lightrag_session(tmp_path)
+        key = f"{THREAD}::2016-03-04"
+        session._rag.fail_delete = {key}
+        assert session.delete_documents([key]) == 0
+        session.close()
+        assert set(load_manifest(tmp_path).docs) == {key}
+
+
+class TestLightRAGAdapter:
+    def test_query_answers_with_normalized_evidence_and_provenance(self, tmp_path: Path) -> None:
+        session = lightrag_session(tmp_path, context=LIGHTRAG_CONTEXT)
         answer = session.query("What does Bob think about computers?")
         session.close()
         assert isinstance(answer, GraphAnswer)
@@ -557,8 +1004,8 @@ class TestLightRAGAdapter:
         assert answer.evidence.communities == []  # LightRAG has no community layer
         assert answer.latency_s >= 0.0
 
-    def test_an_explicit_mode_overrides_the_primary(self) -> None:
-        session = lightrag_session()
+    def test_an_explicit_mode_overrides_the_primary(self, tmp_path: Path) -> None:
+        session = lightrag_session(tmp_path)
         assert session.query("q", mode="global").mode == "global"
         session.close()
 
@@ -579,10 +1026,12 @@ class TestLightRAGAdapter:
     ) -> None:
         assert lightrag_adapter._split_mode(mode) == expected
 
-    def test_a_synthesis_mode_retrieves_once_and_writes_the_answer_itself(self) -> None:
+    def test_a_synthesis_mode_retrieves_once_and_writes_the_answer_itself(
+        self, tmp_path: Path
+    ) -> None:
         """★ ADR-017's retrieval-only design: no engine answer call at all."""
         llm = ScriptedLLM()
-        session = lightrag_session(query_data=LIGHTRAG_QUERY_DATA, llm=llm)
+        session = lightrag_session(tmp_path, query_data=LIGHTRAG_QUERY_DATA, llm=llm)
         answer = session.query("What does Bob think about computers?", mode="hybrid+synthesis")
         session.close()
         assert answer.answer == "Bob prefers mechanical keyboards."
@@ -592,10 +1041,12 @@ class TestLightRAGAdapter:
         assert [e.name for e in answer.evidence.entities] == ["Bob"]
         assert answer.evidence.message_guids == ["g1", "g2"]
 
-    def test_the_synthesis_prompt_grounds_on_facts_and_transcript_excerpts(self) -> None:
+    def test_the_synthesis_prompt_grounds_on_facts_and_transcript_excerpts(
+        self, tmp_path: Path
+    ) -> None:
         """★ Decision #6: measure the diet the shipped path will actually see."""
         llm = ScriptedLLM()
-        session = lightrag_session(query_data=LIGHTRAG_QUERY_DATA, llm=llm)
+        session = lightrag_session(tmp_path, query_data=LIGHTRAG_QUERY_DATA, llm=llm)
         session.query("What does Bob think about computers?", mode="hybrid+synthesis")
         session.close()
         assert "- Bob prefers mechanical keyboards" in llm.prompt
@@ -603,8 +1054,10 @@ class TestLightRAGAdapter:
         assert "I built the PC" in llm.prompt
         assert "What does Bob think about computers?" in llm.prompt
 
-    def test_a_bare_synthesis_mode_retrieves_with_the_sessions_primary(self) -> None:
-        session = lightrag_session(query_data=LIGHTRAG_QUERY_DATA, llm=ScriptedLLM())
+    def test_a_bare_synthesis_mode_retrieves_with_the_sessions_primary(
+        self, tmp_path: Path
+    ) -> None:
+        session = lightrag_session(tmp_path, query_data=LIGHTRAG_QUERY_DATA, llm=ScriptedLLM())
         answer = session.query("q", mode="synthesis")
         session.close()
         assert [param.mode for param in session._rag.data_queries] == [
@@ -612,9 +1065,11 @@ class TestLightRAGAdapter:
         ]
         assert answer.mode == "synthesis"
 
-    def test_an_unsuffixed_mode_keeps_the_engines_own_answer_pipeline(self) -> None:
-        """★ The bake-off numbers stay reproducible until the gate says otherwise."""
-        session = lightrag_session(context=LIGHTRAG_CONTEXT, query_data=LIGHTRAG_QUERY_DATA)
+    def test_an_unsuffixed_mode_keeps_the_engines_own_answer_pipeline(self, tmp_path: Path) -> None:
+        """★ The bake-off numbers stay reproducible: the ADR-017 tables are this path."""
+        session = lightrag_session(
+            tmp_path, context=LIGHTRAG_CONTEXT, query_data=LIGHTRAG_QUERY_DATA
+        )
         answer = session.query("q", mode="global")
         session.close()
         assert answer.answer == "Bob loves mechanical keyboards."
@@ -622,7 +1077,7 @@ class TestLightRAGAdapter:
         assert [param.mode for param in session._rag.queries] == ["global", "global"]
 
     def test_the_chat_client_is_built_once_and_only_when_synthesis_runs(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An engine-composed session never opens a chat connection at all."""
         built: list[object] = []
@@ -632,7 +1087,9 @@ class TestLightRAGAdapter:
             return ScriptedLLM()
 
         monkeypatch.setattr(lightrag_adapter, "LLMClient", fake_client)
-        session = lightrag_session(context=LIGHTRAG_CONTEXT, query_data=LIGHTRAG_QUERY_DATA)
+        session = lightrag_session(
+            tmp_path, context=LIGHTRAG_CONTEXT, query_data=LIGHTRAG_QUERY_DATA
+        )
         session.query("q")  # unsuffixed: the engine answers
         assert built == []
         session.query("q", mode="hybrid+synthesis")
@@ -641,10 +1098,10 @@ class TestLightRAGAdapter:
         assert len(built) == 1
 
     def test_a_failed_structured_retrieval_still_produces_a_scored_answer(
-        self, caplog: pytest.LogCaptureFixture
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         llm = ScriptedLLM()
-        session = lightrag_session(fail_query_data=True, llm=llm)
+        session = lightrag_session(tmp_path, fail_query_data=True, llm=llm)
         with caplog.at_level(logging.WARNING, logger="varagity.graph.engines.lightrag"):
             answer = session.query("q", mode="hybrid+synthesis")
         session.close()
@@ -653,13 +1110,15 @@ class TestLightRAGAdapter:
         assert llm.calls == []  # nothing to ground on, so no call is spent
         assert "structured retrieval failed" in caplog.text
 
-    def test_a_reasoning_stage_never_reaches_the_answer(self) -> None:
-        session = lightrag_session(answer="<think>hmm</think>Bob likes ARM.")
+    def test_a_reasoning_stage_never_reaches_the_answer(self, tmp_path: Path) -> None:
+        session = lightrag_session(tmp_path, answer="<think>hmm</think>Bob likes ARM.")
         assert session.query("q").answer == "Bob likes ARM."
         session.close()
 
-    def test_failed_context_retrieval_still_answers(self, caplog: pytest.LogCaptureFixture) -> None:
-        session = lightrag_session(fail_context=True)
+    def test_failed_context_retrieval_still_answers(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = lightrag_session(tmp_path, fail_context=True)
         with caplog.at_level(logging.WARNING, logger="varagity.graph.engines.lightrag"):
             answer = session.query("q")
         session.close()
@@ -667,22 +1126,32 @@ class TestLightRAGAdapter:
         assert answer.evidence == GraphEvidence()
         assert "context retrieval failed" in caplog.text
 
-    def test_stats_read_the_graph_storage(self) -> None:
-        session = lightrag_session()
+    def test_stats_come_from_the_summary_sidecar_a_build_refreshed(self, tmp_path: Path) -> None:
+        session = lightrag_session(tmp_path)
+        # Break the graph walk to prove the sidecar answered, not the graph.
+        session._rag.chunk_entity_relation_graph = FakeGraphStore(fail=True)
         assert session.stats() == GraphStats(entities=3, relations=2, communities=None)
         session.close()
 
-    def test_unavailable_stats_are_reported_as_unknown_not_zero(self) -> None:
-        session = lightrag_session()
+    def test_stats_fall_back_to_the_graph_when_there_is_no_sidecar(self, tmp_path: Path) -> None:
+        """A workdir built before the sidecar existed still reports honestly."""
+        session = new_session(tmp_path)
+        assert session.stats() == GraphStats(entities=3, relations=2, communities=None)
+        session.close()
+
+    def test_unavailable_stats_are_reported_as_unknown_not_zero(self, tmp_path: Path) -> None:
+        session = new_session(tmp_path)
         session._rag.chunk_entity_relation_graph = FakeGraphStore(fail=True)
         assert session.stats() == GraphStats(entities=None, relations=None, communities=None)
         session.close()
 
-    def test_close_finalizes_storages_and_survives_a_failed_teardown(self) -> None:
+    def test_close_finalizes_storages_and_survives_a_failed_teardown(self, tmp_path: Path) -> None:
         rag = FakeRag()
-        lightrag_adapter._LightRAGSession(rag, FakeQueryParam).close()
+        lightrag_adapter._LightRAGSession(rag, FakeQueryParam, workdir=tmp_path).close()
         assert rag.finalized is True
-        lightrag_adapter._LightRAGSession(FakeRag(fail_finalize=True), FakeQueryParam).close()
+        lightrag_adapter._LightRAGSession(
+            FakeRag(fail_finalize=True), FakeQueryParam, workdir=tmp_path
+        ).close()
 
     @pytest.mark.parametrize(
         "context",
@@ -891,652 +1360,29 @@ class TestLightRAGModelFuncs:
         assert client.embeddings.calls[0]["input"] == ["a passage"]
 
 
-# --------------------------------------------------------------------------
-# cognee
-# --------------------------------------------------------------------------
-
-
-class FakeSearchTypes:
-    GRAPH_COMPLETION = "graph-completion"
-    CHUNKS = "chunks"
-
-
-class FakeCogneeGraph:
-    def __init__(self, nodes: int = 4, edges: int = 3) -> None:
-        self.nodes, self.edges = nodes, edges
-
-    async def get_graph_data(self) -> Any:
-        return ["n"] * self.nodes, ["e"] * self.edges
-
-
-class FakeCognee:
-    """Stand-in for the ``cognee`` module.
-
-    Ingestion is grouped, so the double counts *attempts* as well as
-    successes: ``fail_add_groups``/``fail_cognify_groups`` fail one specific
-    group (1-based) and leave the rest working, which is how the isolation
-    guarantee is asserted.
-    """
-
-    def __init__(
-        self,
-        *,
-        results: dict[str, Any] | None = None,
-        fail_add: bool = False,
-        fail_cognify: bool = False,
-        fail_search: bool = False,
-        fail_add_groups: Sequence[int] = (),
-        fail_cognify_groups: Sequence[int] = (),
-    ) -> None:
-        self.results = results or {}
-        self.fail_add = fail_add
-        self.fail_cognify = fail_cognify
-        self.fail_search = fail_search
-        self.fail_add_groups = set(fail_add_groups)
-        self.fail_cognify_groups = set(fail_cognify_groups)
-        self.added: list[list[str]] = []
-        self.add_datasets: list[str] = []
-        self.cognified: list[list[str]] = []
-        self.batch_sizes: list[int | None] = []
-        self.add_attempts = 0
-        self.cognify_attempts = 0
-
-    async def add(self, paths: list[str], *, dataset_name: str) -> None:
-        self.add_attempts += 1
-        if self.fail_add or self.add_attempts in self.fail_add_groups:
-            raise RuntimeError(f"add exploded on group {self.add_attempts}")
-        self.added.append(paths)
-        self.add_datasets.append(dataset_name)
-
-    async def cognify(self, *, datasets: list[str], chunks_per_batch: int | None = None) -> None:
-        self.cognify_attempts += 1
-        if self.fail_cognify or self.cognify_attempts in self.fail_cognify_groups:
-            raise RuntimeError(f"cognify exploded on group {self.cognify_attempts}")
-        self.cognified.append(datasets)
-        self.batch_sizes.append(chunks_per_batch)
-
-    async def search(self, *, query_text: str, query_type: str, datasets: list[str]) -> Any:
-        if self.fail_search:
-            raise RuntimeError("search exploded")
-        return self.results.get(query_type)
-
-
-COGNEE_TRIPLETS = [
-    [
-        {"name": "Bob", "type": "Person", "description": "a friend"},
-        {"relationship_name": "prefers"},
-        {"name": "mechanical keyboard", "type": "Thing"},
-    ],
-    ["not", "a", "triplet-of-mappings"],
-    {"not": "a triplet"},
-]
-
-
-def cognee_session(tmp_path: Path, api: FakeCognee, *, graph: Any = None) -> Any:
-    session = cognee_adapter._CogneeSession(
-        api,
-        FakeSearchTypes,
-        workdir=tmp_path,
-        graph_engine=graph or (lambda: _resolved(FakeCogneeGraph())),
-    )
-    session.build([batch(message("g1"), message("g2", when=START + timedelta(minutes=1)))])
-    return session
-
-
-def build_over_threads(tmp_path: Path, api: FakeCognee, count: int) -> BuildReport:
-    """Build a corpus of ``count`` threads, i.e. ``count`` transcript documents."""
-    session = cognee_adapter._CogneeSession(
-        api,
-        FakeSearchTypes,
-        workdir=tmp_path,
-        graph_engine=lambda: _resolved(FakeCogneeGraph()),
-    )
-    messages = [
-        message(f"g{index}", thread_id=f"thread-{index}", thread_name=f"Thread {index}")
-        for index in range(count)
-    ]
-    try:
-        return session.build([batch(*messages)])
-    finally:
-        session.close()
-
-
-async def _resolved(value: Any) -> Any:
-    return value
-
-
-class TestCogneeAdapter:
-    def test_build_writes_transcript_files_then_cognifies(self, tmp_path: Path) -> None:
-        api = FakeCognee()
-        session = cognee_session(tmp_path, api)
-        session.close()
-        (written,) = api.added
-        assert api.cognified == [[cognee_adapter.DATASET]]
-        assert Path(written[0]).read_text(encoding="utf-8").startswith("Thread: Hardware Talk")
-        assert Path(written[0]).parent == tmp_path / "documents"
-
-    def test_cognify_bounds_its_extraction_fan_out(self, tmp_path: Path) -> None:
-        """Extraction gathers over a whole batch with no concurrency cap.
-
-        The batch size is therefore the queue depth on a single-slot
-        llama.cpp, and cognee's default of 100 put the tail request's wait
-        past LiteLLM's deadline (2026-07-28, the first full-profile run:
-        76 min, zero entities).
-        """
-        api = FakeCognee()
-        session = cognee_session(tmp_path, api)
-        session.close()
-        assert api.batch_sizes == [8]
-
-    def test_documents_are_ingested_in_groups_of_the_shipped_size(self) -> None:
-        """The blast-radius constant, asserted at its real boundary.
-
-        250 documents at 100 per pass is three groups — the arithmetic the
-        isolation depends on, checked without patching the constant away.
-        """
-        paths = [Path(f"doc-{index}.txt") for index in range(250)]
-        groups = cognee_adapter._document_groups(paths)
-        assert [len(group) for group in groups] == [100, 100, 50]
-        assert [path for group in groups for path in group] == paths
-        assert cognee_adapter._document_groups([]) == []
-
-    def test_each_group_is_one_add_and_one_cognify_against_one_dataset(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """★ Grouped cognify: the failure blast radius is one group.
-
-        A ``cognify`` is one cognee pipeline run, and a failed run is rolled
-        back whole — so five documents ingested two at a time are three
-        recoverable units instead of one all-or-nothing build (2026-07-29,
-        the second full-profile attempt: one think-spiralled chunk zeroed
-        3.1 hours of extraction).
-        """
-        monkeypatch.setattr(cognee_adapter, "_DOCS_PER_COGNIFY", 2)
-        api = FakeCognee()
-        report = build_over_threads(tmp_path, api, 5)
-        assert [len(group) for group in api.added] == [2, 2, 1]
-        # One dataset throughout: search has to span the whole corpus, and
-        # cognee's incremental loading is what keeps the re-visits free.
-        assert api.add_datasets == [cognee_adapter.DATASET] * 3
-        assert api.cognified == [[cognee_adapter.DATASET]] * 3
-        # The fan-out bound rides on every pass, not just the first.
-        assert api.batch_sizes == [8, 8, 8]
-        assert report.failures == []
-
-    def test_a_failed_group_is_recorded_with_its_index_and_the_rest_still_run(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """★ The isolation guarantee: group 2 dies, group 3 still indexes."""
-        monkeypatch.setattr(cognee_adapter, "_DOCS_PER_COGNIFY", 1)
-        api = FakeCognee(fail_cognify_groups=[2])
-        report = build_over_threads(tmp_path, api, 3)
-        assert api.cognify_attempts == 3
-        assert api.cognified == [[cognee_adapter.DATASET]] * 2  # groups 1 and 3
-        (failure,) = report.failures
-        assert failure.startswith("cognify[2/3]: ")
-        assert "cognify exploded on group 2" in failure
-
-    def test_a_failed_add_costs_only_its_own_group(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(cognee_adapter, "_DOCS_PER_COGNIFY", 1)
-        api = FakeCognee(fail_add_groups=[1])
-        report = build_over_threads(tmp_path, api, 3)
-        # The failed group is never cognified — nothing new to build from —
-        # while the two behind it are added and cognified as usual.
-        assert api.add_attempts == 3 and api.cognify_attempts == 2
-        (failure,) = report.failures
-        assert failure.startswith("add[1/3]: ")
-
-    def test_transcript_file_names_survive_unsafe_thread_ids(self) -> None:
-        assert cognee_adapter.transcript_filename(f"{THREAD}::2016-03-04") == (
-            "iMessage_-_15125550101_2016-03-04.txt"
-        )
-
-    def test_a_failed_add_skips_cognify_and_is_recorded(self, tmp_path: Path) -> None:
-        api = FakeCognee(fail_add=True)
-        session = cognee_adapter._CogneeSession(
-            api,
-            FakeSearchTypes,
-            workdir=tmp_path,
-            graph_engine=lambda: _resolved(FakeCogneeGraph()),
-        )
-        report = session.build([batch(message("g1"))])
-        session.close()
-        assert api.cognified == []
-        assert report.failures and "add exploded" in report.failures[0]
-
-    def test_a_failed_cognify_is_recorded(self, tmp_path: Path) -> None:
-        api = FakeCognee(fail_cognify=True)
-        session = cognee_adapter._CogneeSession(
-            api,
-            FakeSearchTypes,
-            workdir=tmp_path,
-            graph_engine=lambda: _resolved(FakeCogneeGraph()),
-        )
-        report = session.build([batch(message("g1"))])
-        session.close()
-        assert report.failures and "cognify exploded" in report.failures[0]
-
-    def test_an_empty_corpus_never_calls_the_engine(self, tmp_path: Path) -> None:
-        api = FakeCognee()
-        session = cognee_adapter._CogneeSession(
-            api,
-            FakeSearchTypes,
-            workdir=tmp_path,
-            graph_engine=lambda: _resolved(FakeCogneeGraph()),
-        )
-        assert session.build([]).messages_seen == 0
-        session.close()
-        assert api.added == [] and api.cognified == []
-
-    def test_query_answers_from_completion_and_maps_triplet_evidence(self, tmp_path: Path) -> None:
-        api = FakeCognee(
-            results={
-                FakeSearchTypes.GRAPH_COMPLETION: ["Bob prefers mechanical keyboards."],
-                FakeSearchTypes.CHUNKS: COGNEE_TRIPLETS,
-            }
-        )
-        session = cognee_session(tmp_path, api)
-        answer = session.query("What does Bob think about computers?")
-        session.close()
-        assert answer.answer == "Bob prefers mechanical keyboards."
-        assert answer.mode == cognee_adapter.PRIMARY_MODE
-        assert [e.name for e in answer.evidence.entities] == ["Bob", "mechanical keyboard"]
-        assert answer.evidence.relations[0].label == "prefers"
-        assert answer.evidence.communities == []  # cognee has no community layer
-
-    def test_provenance_resolves_through_the_written_file_name(self, tmp_path: Path) -> None:
-        stem = Path(cognee_adapter.transcript_filename(f"{THREAD}::2016-03-04")).stem
-        api = FakeCognee(
-            results={
-                FakeSearchTypes.GRAPH_COMPLETION: [f"see /work/documents/{stem}.txt"],
-                FakeSearchTypes.CHUNKS: [],
-            }
-        )
-        session = cognee_session(tmp_path, api)
-        answer = session.query("q")
-        session.close()
-        assert answer.evidence.message_guids == ["g1", "g2"]
-
-    def test_a_failed_search_answers_empty_rather_than_raising(self, tmp_path: Path) -> None:
-        session = cognee_session(tmp_path, FakeCognee(fail_search=True))
-        answer = session.query("q")
-        session.close()
-        assert answer.answer == ""
-        assert answer.evidence.message_guids == []
-
-    def test_an_unknown_search_type_is_skipped_with_a_warning(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        session = cognee_session(tmp_path, FakeCognee())
-        with caplog.at_level(logging.WARNING, logger="varagity.graph.engines.cognee"):
-            answer = session.query("q", mode="TELEPATHY")
-        session.close()
-        assert answer.mode == "TELEPATHY"
-        assert "unknown cognee search type" in caplog.text
-
-    def test_stats_read_the_graph_engine(self, tmp_path: Path) -> None:
-        session = cognee_session(tmp_path, FakeCognee())
-        assert session.stats() == GraphStats(entities=4, relations=3, communities=None)
-        session.close()
-
-    def test_unavailable_stats_are_reported_as_unknown(self, tmp_path: Path) -> None:
-        def boom() -> Any:
-            raise RuntimeError("no graph engine")
-
-        session = cognee_session(tmp_path, FakeCognee(), graph=boom)
-        assert session.stats() == GraphStats()
-        session.close()
-
-    @pytest.mark.parametrize(
-        ("results", "expected"),
-        [
-            (None, ""),
-            ("plain string", "plain string"),
-            ([" a ", "b"], "a\nb"),
-            ([{"answer": 1}], "{'answer': 1}"),
-            (42, "42"),
-            # The per-dataset wrapper cognee 1.4 returns live (Phase 3 gate):
-            # the answer is the search_result content, not the dict repr.
-            (
-                [{"dataset_id": "d-1", "dataset_name": "g", "search_result": ["He hated them."]}],
-                "He hated them.",
-            ),
-        ],
-    )
-    def test_answers_flatten_whatever_shape_search_returned(
-        self, results: Any, expected: str
-    ) -> None:
-        assert cognee_adapter.answer_from_results(results) == expected
-
-    def test_dataset_wrapped_evidence_maps_like_plain_evidence(self) -> None:
-        """The live per-dataset wrapper must not hide the payload inside it."""
-        wrapped = [{"dataset_name": "varagity_graph", "search_result": COGNEE_TRIPLETS}]
-        plain = cognee_adapter.evidence_from_search(COGNEE_TRIPLETS, None, {})
-        unwrapped = cognee_adapter.evidence_from_search(wrapped, None, {})
-        assert [e.name for e in unwrapped.entities] == [e.name for e in plain.entities]
-        assert len(unwrapped.relations) == len(plain.relations) == 1
-
-    @pytest.mark.parametrize(
-        "insights",
-        [None, "prose", [], [[1, 2, 3]], {"a": 1}, [[object(), object(), object()]]],
-    )
-    def test_unknown_evidence_shapes_degrade_instead_of_raising(self, insights: Any) -> None:
-        evidence = cognee_adapter.evidence_from_search(insights, None, {})
-        assert evidence.entities == [] and evidence.relations == []
-
-    def test_pydantic_insight_models_are_mapped(self) -> None:
-        node = SimpleNamespace(model_dump=lambda: {"name": "Jane"})
-        edge = SimpleNamespace(model_dump=lambda: {"relationship_name": "likes"})
-        other = SimpleNamespace(model_dump=lambda: {"name": "piano"})
-        evidence = cognee_adapter.evidence_from_search([[node, edge, other]], None, {})
-        assert [e.name for e in evidence.entities] == ["Jane", "piano"]
-        assert evidence.relations[0].label == "likes"
-
-    def test_the_environment_pins_point_cognee_at_the_local_endpoints(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings_env: Callable[..., None]
-    ) -> None:
-        settings_env(
-            BASE_MODEL_API_URL="http://llamacpp:8080/v1",
-            EMBEDDING_API_URL="http://infinity:8081/v1",
-        )
-        # Every pinned name goes through monkeypatch first: several of them
-        # (EMBEDDING_MODEL, EMBEDDING_API_KEY) are varagity's own setting
-        # names, so an unrestored write would leak into later tests' settings.
-        for name in cognee_adapter._env_pins(tmp_path):
-            monkeypatch.setenv(name, "stale")
-        cognee_adapter._pin_env(tmp_path)
-        assert os.environ["LLM_PROVIDER"] == "custom"
-        # LiteLLM (the custom-provider route) rejects a bare model name.
-        assert os.environ["LLM_MODEL"].startswith("openai/")
-        # A pre-flight guardrail must not fail a whole build (Phase 3 gate).
-        assert os.environ["COGNEE_SKIP_CONNECTION_TEST"] == "true"
-        # Multi-tenant mode wraps results and hides the graph from the stats
-        # context; the bake-off runs cognee single-user, like the repo.
-        assert os.environ["ENABLE_BACKEND_ACCESS_CONTROL"] == "false"
-        # Session memory would fold earlier answers into later ones and
-        # contaminate golden scoring.
-        assert os.environ["CACHING"] == "false"
-        # LiteLLM's own pin, not cognee's: its unset default resolves to a
-        # 600 s completion deadline, which a queued call on a single-slot
-        # server blows through (2026-07-28 full-profile run). Reaches the
-        # search path too — same GenericAPIAdapter, same transport.
-        assert os.environ["REQUEST_TIMEOUT"] == "3600"
-        assert os.environ["EMBEDDING_PROVIDER"] == "openai_compatible"
-        # the direct-SDK embedding path appends /v1 itself
-        assert os.environ["EMBEDDING_ENDPOINT"] == "http://infinity:8081"
-        assert os.environ["LLM_ENDPOINT"] == "http://llamacpp:8080/v1"
-
-
-# --------------------------------------------------------------------------
-# Graphiti
-# --------------------------------------------------------------------------
-
-
-class FakeDriver:
-    def __init__(self, counts: Sequence[Any] = (7, 5, 2)) -> None:
-        self.counts = list(counts)
-        self.queries: list[str] = []
-
-    async def execute_query(self, query: str) -> Any:
-        self.queries.append(query)
-        value = self.counts.pop(0)
-        if isinstance(value, Exception):
-            raise value
-        return [{"value": value}]
-
-
-@dataclass
-class FakeGraphiti:
-    """Stand-in for an initialized ``Graphiti`` instance."""
-
-    search_results: Any = None
-    fail_episodes: set[str] = field(default_factory=set)
-    fail_search: bool = False
-    fail_close: bool = False
-    episodes: list[dict[str, Any]] = field(default_factory=list)
-    communities_built: int = 0
-    closed: bool = False
-    driver: FakeDriver = field(default_factory=FakeDriver)
-
-    async def add_episode(self, **kwargs: Any) -> Any:
-        if kwargs["name"] in self.fail_episodes:
-            raise RuntimeError("extraction exploded")
-        self.episodes.append(kwargs)
-        return SimpleNamespace(episode=SimpleNamespace(uuid=f"uuid-{kwargs['name']}"))
-
-    async def build_communities(self) -> None:
-        self.communities_built += 1
-
-    async def search(self, question: str) -> Any:
-        if self.fail_search:
-            raise RuntimeError("search exploded")
-        return self.search_results
-
-    async def close(self) -> None:
-        if self.fail_close:
-            raise RuntimeError("close exploded")
-        self.closed = True
-
-
-GRAPHITI_EDGES = [
-    {
-        "source_node_uuid": "n-bob",
-        "target_node_uuid": "n-kb",
-        "name": "PREFERS",
-        "fact": "Bob prefers mechanical keyboards",
-        "episodes": ["uuid-g1", "uuid-unknown"],
-    },
-    {"nothing": "usable"},
-]
-
-
-def graphiti_session(*, llm: Any = None, **kwargs: Any) -> Any:
-    session = graphiti_adapter._GraphitiSession(
-        FakeGraphiti(**kwargs), "message", llm=llm or ScriptedLLM()
-    )
-    session.build([batch(message("g1"), message("g2", when=START + timedelta(minutes=1)))])
-    return session
-
-
-class TestGraphitiAdapter:
-    def test_build_adds_one_episode_per_message_under_one_group(self) -> None:
-        session = graphiti_session()
-        session.close()
-        engine = session._graphiti
-        assert [episode["name"] for episode in engine.episodes] == ["g1", "g2"]
-        assert {episode["group_id"] for episode in engine.episodes} == {graphiti_adapter.GROUP_ID}
-        assert engine.episodes[0]["source"] == "message"
-        # Communities are never built — the per-episode path is broken in
-        # graphiti-core 0.29.2 (Phase 3 gate) and the end-of-build pass can
-        # hang forever in an uncapped label-propagation loop (Phase 4 gate).
-        assert "update_communities" not in engine.episodes[0]
-        assert engine.communities_built == 0
-
-    def test_a_second_build_skips_episodes_already_added(self) -> None:
-        """Episode identity is message identity — an overlapping batch upserts."""
-        session = graphiti_session()
-        report = session.build(
-            [batch(message("g1"), message("g3", when=START + timedelta(days=1)))]
-        )
-        session.close()
-        assert [episode["name"] for episode in session._graphiti.episodes] == ["g1", "g2", "g3"]
-        assert report.messages_seen == 2  # what the batch held, not what was new
-
-    def test_a_failed_episode_is_recorded_and_the_run_continues(self) -> None:
-        session = graphiti_adapter._GraphitiSession(
-            FakeGraphiti(fail_episodes={"g1"}), "message", llm=ScriptedLLM()
-        )
-        report = session.build(
-            [batch(message("g1"), message("g2", when=START + timedelta(minutes=1)))]
-        )
-        session.close()
-        assert [episode["name"] for episode in session._graphiti.episodes] == ["g2"]
-        assert report.failures and "episode g1" in report.failures[0]
-
-    def test_the_community_pass_is_skipped_and_the_skip_is_recorded(self) -> None:
-        """★ Phase 4 gate: 0.29.2's uncapped label propagation can hang forever."""
-        session = graphiti_adapter._GraphitiSession(FakeGraphiti(), "message", llm=ScriptedLLM())
-        report = session.build([batch(message("g1"))])
-        session.close()
-        assert session._graphiti.communities_built == 0
-        assert report.failures and "build_communities" in report.failures[0]
-        assert "skipped" in report.failures[0]
-
-    def test_an_empty_corpus_records_no_community_skip(self) -> None:
-        session = graphiti_adapter._GraphitiSession(FakeGraphiti(), "message", llm=ScriptedLLM())
-        report = session.build([])
-        session.close()
-        assert report.messages_seen == 0
-        assert report.failures == []
-        assert session._graphiti.communities_built == 0
-
-    def test_query_synthesizes_an_answer_over_the_retrieved_facts(self) -> None:
-        """★ Decision #12: Graphiti returns facts, so the answer is ours."""
-        llm = ScriptedLLM()
-        session = graphiti_session(llm=llm, search_results=GRAPHITI_EDGES)
-        answer = session.query("What does Bob think about computers?")
-        session.close()
-        assert answer.answer == "Bob prefers mechanical keyboards."
-        assert answer.mode == graphiti_adapter.PRIMARY_MODE
-        assert answer.evidence.relations[0].description == "Bob prefers mechanical keyboards"
-        prompt = llm.calls[0]["messages"][0]["content"]
-        assert "- Bob prefers mechanical keyboards" in prompt
-        assert "What does Bob think about computers?" in prompt
-
-    def test_provenance_resolves_episode_uuids_recorded_during_the_build(self) -> None:
-        session = graphiti_session(search_results=GRAPHITI_EDGES)
-        answer = session.query("q")
-        session.close()
-        assert answer.evidence.message_guids == ["g1"]  # the unknown uuid is dropped
-
-    def test_a_combined_results_object_contributes_nodes_episodes_and_communities(self) -> None:
-        results = SimpleNamespace(
-            edges=GRAPHITI_EDGES,
-            nodes=[{"name": "Bob", "labels": ["Entity", "Person"], "summary": "a friend"}],
-            episodes=[{"name": "g2"}],
-            communities=[{"uuid": "c1", "name": "Hardware", "summary": "talk about PCs"}],
-        )
-        session = graphiti_session(search_results=results)
-        answer = session.query("q")
-        session.close()
-        assert [(e.name, e.type) for e in answer.evidence.entities] == [("Bob", "Person")]
-        assert [c.title for c in answer.evidence.communities] == ["Hardware"]
-        assert answer.evidence.message_guids == ["g2", "g1"]  # episodes first, then edges
-
-    def test_a_failed_search_still_produces_a_scored_answer(self) -> None:
-        session = graphiti_session(fail_search=True)
-        answer = session.query("q")
-        session.close()
-        assert answer.answer == "The graph returned no facts for this question."
-        assert answer.evidence.relations == []
-
-    def test_a_failed_synthesis_answers_empty_rather_than_raising(self) -> None:
-        session = graphiti_session(
-            llm=ScriptedLLM(RuntimeError("model down")), search_results=GRAPHITI_EDGES
-        )
-        assert session.query("q").answer == ""
-        session.close()
-
-    def test_a_reasoning_stage_never_reaches_the_answer(self) -> None:
-        """★ The same trap as condense/HyDE: generate() does not strip <think>."""
-        session = graphiti_session(
-            llm=ScriptedLLM("<think>weighing facts</think>Bob likes ARM."),
-            search_results=GRAPHITI_EDGES,
-        )
-        assert session.query("q").answer == "Bob likes ARM."
-        session.close()
-
-    def test_stats_count_entities_relations_and_communities(self) -> None:
-        session = graphiti_session()
-        assert session.stats() == GraphStats(entities=7, relations=5, communities=2)
-        session.close()
-
-    def test_a_failed_stats_query_reports_unknown_not_zero(self) -> None:
-        session = graphiti_session()
-        session._graphiti.driver = FakeDriver([RuntimeError("no such label"), 1, 0])
-        assert session.stats() == GraphStats(entities=None, relations=1, communities=0)
-        session.close()
-
-    def test_a_count_that_is_not_a_number_reports_unknown(self) -> None:
-        """A boolean is an int subclass, and a string is not a count at all."""
-        session = graphiti_session()
-        session._graphiti.driver = FakeDriver([True, "seven", {"value": 3}])
-        assert session.stats() == GraphStats(entities=None, relations=None, communities=3)
-        session.close()
-
-    @pytest.mark.parametrize(
-        ("nodes", "communities"),
-        [
-            ([{"summary": "nameless"}], [{"uuid": "c1"}]),
-            ([{"name": "Bob", "labels": "Entity"}], [{"summary": ""}]),
-        ],
-    )
-    def test_records_missing_their_load_bearing_field_are_dropped(
-        self, nodes: list[Any], communities: list[Any]
-    ) -> None:
-        results = SimpleNamespace(edges=[], nodes=nodes, episodes=[], communities=communities)
-        evidence = graphiti_adapter.evidence_from_search(results, {})
-        assert evidence.communities == []
-        assert [entity.type for entity in evidence.entities] == (
-            [] if len(nodes[0]) == 1 else [None]
-        )
-
-    def test_close_survives_a_failed_teardown(self) -> None:
-        session = graphiti_adapter._GraphitiSession(
-            FakeGraphiti(fail_close=True), "message", llm=ScriptedLLM()
-        )
-        session.close()
-
-    @pytest.mark.parametrize("results", [None, "prose", [], [{"nothing": 1}], 17])
-    def test_unknown_search_shapes_degrade_instead_of_raising(self, results: Any) -> None:
-        evidence = graphiti_adapter.evidence_from_search(results, {})
-        assert evidence.entities == [] and evidence.relations == []
-        assert evidence.message_guids == []
-
-    def test_pydantic_search_results_are_dumped_before_mapping(self) -> None:
-        edge = SimpleNamespace(model_dump=lambda mode: {"fact": "Jane plays piano"})
-        evidence = graphiti_adapter.evidence_from_search([edge], {})
-        assert evidence.relations[0].description == "Jane plays piano"
-
-    def test_facts_with_no_content_are_not_offered_to_the_synthesizer(self) -> None:
-        evidence = graphiti_adapter.evidence_from_search([{"source_node_uuid": "n1"}], {})
-        assert graph_answer.facts_block(evidence) == ""
-
-    def test_community_summaries_join_the_facts(self) -> None:
-        evidence = GraphEvidence(
-            communities=[
-                graphiti_adapter.GraphCommunity(id="c1", title="Hardware", summary="PC talk")
-            ]
-        )
-        assert graph_answer.facts_block(evidence) == "- community Hardware: PC talk"
-
-    def test_the_semaphore_pin_lands_before_the_engine_import(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("SEMAPHORE_LIMIT", "20")
-        graphiti_adapter._pin_env()
-        assert os.environ["SEMAPHORE_LIMIT"] == "1"
-
-
 class TestSessionProtocol:
-    def test_every_adapter_session_implements_the_whole_protocol(self, tmp_path: Path) -> None:
-        """Structural conformance — the harness drives all three identically."""
-        sessions: list[Any] = [
-            lightrag_adapter._LightRAGSession(FakeRag(), FakeQueryParam),
-            cognee_adapter._CogneeSession(
-                FakeCognee(),
-                FakeSearchTypes,
-                workdir=tmp_path,
-                graph_engine=lambda: _resolved(FakeCogneeGraph()),
-            ),
-            graphiti_adapter._GraphitiSession(FakeGraphiti(), "message", llm=ScriptedLLM()),
-        ]
+    def test_the_adapter_session_implements_the_whole_protocol(self, tmp_path: Path) -> None:
+        """Structural conformance — every caller drives the seam, not the adapter.
+
+        The protocol widened at stage 2 (resume/export/delete/statuses), so
+        this is what tells a *re-entering* engine what it owes: the harness,
+        the build runner, the query path, and the graph view all reach an
+        adapter only through these names.
+        """
+        session = new_session(tmp_path)
         try:
-            for session in sessions:
-                for method in GraphSession.__protocol_attrs__:
-                    assert callable(getattr(session, method)), (type(session), method)
+            for method in GraphSession.__protocol_attrs__:
+                assert callable(getattr(session, method)), method
         finally:
-            for session in sessions:
-                session.close()
+            session.close()
+
+    def test_the_protocol_names_the_whole_production_surface(self) -> None:
+        assert GraphSession.__protocol_attrs__ == {
+            "build",
+            "resume",
+            "query",
+            "stats",
+            "document_statuses",
+            "export",
+            "delete_documents",
+        }

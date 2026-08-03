@@ -247,6 +247,37 @@ class TestChatEngineValidation:
         assert len(CHAT_ENGINE_REGISTRY) == 2  # simple + condense_context
 
 
+class TestGraphEngineValidation:
+    """``GRAPH_ENGINE`` (spec_graphrag §5.2) — env-only, registry-pinned."""
+
+    def test_defaults_are_the_adr_017_decision(self) -> None:
+        settings = Settings(_env_file=None)
+        assert settings.GRAPH_ENGINE == "lightrag"
+        assert settings.GRAPH_STORAGE_PATH == "./graph-data"
+        # On is the acceptance gate's measured winner; passages stay
+        # unprefixed either way, so this needs no re-embedding to flip.
+        assert settings.GRAPH_QUERY_PREFIX is True
+
+    @pytest.mark.parametrize("bad", ["LightRAG", "", "made_up", "cognee", "graphiti"])
+    def test_unknown_engine_fails_fast(self, bad: str) -> None:
+        """Including the deleted bake-off losers: gone means gone."""
+        with pytest.raises(ValidationError, match="GRAPH_ENGINE"):
+            Settings(_env_file=None, GRAPH_ENGINE=bad)
+
+    def test_vocabulary_matches_the_registry(self) -> None:
+        """config.py hard-codes the tuple (circular import); keep them equal.
+
+        The guard that forces the validator tuple to grow in lockstep with
+        ``varagity/graph/engines/`` — registering an engine without widening
+        the vocabulary (or vice versa) fails here.
+        """
+        from varagity.graph.engines import GRAPH_ENGINE_REGISTRY
+
+        for name in sorted(GRAPH_ENGINE_REGISTRY):
+            assert name == Settings(_env_file=None, GRAPH_ENGINE=name).GRAPH_ENGINE
+        assert len(GRAPH_ENGINE_REGISTRY) == 1  # lightrag, since ADR-017
+
+
 class TestCondenseValidation:
     """The condense-stage knobs (spec_v3 §4.6) and their domains."""
 

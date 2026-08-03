@@ -1,25 +1,22 @@
-"""Rendering messages into what each graph engine eats (spec_graphrag §5.2, §10.2).
+"""Rendering messages into what the graph engine eats (spec_graphrag §5.2, §10.2).
 
-Two engine shapes need two renderings of the same messages, and both live
-here rather than in the adapters — pure functions over
+Rendering lives here rather than in the adapter — pure functions over
 :class:`~varagity.graph.sources.base.SourceMessage` are where most adapter
-correctness actually is, and they are testable without a single engine
-installed:
+correctness actually is, and they are testable without the engine installed.
+The shipped engine is document-shaped (ADR-017), so messages become thread
+transcripts split on day boundaries (:func:`thread_transcripts`). The
+episode-shaped rendering the bake-off's Graphiti seat ate went out with that
+adapter (stage-2 loser removal); git history has it if an episode-shaped
+engine ever re-enters the seam.
 
-* **Document-shaped** engines (LightRAG, cognee) ingest prose, so messages
-  become thread transcripts split on day boundaries
-  (:func:`thread_transcripts`).
-* **Episode-shaped** engines (Graphiti) ingest one timestamped event per
-  message (:func:`episode_payloads`), which is also the strongest provenance
-  story of the three — one graph episode *is* one message guid.
-
-Everything upstream of both is :func:`merge_batches`, the upsert seam: source
+Upstream of it is :func:`merge_batches`, the upsert seam: source
 files overlap (a re-export of a grown ``chat.db`` is a superset of the older
 one), so messages are guid-deduped across batches before anything is
 rendered. Rendering is then a **pure function of the merged messages**: the
 same thread-days always produce the same :attr:`TranscriptDoc.doc_key` and
-the same text, so an unchanged conversation stays upsert-identical in the
-document-shaped engines no matter how many times it is re-uploaded.
+the same text, so an unchanged conversation stays upsert-identical no matter
+how many times it is re-uploaded — which is exactly what
+:mod:`varagity.graph.manifest`'s content hashes turn into a build diff.
 
 Purity is why nothing here reads :func:`~varagity.config.get_settings`: the
 owner's display label rides in on
@@ -31,7 +28,7 @@ engines have already indexed under the same key.
 
 import logging
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 from pydantic import BaseModel
@@ -80,29 +77,6 @@ class TranscriptDoc(BaseModel):
     thread_name: str
     text: str
     message_guids: list[str]
-
-
-class EpisodePayload(BaseModel):
-    """One message as an episode, as the episode-shaped engines see it.
-
-    Attributes:
-        name: The message guid — episode identity *is* message identity, so
-            re-adding a message is recognizable rather than duplicative.
-        body: ``"Sender: text"``, with folded reactions on their own lines
-            (the same sentiment signal the transcripts carry, so the
-            bake-off compares engines rather than diets).
-        reference_time: When the message was sent (aware UTC) — the world
-            time an episode-shaped engine's bi-temporal edges hang off.
-        group_id: The engine's graph partition for this episode.
-        source_description: Human-facing provenance for the episode (the
-            thread label).
-    """
-
-    name: str
-    body: str
-    reference_time: datetime
-    group_id: str
-    source_description: str
 
 
 def merge_batches(batches: Sequence[MessageBatch]) -> list[SourceMessage]:
@@ -195,39 +169,6 @@ def thread_transcripts(
     return docs
 
 
-def episode_payloads(
-    messages: Sequence[SourceMessage],
-    *,
-    group_id: str | None = None,
-) -> list[EpisodePayload]:
-    """Render messages into one episode payload each, oldest first.
-
-    Args:
-        messages: Merged messages (any order; they are re-sorted here).
-        group_id: Graph partition for every episode. ``None`` partitions by
-            thread, which is the natural reading of a conversation — but an
-            episode-shaped engine resolves and dedupes entities *within* a
-            partition, so a corpus-wide value is what lets "Bob" in three
-            different threads be one node (what the §12 Q1 aggregation
-            questions need). Adapters pass an explicit value; the per-thread
-            default exists for callers that want the partitioned view.
-
-    Returns:
-        One payload per message, sorted by ``(timestamp, guid)``.
-    """
-    ordered = sorted(messages, key=lambda message: (message.timestamp, message.guid))
-    return [
-        EpisodePayload(
-            name=message.guid,
-            body=_render_lines([message], stamped=False),
-            reference_time=message.timestamp,
-            group_id=message.thread_id if group_id is None else group_id,
-            source_description=message.thread_name or message.thread_id,
-        )
-        for message in ordered
-    ]
-
-
 def doc_guid_index(docs: Sequence[TranscriptDoc]) -> dict[str, list[str]]:
     """Index transcript documents by key, for mapping citations back to messages.
 
@@ -314,7 +255,7 @@ def _by_day(messages: Sequence[SourceMessage]) -> dict[date, list[SourceMessage]
     return grouped
 
 
-def _render_lines(messages: Sequence[SourceMessage], *, stamped: bool = True) -> str:
+def _render_lines(messages: Sequence[SourceMessage]) -> str:
     """Render messages as transcript lines with their reactions folded in.
 
     Reactions are sorted by ``(kind, sender)`` rather than left in parse
@@ -323,16 +264,13 @@ def _render_lines(messages: Sequence[SourceMessage], *, stamped: bool = True) ->
 
     Args:
         messages: Messages to render, in order.
-        stamped: Whether to prefix each line with ``[YYYY-MM-DD HH:MM]``
-            (transcripts need the timestamp inline; an episode carries its
-            own ``reference_time`` field instead).
 
     Returns:
         The rendered block, newline-joined and without a trailing newline.
     """
     lines: list[str] = []
     for message in messages:
-        stamp = f"[{message.timestamp.strftime('%Y-%m-%d %H:%M')}] " if stamped else ""
+        stamp = message.timestamp.strftime("[%Y-%m-%d %H:%M] ")
         lines.append(f"{stamp}{message.sender_name}: {message.text}")
         lines.extend(
             f"  [{tapback.sender_name} {tapback.kind} this]"

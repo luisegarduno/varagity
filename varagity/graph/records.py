@@ -1,11 +1,12 @@
 """Engine-independent graph records (spec_graphrag §5.2, §10.2).
 
-Every bake-off adapter normalizes its engine's native payloads into these
-models, so the harness scores three very different engines through one shape
-and the ADR-017 tables compare like with like. They are pydantic (not
-dataclasses) for the same reason :class:`~varagity.graph.sources.base.SourceMessage`
-is: stage 2 puts them on the wire (graph evidence in the SSE stream, the
-graph-export endpoint) and in persisted eval results.
+Every adapter normalizes its engine's native payloads into these models —
+which is what let the ADR-017 bake-off score three very different engines
+through one shape, and what keeps the seam benchmark-revisitable now that
+one of them won. They are pydantic (not dataclasses) for the same reason
+:class:`~varagity.graph.sources.base.SourceMessage` is: they go on the wire
+(graph evidence in the SSE stream, the graph-export endpoint) and into
+persisted eval results.
 
 Two deliberate honesty rules run through the models:
 
@@ -45,9 +46,8 @@ class GraphRelation(BaseModel):
         source: Name of the edge's source entity.
         target: Name of the edge's target entity.
         label: Short relation label/keywords (``None`` when unlabelled).
-        description: The engine's longer description of the relation — for
-            Graphiti this is its *fact* string, which is the whole answer
-            substrate (plan decision #12).
+        description: The engine's longer description of the relation — the
+            *fact* our synthesis grounds on (:func:`varagity.graph.answer.facts_block`).
     """
 
     source: str
@@ -59,8 +59,11 @@ class GraphRelation(BaseModel):
 class GraphCommunity(BaseModel):
     """One community (cluster) summary the engine surfaced.
 
-    Only engines with a community tier ever populate this: Graphiti (label
-    propagation + LLM summaries) does, LightRAG and cognee do not (R1).
+    Only an engine with a community tier ever populates this, and the
+    shipped one has none (LightRAG builds no community layer at all — R1,
+    which is why the graph view clusters by ``entity_type`` instead). The
+    model stays because the seam does: an engine that *does* summarize
+    clusters slots in without a record change.
 
     Attributes:
         id: The engine's community identifier.
@@ -136,10 +139,11 @@ class GraphAnswer(BaseModel):
     """One engine's answer to one question, with its evidence.
 
     Attributes:
-        answer: The generated answer text, ``<think>``-stripped. For
-            LightRAG and cognee this is the engine's own answer pipeline;
-            for Graphiti it is our synthesis over its retrieved facts (plan
-            decision #12 — the asymmetry the ADR records).
+        answer: The generated answer text, ``<think>``-stripped. On a
+            ``+synthesis`` mode it is :mod:`varagity.graph.answer`'s
+            grounded answer over the retrieval (ADR-017's shipped design);
+            on an unsuffixed mode it is the engine's own answer pipeline,
+            kept so the bake-off's numbers stay reproducible.
         evidence: What the engine retrieved to produce it.
         mode: The engine query mode actually used (the ``--mode`` escape
             hatch records extra passes under their own mode name).
@@ -171,6 +175,61 @@ class BuildReport(BaseModel):
     messages_seen: int
     wall_clock_s: float
     failures: list[str] = []
+
+
+class GraphExportNode(BaseModel):
+    """One entity in a graph export, flattened for the wire.
+
+    Attributes:
+        id: The entity's canonical name — LightRAG's node id *is* the name.
+        entity_type: The engine's type/category, which is what the view
+            colors and clusters by (LightRAG builds no community tier, so
+            type is the honest grouping — ADR-017).
+        description: The engine's merged description of the entity.
+        degree: How many of **this export's** edges touch the node. It is a
+            subgraph degree, not a whole-graph one: an export is capped and
+            degree-ordered, so the number describes the picture being drawn.
+    """
+
+    id: str
+    entity_type: str | None = None
+    description: str | None = None
+    degree: int = 0
+
+
+class GraphExportEdge(BaseModel):
+    """One relation in a graph export, flattened for the wire.
+
+    Attributes:
+        id: Stable edge identity within the export (``source-target``).
+        source: Name of the edge's source entity.
+        target: Name of the edge's target entity.
+        label: Short relation label/keywords (``None`` when unlabelled).
+        description: The engine's longer description of the relation.
+    """
+
+    id: str
+    source: str
+    target: str
+    label: str | None = None
+    description: str | None = None
+
+
+class GraphExport(BaseModel):
+    """A renderable slice of the whole graph (spec_graphrag §4.4).
+
+    Attributes:
+        nodes: The exported entities, engine order (degree-descending for a
+            whole-graph export).
+        edges: Every edge between exported nodes.
+        truncated: Whether the cap hid nodes the graph actually holds — the
+            honesty flag the view must surface rather than silently
+            pretending it drew everything.
+    """
+
+    nodes: list[GraphExportNode] = []
+    edges: list[GraphExportEdge] = []
+    truncated: bool = False
 
 
 class GraphStats(BaseModel):

@@ -143,7 +143,7 @@ uv run main.py -v 2 chat           # verbose: full chunk/retrieval panels
 uv run --group eval main.py eval       # 7-config retrieval matrix + chunker sweep
 uv run --group eval main.py eval ocr   # OCR engine benchmark
 uv run --group eval main.py eval chat  # multi-turn chat-engine eval (ADR-011)
-uv run --group bakeoff main.py eval graph   # GraphRAG bake-off (ADR-017) — see below
+uv run main.py eval graph              # GraphRAG regression harness (ADR-017) — see below
 ```
 
 **The browser flow** is the same pipeline without a terminal: at
@@ -367,28 +367,30 @@ graph engine **sequentially**, and scores their answers against a golden
 QA set by fact recall and provenance recall.
 
 ```bash
-uv sync --group bakeoff                            # once — the engines are heavy
-uv run --group bakeoff main.py eval graph          # smoke profile, all engines
-uv run --group bakeoff main.py eval graph --profile full --engine lightrag
+uv run main.py eval graph                          # smoke profile, every registered engine
+uv run main.py eval graph --profile full --engine lightrag
 ```
 
-- **`--group bakeoff`, not `--group eval`.** The three engine libraries
-  (`lightrag-hku`, `cognee`, `graphiti-core[falkordblite]`) live in their
-  own dependency group that is deliberately **excluded from `dev`**, so
-  CI never installs them. A selected engine whose library is missing
-  fails with a message naming the group.
+- **No extra dependency group.** The shipped engine (`lightrag-hku`) is a
+  main dependency since ADR-017 — a plain `uv sync` is enough. The
+  bake-off's `bakeoff` group, which carried cognee and graphiti-core,
+  went out with the losing adapters; git history has both if a candidate
+  ever re-enters the seam.
 - **Needs the live GPU services, not Docker stores.** llama.cpp and
   infinity must be up; postgres/Elasticsearch are irrelevant because
   graph engines self-store. Running from the host means the usual
   endpoint overrides — see
-  [Host-vs-container `.env` usage](#host-vs-container-env-usage).
+  [Host-vs-container `.env` usage](#host-vs-container-env-usage) — and
+  that includes `PREFECT_API_URL=http://localhost:4200/api`: the harness
+  is a Prefect flow, so the two model URLs alone die at flow start on the
+  in-container `prefect` hostname.
 - **Artifacts** (all gitignored): corpora and per-engine working
   directories under `data/eval/graph/`, results at
   `data/eval/results/<timestamp>-graph.json`.
 - **While a run is in flight, use `uv run --no-sync` for everything
-  else.** A plain `uv run` in another shell re-syncs the virtualenv and
-  can prune the `bakeoff` group out from under the live process — a
-  multi-hour index dies to an unrelated command.
+  else.** A plain `uv run` in another shell re-syncs the virtualenv, and
+  a sync that changes a package under a live process kills a multi-hour
+  index for an unrelated command.
 
 **Flags**
 
@@ -431,10 +433,12 @@ Per-message index cost is the number that scales: **7.2 s** (LightRAG),
 **5.1 s** (cognee), **40.0 s** (Graphiti — which is why it ran capped; an
 uncapped 10,001-message build extrapolates to ~4.6 days).
 
-The `-m bakeoff` pytest marker (`uv run --group bakeoff pytest -m bakeoff
---no-cov`) is the tiny per-engine live smoke test — build ~30 messages,
-ask one question. `--no-cov` because any `-m` run trips the repo-wide
-coverage floor.
+The `-m bakeoff` pytest marker (`uv run pytest -m bakeoff --no-cov`) is
+the tiny live smoke test — build ~30 messages, ask one question, re-build
+unchanged, and check the workdir sidecars. The marker keeps its bake-off
+name but now just means "runs the real engine against the live GPU
+services". `--no-cov` because any `-m` run trips the repo-wide coverage
+floor.
 
 ## Volumes and resets
 

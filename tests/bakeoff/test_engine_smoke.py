@@ -1,22 +1,22 @@
-"""Per-engine smoke build + query against the live stack (spec_graphrag §8).
+"""Graph-engine smoke build + query against the live stack (spec_graphrag §8).
 
-Local only, like ``-m integration`` and ``-m e2e``: this layer needs the
-``bakeoff`` dependency group installed **and** llama.cpp + infinity running,
-so CI never selects it (the default ``addopts`` deselect the marker).
+Local only, like ``-m integration`` and ``-m e2e``: this layer needs
+llama.cpp + infinity running, so CI never selects it (the default ``addopts``
+deselect the marker). The engine library itself is a main dependency since
+ADR-017, so a plain sync is enough:
 
-    uv run --group bakeoff pytest -m bakeoff
+    uv run pytest -m bakeoff --no-cov
 
-Each engine builds a graph over the first few dozen scripted fixture
-messages and answers one golden question. The assertions are deliberately
-about plumbing, not recall — an engine that produces *an* answer with
-well-formed evidence has its endpoints, embedding dimensions, storage, and
-``<think>`` handling wired correctly, which is what Phase 3's manual gate
-checks. Recall is scored by ``eval graph`` in Phase 4, and the numbers land
-in ADR-017 in Phase 5.
+The engine builds a graph over the first few dozen scripted fixture messages
+and answers one golden question. The assertions are deliberately about
+plumbing, not recall — an engine that produces *an* answer with well-formed
+evidence has its endpoints, embedding dimensions, storage, ``<think>``
+handling, and (since stage 2) its **threaded session and manifest upsert**
+wired correctly. Recall is scored by ``eval graph``; the numbers live in
+ADR-017.
 
-The wall clock per engine is printed (run with ``-s`` to see it): those
-figures are the first real datapoint for scheduling the full-profile runs,
-which are expected to take hours per engine at 10⁴ messages on a single slot.
+The wall clock is printed (run with ``-s`` to see it): that figure is the
+per-message datapoint the runbook's backfill estimates are built from.
 """
 
 import time
@@ -31,6 +31,7 @@ from varagity.eval.graph_fixtures import GRAPH_GOLDEN_PATH, build_fixture_chat_d
 # Importing the *package* is what self-registers the adapters (the registry
 # idiom) — varagity.graph.base alone would leave the registry empty.
 from varagity.graph.engines import GRAPH_ENGINE_REGISTRY, get_graph_engine
+from varagity.graph.manifest import load_manifest, load_summary
 from varagity.graph.records import BuildReport, GraphAnswer
 from varagity.graph.sources.base import MessageBatch, batch_for_path
 
@@ -38,8 +39,8 @@ pytestmark = pytest.mark.bakeoff
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Enough scripted messages for a real extraction pass, few enough that three
-# engines can each index them in a coffee break on a single-slot llama.cpp.
+# Enough scripted messages for a real extraction pass, few enough that the
+# engine can index them in a coffee break on a single-slot llama.cpp.
 _MESSAGE_LIMIT = 30
 
 
@@ -85,15 +86,23 @@ def test_engine_builds_a_graph_and_answers(
         report = session.build([smoke_batch])
         build_s = time.perf_counter() - started
         stats = session.stats()
+        statuses = session.document_statuses()
         answer = session.query(golden_question.query)
+        export = session.export(max_nodes=50)
+        # A second build over the same corpus must cost nothing: every
+        # document is content-identical, so the diff has nothing pending.
+        started = time.perf_counter()
+        session.build([smoke_batch])
+        rebuild_s = time.perf_counter() - started
 
     evidence = answer.evidence
     # The manual gate is a spot-read, so show what came back, not just that it
-    # did: the answer text plus an evidence digest, per engine.
+    # did: the answer text plus an evidence digest.
     print(
         f"\n[{engine_name}] build {build_s:.1f}s for {report.messages_seen} message(s), "
         f"{len(report.failures)} failure(s); stats={stats.model_dump()}; "
-        f"query {answer.latency_s:.1f}s"
+        f"statuses={statuses}; query {answer.latency_s:.1f}s; "
+        f"unchanged rebuild {rebuild_s:.1f}s"
     )
     for failure in report.failures:
         print(f"[{engine_name}] build failure: {failure}")
@@ -104,6 +113,10 @@ def test_engine_builds_a_graph_and_answers(
         f"{[entity.name for entity in evidence.entities[:8]]}, "
         f"{len(evidence.relations)} relation(s), {len(evidence.communities)} community(ies), "
         f"{len(evidence.message_guids)} message guid(s)"
+    )
+    print(
+        f"[{engine_name}] export: {len(export.nodes)} node(s), {len(export.edges)} edge(s), "
+        f"truncated={export.truncated}"
     )
 
     assert isinstance(report, BuildReport)
@@ -119,3 +132,17 @@ def test_engine_builds_a_graph_and_answers(
     # entity, relation, or message either failed extraction or failed
     # retrieval — both are findings worth failing the smoke gate over.
     assert evidence.entities or evidence.relations or evidence.message_guids
+    # The export the graph view will draw from.
+    assert export.nodes, "the graph exported no nodes to draw"
+    assert all(node.id for node in export.nodes)
+
+    # ★ The stage-2 sidecars: the build's durable record of what it indexed.
+    manifest = load_manifest(workdir)
+    assert manifest.docs, "the build wrote no manifest"
+    assert manifest.message_guid_count() == len(smoke_batch.messages)
+    summary = load_summary(workdir)
+    assert summary is not None
+    assert summary.entities == stats.entities
+    # An unchanged rebuild is a diff, not an index: it must be far cheaper
+    # than the build, which is the property incremental backfills rest on.
+    assert rebuild_s < build_s

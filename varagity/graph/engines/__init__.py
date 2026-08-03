@@ -2,19 +2,18 @@
 
 Importing this package imports every adapter module so each
 ``@register``-decorated engine self-registers (the spec §5.1 pattern applied
-to the graph-engine family — spec_graphrag §5.2). The three registered here
-are the ADR-017 bake-off seats: ``lightrag``, ``cognee``, and ``graphiti``.
+to the graph-engine family — spec_graphrag §5.2). Since ADR-017 there is one
+seat: ``lightrag``. The losing bake-off adapters (``cognee``, ``graphiti``)
+were deleted at stage-2 start — git history preserves them, and **the seam is
+what stays**, so the decision remains benchmark-revisitable exactly as the
+retriever and chat-engine registries are.
 
-**Importing this package must not import a single engine library.** Each
-adapter imports its heavy dependency inside
-:meth:`~varagity.graph.base.GraphEngine.session` (plan decision #8), so the
-registry is free, CI never installs the ``bakeoff`` dependency group, and a
-machine with only one engine installed can still run the harness against that
-one. ``tests/unit/test_graph_engines.py`` fails if that ever regresses.
-
-The losing adapters are deleted once ADR-017 lands (plan decision #14); the
-protocol and this registry are what stay, so the decision remains
-benchmark-revisitable.
+**Importing this package must not import a single engine library.** The
+adapter imports ``lightrag`` inside
+:meth:`~varagity.graph.base.GraphEngine.session` (stage-1 decision #8) even
+though it is a main dependency now, so the registry stays free, unit tests
+never touch the engine, and CI's collection cost is unchanged.
+``tests/unit/test_graph_engines.py`` fails if that ever regresses.
 """
 
 from varagity.graph.base import (
@@ -24,8 +23,6 @@ from varagity.graph.base import (
     get_graph_engine,
     register,
 )
-from varagity.graph.engines import cognee as _cognee  # noqa: F401  (self-registration import)
-from varagity.graph.engines import graphiti as _graphiti  # noqa: F401  (self-registration import)
 from varagity.graph.engines import lightrag as _lightrag  # noqa: F401  (self-registration import)
 
 __all__ = [

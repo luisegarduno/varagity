@@ -1,9 +1,11 @@
-"""The graph bake-off harness — ``eval graph`` (spec_graphrag §12, §8.2).
+"""The graph harness — ``eval graph`` (spec_graphrag §12, §8.2).
 
-The fourth eval subcommand, and the one that decides ADR-017: build the
+The fourth eval subcommand, and the one that decided ADR-017: build the
 synthetic message corpus, run every selected registered graph engine over it
 sequentially, and score each engine's *answers* — because a graph engine
-returns prose, not chunk ids.
+returns prose, not chunk ids. With the ADR accepted it stays on as the graph
+regression guard: a retrieval-side change (query mode, the e5 prefix, a
+rerank hook) is one ``--skip-build`` re-score away from a number.
 
 Structurally this is :func:`varagity.eval.evaluate.run_chat_eval` again
 (registry-enumerated engine loop, pinned settings, fact-anchored scoring,
@@ -51,9 +53,10 @@ grown ``chat.db`` costs. The delta messages are generator filler, which is
 blocklist-guaranteed never to mention a golden term, so the check cannot
 perturb the scores that follow it.
 
-Engine libraries stay call-time imports (plan decision #8): selecting an
-engine whose library is missing raises a clear error naming the ``bakeoff``
-dependency group, and nothing here needs an engine installed to import.
+Engine libraries stay call-time imports (stage-1 decision #8) even though the
+shipped engine is a main dependency now: nothing here needs an engine
+installed to *import*, and selecting one whose library is missing raises a
+clear error naming the sync that would fix it.
 """
 
 import logging
@@ -117,8 +120,6 @@ INCREMENTAL_DELTA_MESSAGES = 10
 # regression test" idiom; ``tests/unit/test_graph_eval.py`` fails if this map
 # and the registry ever diverge.
 ENGINE_DISTRIBUTIONS: dict[str, str] = {
-    "cognee": "cognee",
-    "graphiti": "graphiti-core",
     "lightrag": "lightrag-hku",
 }
 
@@ -477,13 +478,15 @@ def select_engines(engines: Sequence[str] | None) -> list[str]:
 
     Args:
         engines: Requested engine names, or ``None`` for every registered
-            engine (the bake-off enumerates the registry; there is no
-            ``GRAPH_ENGINE`` setting until stage 2).
+            engine. The harness enumerates the registry rather than reading
+            ``GRAPH_ENGINE``: comparing engines is the whole point, and a
+            candidate re-entering the seam must be measurable without an
+            app-wide setting change.
 
     Returns:
         The engine names to run, sorted — the harness runs them sequentially
-        (plan decision #15: one llama.cpp slot, and cognee's configuration is
-        process-global).
+        (stage-1 decision #15: there is one llama.cpp slot, so parallel
+        engines would only queue behind each other).
 
     Raises:
         ValueError: If a requested name is not registered, or the filter
@@ -554,9 +557,8 @@ def open_engine_session(name: str, workdir: Path) -> Iterator[GraphSession]:
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             f"graph engine {name!r} needs a library that is not installed "
-            f"(no module named {exc.name!r}). The bake-off engines live in the `bakeoff` "
-            "dependency group — run `uv run --group bakeoff main.py eval graph` "
-            "(or `uv sync --group bakeoff` first)."
+            f"(no module named {exc.name!r}). The shipped engine is a main dependency — "
+            "run `uv sync`, then `uv run main.py eval graph`."
         ) from exc
 
 
@@ -593,15 +595,15 @@ def run_graph_eval(
 ) -> dict[str, Any]:
     """Run the graph bake-off over the fixture corpus; persist results (§12).
 
-    The sequence, once per selected engine (sequentially — plan decision #15):
-    wipe its working directory, index the corpus, run the incremental
+    The sequence, once per selected engine (sequentially — stage-1 decision
+    #15): wipe its working directory, index the corpus, run the incremental
     re-index check, then ask every golden question and score the answers. The
     corpus is generated first and its manifest pins the parser's naming
     settings, so the messages the engines index say "Bob Nakamura" rather than
     a phone number.
 
-    This harness decides ADR-017 and then stays on as the graph regression
-    guard, exactly as the chat eval did for ADR-011.
+    This harness decided ADR-017 and stays on as the graph regression guard,
+    exactly as the chat eval did for ADR-011.
 
     Args:
         profile: Fixture corpus profile — ``smoke`` (~226 scripted messages,
@@ -647,9 +649,10 @@ def run_graph_eval(
     verbose = check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
     selected = select_engines(engines)
 
-    # Engines consume their workdir verbatim, and cognee's config rejects a
-    # relative path outright — so the CLI's repo-relative default must become
-    # absolute before any session opens.
+    # Engines consume their workdir verbatim, from whatever cwd they happen
+    # to run in (a bake-off candidate rejected a relative path outright,
+    # 2026-07-26), so the CLI's repo-relative default must become absolute
+    # before any session opens. `GraphService` resolves for the same reason.
     eval_root = eval_root.resolve()
     corpus_dir = eval_root / "corpus"
     stem = corpus_stem(profile, message_target)

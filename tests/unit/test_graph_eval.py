@@ -322,7 +322,7 @@ class TestEngineVersions:
         assert set(ENGINE_DISTRIBUTIONS) == set(GRAPH_ENGINE_REGISTRY)
 
     def test_a_mapped_engine_stamps_its_version_when_installed(self) -> None:
-        """Both branches are legitimate: CI has no bakeoff group, this host may."""
+        """The shipped engine is a main dependency, so this stamps a real version."""
         stamped = engine_versions(sorted(ENGINE_DISTRIBUTIONS))
         assert set(stamped) == set(ENGINE_DISTRIBUTIONS)
         assert all(value is None or value for value in stamped.values())
@@ -470,7 +470,7 @@ class TestPrepareCorpus:
 
 
 class TestOpenEngineSession:
-    def test_a_missing_engine_library_names_the_bakeoff_group(self) -> None:
+    def test_a_missing_engine_library_names_the_sync_that_fixes_it(self) -> None:
         """An adapter's lazy engine import fails inside ``session()``."""
 
         class MissingEngine:
@@ -491,7 +491,7 @@ class TestOpenEngineSession:
         message = str(excinfo.value)
         assert "_missing" in message
         assert "lightrag" in message
-        assert "--group bakeoff" in message
+        assert "uv sync" in message
 
     def test_a_healthy_session_is_yielded_and_closed(self, probe: ProbeEngine) -> None:
         with open_engine_session("_probe", Path("workdir")) as session:
@@ -539,7 +539,7 @@ class TestRunGraphEval:
     def test_a_relative_eval_root_still_hands_engines_absolute_workdirs(
         self, tmp_path: Path, at_repo_root: None, probe: ProbeEngine
     ) -> None:
-        """Live-gate regression (2026-07-26): cognee rejects relative paths."""
+        """Live-gate regression (2026-07-26): an engine rejected a relative path."""
         relative_root = Path(os.path.relpath(tmp_path / "graph", _REPO_ROOT))
         assert not relative_root.is_absolute()
         run_graph_eval(

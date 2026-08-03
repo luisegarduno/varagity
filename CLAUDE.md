@@ -90,7 +90,7 @@ uv run uvicorn varagity.api.main:create_app --factory --port 8000   # API on the
 uv run --group eval main.py eval       # 7-config retrieval matrix + chunker sweep (needs Docker + live GPU services)
 uv run --group eval main.py eval ocr   # OCR engine benchmark
 uv run --group eval main.py eval chat  # multi-turn chat-engine eval (the ADR-011 decision harness)
-uv run --group bakeoff main.py eval graph  # GraphRAG engine bake-off (the ADR-017 harness; `bakeoff` group + live GPUs, no stores)
+uv run main.py eval graph              # graph-engine eval (the ADR-017 harness; live GPUs + Prefect, no stores)
 
 uv run pytest                      # unit suite incl. async API tests (coverage floor 90%)
 uv run pytest -m integration       # real Postgres/ES via testcontainers (needs Docker)

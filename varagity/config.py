@@ -286,6 +286,15 @@ class Settings(BaseSettings):
             (copied iMessage ``chat.db`` files; spec_graphrag §10.2, Q4) — a
             separate root from ``DOCS_PATH``, gitignored like it, never mixed
             into the chunk-RAG corpus.
+        GRAPH_STORAGE_PATH: Root for the graph engine's self-stored working
+            directory (``<root>/<engine>/``; ADR-017 pinned file storage). In
+            compose this is the ``graphdata`` named volume, mounted into the
+            **api** service only: the API process is the single writer, which
+            is why there is deliberately no CLI graph build.
+        GRAPH_ENGINE: Registry name of the graph engine
+            (:data:`varagity.graph.base.GRAPH_ENGINE_REGISTRY`). Env-only —
+            switching engines re-indexes the corpus from scratch, which is
+            not a settings-drawer action. ADR-017 chose ``lightrag``.
         GRAPH_OWNER_ALIASES: Comma-separated names the owner is referred to
             by *in message text* (e.g. ``"John,John Doe"``); the first is
             the owner's display label (:attr:`graph_owner_label`). iMessage
@@ -305,8 +314,10 @@ class Settings(BaseSettings):
             :func:`varagity.models.embeddings.format_query` owns the format).
             Passages are never prefixed either way — which is what e5
             requires of documents — so this changes retrieval **without**
-            re-embedding the graph. Off is the ADR-017 bake-off's recorded
-            behavior; the shipped default is whatever the gate measured.
+            re-embedding the graph. Off was the ADR-017 bake-off's recorded
+            behavior; **on** is the shipped default, measured by the
+            acceptance gate (2026-08-03: prefixed ``mix`` scored 0.4216 fact
+            recall against the 0.37 bar).
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -403,14 +414,17 @@ class Settings(BaseSettings):
     PROMETHEUS_PORT: int = 9090
     GRAFANA_PORT: int = 3001
 
-    # Graph corpus (spec_graphrag §10) — the GraphRAG message corpus root and
-    # the owner/handle identity the iMessage parser consumes. Engine selection
-    # and runtime budgets land with their stage-2 consumer (no dead config).
+    # Graph corpus (spec_graphrag §10) — the GraphRAG message corpus root, the
+    # engine and its storage root, and the owner/handle identity the iMessage
+    # parser consumes. The runtime query budgets land with their consumers in
+    # the later stage-2 phases (no dead config).
     GRAPH_DOCS_PATH: str = "./graph-docs"
+    GRAPH_STORAGE_PATH: str = "./graph-data"
+    GRAPH_ENGINE: str = "lightrag"  # benchmark-decided default (ADR-017)
     GRAPH_OWNER_ALIASES: str = ""
     GRAPH_HANDLE_NAMES: str = ""
     GRAPH_HANDLE_NAMES_FILE: str = ""
-    GRAPH_QUERY_PREFIX: bool = False
+    GRAPH_QUERY_PREFIX: bool = True  # gate-measured default (ADR-017)
 
     @property
     def allowed_extension_set(self) -> frozenset[str]:
@@ -967,6 +981,32 @@ class Settings(BaseSettings):
         """
         if value not in (0, 1, 2):
             raise ValueError(f"DEFAULT_VERBOSE must be 0 (off), 1 (low), or 2 (high); got {value}")
+        return value
+
+    @field_validator("GRAPH_ENGINE")
+    @classmethod
+    def _validate_graph_engine(cls, value: str) -> str:
+        """Reject graph engines outside the spec_graphrag §5.2 vocabulary.
+
+        The vocabulary is hard-coded (mirroring :meth:`_validate_chat_engine`)
+        because importing the engine registry here would be circular —
+        ``varagity/graph/`` reads this module through its model clients and
+        its own adapter. The tuple is regression-tested to equal
+        ``varagity.graph.engines.GRAPH_ENGINE_REGISTRY`` and grows in lockstep
+        with it.
+
+        Args:
+            value: The configured ``GRAPH_ENGINE`` value.
+
+        Returns:
+            The validated value, unchanged.
+
+        Raises:
+            ValueError: If ``value`` is not a registered engine name.
+        """
+        allowed = ("lightrag",)
+        if value not in allowed:
+            raise ValueError(f"GRAPH_ENGINE must be one of {allowed}; got {value!r}")
         return value
 
     @field_validator("GRAPH_HANDLE_NAMES")

@@ -133,11 +133,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_verbose_option(eval_chat, default=argparse.SUPPRESS)
     eval_graph = eval_targets.add_parser(
         "graph",
-        help="run the GraphRAG bake-off over the synthetic message corpus (ADR-017)",
+        help="score the GraphRAG engine over the synthetic message corpus (ADR-017)",
         description="Build the synthetic iMessage fixture corpus, index it with every "
         "registered graph engine, and score their answers by fact and provenance recall "
-        "(spec_graphrag §12). Needs the `bakeoff` dependency group and the live GPU "
-        "services — but no Docker stores: graph engines self-store.",
+        "(spec_graphrag §12). Needs the live GPU services — but no Docker stores: graph "
+        "engines self-store.",
     )
     _add_verbose_option(eval_graph, default=argparse.SUPPRESS)
     eval_graph.add_argument(
