@@ -656,7 +656,13 @@ class FakeCogneeGraph:
 
 
 class FakeCognee:
-    """Stand-in for the ``cognee`` module."""
+    """Stand-in for the ``cognee`` module.
+
+    Ingestion is grouped, so the double counts *attempts* as well as
+    successes: ``fail_add_groups``/``fail_cognify_groups`` fail one specific
+    group (1-based) and leave the rest working, which is how the isolation
+    guarantee is asserted.
+    """
 
     def __init__(
         self,
@@ -665,23 +671,35 @@ class FakeCognee:
         fail_add: bool = False,
         fail_cognify: bool = False,
         fail_search: bool = False,
+        fail_add_groups: Sequence[int] = (),
+        fail_cognify_groups: Sequence[int] = (),
     ) -> None:
         self.results = results or {}
         self.fail_add = fail_add
         self.fail_cognify = fail_cognify
         self.fail_search = fail_search
+        self.fail_add_groups = set(fail_add_groups)
+        self.fail_cognify_groups = set(fail_cognify_groups)
         self.added: list[list[str]] = []
+        self.add_datasets: list[str] = []
         self.cognified: list[list[str]] = []
+        self.batch_sizes: list[int | None] = []
+        self.add_attempts = 0
+        self.cognify_attempts = 0
 
     async def add(self, paths: list[str], *, dataset_name: str) -> None:
-        if self.fail_add:
-            raise RuntimeError("add exploded")
+        self.add_attempts += 1
+        if self.fail_add or self.add_attempts in self.fail_add_groups:
+            raise RuntimeError(f"add exploded on group {self.add_attempts}")
         self.added.append(paths)
+        self.add_datasets.append(dataset_name)
 
-    async def cognify(self, *, datasets: list[str]) -> None:
-        if self.fail_cognify:
-            raise RuntimeError("cognify exploded")
+    async def cognify(self, *, datasets: list[str], chunks_per_batch: int | None = None) -> None:
+        self.cognify_attempts += 1
+        if self.fail_cognify or self.cognify_attempts in self.fail_cognify_groups:
+            raise RuntimeError(f"cognify exploded on group {self.cognify_attempts}")
         self.cognified.append(datasets)
+        self.batch_sizes.append(chunks_per_batch)
 
     async def search(self, *, query_text: str, query_type: str, datasets: list[str]) -> Any:
         if self.fail_search:
@@ -711,6 +729,24 @@ def cognee_session(tmp_path: Path, api: FakeCognee, *, graph: Any = None) -> Any
     return session
 
 
+def build_over_threads(tmp_path: Path, api: FakeCognee, count: int) -> BuildReport:
+    """Build a corpus of ``count`` threads, i.e. ``count`` transcript documents."""
+    session = cognee_adapter._CogneeSession(
+        api,
+        FakeSearchTypes,
+        workdir=tmp_path,
+        graph_engine=lambda: _resolved(FakeCogneeGraph()),
+    )
+    messages = [
+        message(f"g{index}", thread_id=f"thread-{index}", thread_name=f"Thread {index}")
+        for index in range(count)
+    ]
+    try:
+        return session.build([batch(*messages)])
+    finally:
+        session.close()
+
+
 async def _resolved(value: Any) -> Any:
     return value
 
@@ -724,6 +760,79 @@ class TestCogneeAdapter:
         assert api.cognified == [[cognee_adapter.DATASET]]
         assert Path(written[0]).read_text(encoding="utf-8").startswith("Thread: Hardware Talk")
         assert Path(written[0]).parent == tmp_path / "documents"
+
+    def test_cognify_bounds_its_extraction_fan_out(self, tmp_path: Path) -> None:
+        """Extraction gathers over a whole batch with no concurrency cap.
+
+        The batch size is therefore the queue depth on a single-slot
+        llama.cpp, and cognee's default of 100 put the tail request's wait
+        past LiteLLM's deadline (2026-07-28, the first full-profile run:
+        76 min, zero entities).
+        """
+        api = FakeCognee()
+        session = cognee_session(tmp_path, api)
+        session.close()
+        assert api.batch_sizes == [8]
+
+    def test_documents_are_ingested_in_groups_of_the_shipped_size(self) -> None:
+        """The blast-radius constant, asserted at its real boundary.
+
+        250 documents at 100 per pass is three groups — the arithmetic the
+        isolation depends on, checked without patching the constant away.
+        """
+        paths = [Path(f"doc-{index}.txt") for index in range(250)]
+        groups = cognee_adapter._document_groups(paths)
+        assert [len(group) for group in groups] == [100, 100, 50]
+        assert [path for group in groups for path in group] == paths
+        assert cognee_adapter._document_groups([]) == []
+
+    def test_each_group_is_one_add_and_one_cognify_against_one_dataset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ Grouped cognify: the failure blast radius is one group.
+
+        A ``cognify`` is one cognee pipeline run, and a failed run is rolled
+        back whole — so five documents ingested two at a time are three
+        recoverable units instead of one all-or-nothing build (2026-07-29,
+        the second full-profile attempt: one think-spiralled chunk zeroed
+        3.1 hours of extraction).
+        """
+        monkeypatch.setattr(cognee_adapter, "_DOCS_PER_COGNIFY", 2)
+        api = FakeCognee()
+        report = build_over_threads(tmp_path, api, 5)
+        assert [len(group) for group in api.added] == [2, 2, 1]
+        # One dataset throughout: search has to span the whole corpus, and
+        # cognee's incremental loading is what keeps the re-visits free.
+        assert api.add_datasets == [cognee_adapter.DATASET] * 3
+        assert api.cognified == [[cognee_adapter.DATASET]] * 3
+        # The fan-out bound rides on every pass, not just the first.
+        assert api.batch_sizes == [8, 8, 8]
+        assert report.failures == []
+
+    def test_a_failed_group_is_recorded_with_its_index_and_the_rest_still_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ The isolation guarantee: group 2 dies, group 3 still indexes."""
+        monkeypatch.setattr(cognee_adapter, "_DOCS_PER_COGNIFY", 1)
+        api = FakeCognee(fail_cognify_groups=[2])
+        report = build_over_threads(tmp_path, api, 3)
+        assert api.cognify_attempts == 3
+        assert api.cognified == [[cognee_adapter.DATASET]] * 2  # groups 1 and 3
+        (failure,) = report.failures
+        assert failure.startswith("cognify[2/3]: ")
+        assert "cognify exploded on group 2" in failure
+
+    def test_a_failed_add_costs_only_its_own_group(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cognee_adapter, "_DOCS_PER_COGNIFY", 1)
+        api = FakeCognee(fail_add_groups=[1])
+        report = build_over_threads(tmp_path, api, 3)
+        # The failed group is never cognified — nothing new to build from —
+        # while the two behind it are added and cognified as usual.
+        assert api.add_attempts == 3 and api.cognify_attempts == 2
+        (failure,) = report.failures
+        assert failure.startswith("add[1/3]: ")
 
     def test_transcript_file_names_survive_unsafe_thread_ids(self) -> None:
         assert cognee_adapter.transcript_filename(f"{THREAD}::2016-03-04") == (
@@ -895,6 +1004,11 @@ class TestCogneeAdapter:
         # Session memory would fold earlier answers into later ones and
         # contaminate golden scoring.
         assert os.environ["CACHING"] == "false"
+        # LiteLLM's own pin, not cognee's: its unset default resolves to a
+        # 600 s completion deadline, which a queued call on a single-slot
+        # server blows through (2026-07-28 full-profile run). Reaches the
+        # search path too — same GenericAPIAdapter, same transport.
+        assert os.environ["REQUEST_TIMEOUT"] == "3600"
         assert os.environ["EMBEDDING_PROVIDER"] == "openai_compatible"
         # the direct-SDK embedding path appends /v1 itself
         assert os.environ["EMBEDDING_ENDPOINT"] == "http://infinity:8081"

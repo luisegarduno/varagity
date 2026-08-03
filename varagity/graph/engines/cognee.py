@@ -20,6 +20,53 @@ into pydantic models inside the library; there is no callable to wrap the way
 LightRAG's ``llm_model_func`` can be wrapped. instructor's own validation
 retries are the mitigation, and the resulting failure count is bake-off data
 (criterion §8.2#2) rather than something this adapter hides.
+
+**Two knobs exist only because llama.cpp serves one request at a time.**
+cognee's extraction task fans an *unbounded* ``asyncio.gather`` out over every
+chunk of a pipeline batch, with summarization gathering alongside it, so the
+batch size *is* the concurrency: at cognee's default of 100 that is ~200
+completions in flight against a ``--parallel 1`` server, where the tail
+request's queue wait alone outlives LiteLLM's fallback deadline — instructor
+then retries it, and the cascade takes the whole build down (observed
+2026-07-28 on the first full-profile run: 76 min, zero entities).
+:data:`_CHUNKS_PER_BATCH` bounds the fan-out — free here, since the requests
+serialize either way — and ``REQUEST_TIMEOUT`` raises the deadline.
+
+That variable is read by LiteLLM at *its* import time and is deliberately
+process-wide: it governs every LiteLLM completion in the process, the
+**search** path's answer generation included (queries run through the same
+``GenericAPIAdapter``, which passes no per-call timeout either). Its generic
+name would be a leak worth worrying about in a long-lived process; the
+bake-off's sessions are process-scoped and its harness already pins the
+environment per session, so that reach is exactly the intended one.
+
+**The second full-profile attempt died differently, and that is why ingestion
+is grouped.** With the fan-out bounded, extraction stopped timing out and
+started *spiralling*: on content-heavy chunks the reasoning model emitted
+reasoning until the served window was full and then returned ``content=''``
+with ``finish_reason='length'``. The log's own arithmetic is exact
+(2026-07-29): prompt 4,805 + completion 11,579 = a full 16,384-token window,
+and the retry that followed burned 23,318 completion tokens against a 32,768
+one — twice the headroom bought nothing but a slower death, because nothing
+in cognee caps a completion's length (its ``max_completion_tokens`` reaches
+only the transcription calls). instructor then makes each attempt worse than
+the last: its retry prompt embeds the failed ``ModelResponse`` verbatim, which
+took that same call from 4,805 to 9,450 prompt tokens. When the third attempt
+is exhausted the ``RetryError`` leaves the data item, cognee raises
+``PipelineRunFailedError`` for the whole run, and ``cognify_rollback_handler``
+deletes every node and edge carrying that ``pipeline_run_id`` — which is how
+one poisoned chunk turned a 3.1-hour build into zero entities with no partial
+progress.
+
+:data:`_DOCS_PER_COGNIFY` is the containment. Transcripts are added and
+cognified in groups, so one ``cognify`` call — and therefore one rollback — is
+the blast radius, and every finished group is durable before the next starts.
+The dataset stays **single** throughout, because search must span the whole
+corpus; grouping it this way is cognee's own incremental pattern rather than a
+trick, since ``cognify(incremental_loading=True)`` (its default) skips any
+data item already marked completed for this pipeline and dataset, so each
+group's pass over the earlier documents costs one status read apiece and no
+LLM call.
 """
 
 import asyncio
@@ -74,6 +121,49 @@ _DOCUMENTS_DIR = "documents"
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 _EMBEDDING_DIM = 1024
+
+# Chunks per cognify batch (cognee's own default is 100). The batch is the
+# extraction task's `asyncio.gather` width, and summarization gathers over it
+# in parallel, so this bounds roughly 2N concurrent completions. A small bound
+# costs nothing on a single-slot llama.cpp — the requests queue either way —
+# and it is what keeps the tail request's queue wait structurally inside
+# `_REQUEST_TIMEOUT_S` instead of merely usually inside it.
+_CHUNKS_PER_BATCH = 8
+
+# Transcript files per add/cognify pass. Each `cognify()` is one cognee
+# pipeline run, and a failed run is rolled back *whole* — every node and edge
+# carrying its `pipeline_run_id` is deleted and the affected documents'
+# completion status is cleared (`cognify_rollback_handler`, verified in the
+# installed package and observed live). The group size is therefore the
+# failure blast radius, which is the entire point of grouping: one poisoned
+# chunk costs one group, not the build. What a smaller group costs is one
+# pipeline startup (migration check, task construction, dataset resolution,
+# plus a status read per already-completed document) times the number of
+# groups; at 100 that overhead disappears next to a group's extraction cost.
+_DOCS_PER_COGNIFY = 100
+
+# `cognify(chunk_size=…)` is deliberately left at cognee's default, which
+# resolves to `min(EMBEDDING_MAX_COMPLETION_TOKENS, LLM_MAX_COMPLETION_TOKENS
+# // 2)` = min(8191, 8192) = 8191 tokens. That ceiling never binds here:
+# `thread_transcripts` already caps a document at 8000 characters and
+# `TextChunker` packs whole paragraphs up to the ceiling, so one transcript is
+# one chunk and *our* cap is what sizes the extraction prompt (measured at
+# 4,805 tokens, roughly two-thirds transcript and one-third schema plus
+# instructions). Pinning something smaller would only sub-split documents this
+# adapter already sized: it would buy ~2k tokens of think-headroom against a
+# spiral that ate 23,318 of them, multiply the extraction calls — and so a
+# single-slot build's wall-clock — by the split factor, and shift extraction
+# granularity, which is one of the things the bake-off is measuring. Isolation
+# is the fix; the granularity stays cognee's own.
+
+# LiteLLM's request deadline, in seconds. Left alone it resolves to 600 s for
+# chat completions (`litellm.request_timeout` holds a 6000 s sentinel that
+# `CompletionTimeout.resolve` maps down to `COMPLETION_HTTP_FALLBACK_SECONDS`
+# whenever nothing configured it), and cognee's adapter passes no per-call
+# timeout — so a queued request that waits longer than that dies, repeatedly.
+# The value is read from the environment by `litellm.constants` at import
+# time, which is why it is pinned rather than passed.
+_REQUEST_TIMEOUT_S = 3600
 
 # One INSIGHTS result: the (source node, edge, target node) mappings.
 _Triplet = tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]
@@ -321,9 +411,9 @@ class _CogneeSession:
             verbose: Validated console verbosity (0–2).
 
         Returns:
-            The build report. ``add``/``cognify`` failures are recorded rather
-            than raised — a partial graph is still scoreable, and the failure
-            count is criterion §8.2#2 data.
+            The build report. ``add``/``cognify`` failures are recorded per
+            group rather than raised — a partial graph is still scoreable, and
+            the failure count is criterion §8.2#2 data.
         """
         messages = merge_batches(batches)
         docs = thread_transcripts(messages)
@@ -338,28 +428,47 @@ class _CogneeSession:
         )
 
     def _ingest(self, paths: Sequence[Path]) -> list[str]:
-        """Run cognee's two ingestion stages, stopping at the first failure.
+        """Run cognee's two ingestion stages over the transcripts, group by group.
+
+        Every group is one ``add`` plus one ``cognify``, and a ``cognify`` is
+        one cognee pipeline run — the unit its rollback works in. A group that
+        fails is therefore rolled back alone and the loop moves on to the next
+        one, which is what keeps a single poisoned chunk from zeroing a
+        multi-hour build (see the module docstring). The dataset is the same
+        for every group: cognee's incremental loading skips the documents it
+        has already completed, so search still spans everything while the
+        widening dataset costs a status read per document instead of an LLM
+        call.
+
+        ``cognify`` is bounded to :data:`_CHUNKS_PER_BATCH` chunks per batch:
+        its extraction stage gathers over a whole batch at once, which on a
+        single-slot server turns the batch size into a queue depth.
 
         Args:
-            paths: The written transcript files.
+            paths: The written transcript files, in document order.
 
         Returns:
-            Human-readable failures (empty on a clean ingest). ``cognify`` is
-            skipped when ``add`` failed — there would be nothing new to build
-            a graph from.
+            Human-readable failures (empty on a clean ingest), one per failed
+            stage and tagged with the group's position — ``"cognify[3/21]:
+            RetryError(…)"``. A group whose ``add`` failed is not cognified
+            (there would be nothing new to build a graph from), but every
+            later group still runs.
         """
-        stages = (
-            ("add", lambda: self._api.add([str(path) for path in paths], dataset_name=DATASET)),
-            ("cognify", lambda: self._api.cognify(datasets=[DATASET])),
-        )
+        groups = _document_groups(paths)
         failures: list[str] = []
-        for stage, call in stages:
+        for number, group in enumerate(groups, start=1):
+            where = f"[{number}/{len(groups)}]"
             try:
-                self.run(call())
-            except Exception as exc:  # a failed stage is data, not the end of the run
-                logger.warning("cognee %s failed", stage, exc_info=True)
-                failures.append(f"{stage}: {exc!r}")
-                break
+                self.run(self._api.add([str(path) for path in group], dataset_name=DATASET))
+            except Exception as exc:  # a failed group is data, not the end of the run
+                logger.warning("cognee add failed for group %s", where, exc_info=True)
+                failures.append(f"add{where}: {exc!r}")
+                continue
+            try:
+                self.run(self._api.cognify(datasets=[DATASET], chunks_per_batch=_CHUNKS_PER_BATCH))
+            except Exception as exc:  # likewise: the next group is still worth ingesting
+                logger.warning("cognee cognify failed for group %s", where, exc_info=True)
+                failures.append(f"cognify{where}: {exc!r}")
         return failures
 
     def query(self, question: str, *, mode: str | None = None, verbose: int = 0) -> GraphAnswer:
@@ -432,6 +541,22 @@ class _CogneeSession:
             return None
 
 
+def _document_groups(paths: Sequence[Path]) -> list[Sequence[Path]]:
+    """Split the transcripts into :data:`_DOCS_PER_COGNIFY`-sized groups.
+
+    Args:
+        paths: The written transcript files, in document order.
+
+    Returns:
+        The groups in order, the last one holding the remainder; empty for an
+        empty corpus.
+    """
+    return [
+        paths[start : start + _DOCS_PER_COGNIFY]
+        for start in range(0, len(paths), _DOCS_PER_COGNIFY)
+    ]
+
+
 def _pin_env(workdir: Path) -> None:
     """Pin cognee's import-time environment to the local endpoints and workdir.
 
@@ -443,6 +568,11 @@ def _pin_env(workdir: Path) -> None:
 
 def _env_pins(workdir: Path) -> dict[str, str]:
     """Build cognee's import-time environment (kept separate so it is testable).
+
+    One pin — ``REQUEST_TIMEOUT`` — is not cognee's own setting but LiteLLM's,
+    and unlike the rest it reaches every LiteLLM caller in the process rather
+    than just this session's engine. That is deliberate and, in the
+    process-scoped bake-off, harmless; see the module docstring.
 
     Args:
         workdir: The session's working directory (the embedded stores' home).
@@ -465,6 +595,13 @@ def _env_pins(workdir: Path) -> dict[str, str]:
         "LLM_MODEL": model,
         "LLM_ENDPOINT": settings.BASE_MODEL_API_URL,
         "LLM_API_KEY": settings.BASE_MODEL_API_KEY,
+        # LiteLLM's completion deadline. Its 600 s fallback is a *client*
+        # timeout, so on a single-slot server it fires on the queue rather
+        # than on a hang: at the shipped fan-out the tail extraction call
+        # waited past it, instructor re-sent it, and the retry storm killed a
+        # 76-minute build with zero entities (2026-07-28, first full-profile
+        # run). Bounded fan-out plus this deadline make that unreachable.
+        "REQUEST_TIMEOUT": str(_REQUEST_TIMEOUT_S),
         # cognee pre-flights one structured LLM call with a hard 30 s cap
         # before every first pipeline run. On a single-slot llama.cpp a slow
         # first token would fail an entire build over a guardrail, and a
