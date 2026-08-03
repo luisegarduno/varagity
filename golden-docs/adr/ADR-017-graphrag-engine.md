@@ -3,8 +3,8 @@
 **Status:** Accepted (2026-08-03) — drafted from final measurements
 2026-07-31, owner-accepted per the
 [ADR-011](ADR-011-chat-engine-condense.md) precedent (*"the numbers said
-X"* is the record). The acceptance gate in Decision #2 remains a stage-2
-entry condition and can still overturn the engine choice.
+X"* is the record). The acceptance gate in Decision #2 **ran the same day
+and passed** — see the amendment below; the engine choice stands.
 
 ## Context
 
@@ -237,6 +237,8 @@ attached and a named fallback order. Three sub-decisions follow from it.
    minutes, no re-index; the Graphiti adapter already contains the
    synthesis code to lift). **Gate: fact recall ≥ 0.37** (its own smoke
    score, and cognee's full-profile score is 0.382).
+   *Outcome (2026-08-03): passed at **0.4216** on `mix+synthesis` with
+   the e5 query prefix — see the amendment below.*
 3. **If the gate fails**, the fallback order is (a) **Graphiti** with
    extraction moved off the single slot — it wins provenance and latency
    outright and only loses on arithmetic; (b) **cognee** with a
@@ -467,3 +469,75 @@ planner may reverse if it wants the rendering kept warm.
   with it); graphiti-core ships a community fix past 0.29.2; cognee gains
   a completion-length cap or any `<think>` injection point. Each is one
   `eval graph --profile full` run away from a new ADR.
+
+## Amendment (2026-08-03): the acceptance gate — passed
+
+Decision #2's gate ran the day the ADR was accepted, against the same
+on-disk 10,001-message graph (`--skip-build`, no re-index; six configs,
+17 golden questions each, ~6 min a run). The numbers, from
+`data/eval/results/20260803T{114412,115943,120937,121632,122256,123312}Z-graph.json`:
+
+| Config | Fact recall | Agg / Verif / Rel | Mean latency |
+|---|---|---|---|
+| engine-composed `hybrid` (the bake-off row) | 0.078 | 0.200 / 0.067 / 0.000 | 44.2 s |
+| `hybrid+synthesis` | 0.108 | 0.200 / 0.167 / 0.000 | 21.6 s |
+| `global+synthesis` | 0.235 | 0.333 / 0.267 / 0.143 | 34.4 s |
+| `hybrid+synthesis`, e5 query prefix | 0.265 | 0.467 / 0.233 / 0.143 | 23.8 s |
+| `global+synthesis`, e5 query prefix | 0.275 | 0.333 / 0.400 / 0.143 | 20.0 s |
+| **`mix+synthesis`, e5 query prefix** | **0.4216** | 0.600 / 0.433 / 0.286 | 35.4 s |
+
+**Verdict: 0.4216 ≥ 0.37 — gate passed, engine locked** (owner-accepted
+2026-08-03). The winning config also beats both fallbacks' full-profile
+fact recall (Graphiti 0.373, cognee 0.382), so Decision #3's fallback
+order was never exercised. The gate's claim held in a refined form — the
+answer stage was one of **three** stacked problems, each worth measuring
+separately:
+
+1. **Our synthesis** (the thing the gate was designed to test) fixed the
+   answer-stage catastrophe — the 5 empty / 5 references-only / 5
+   refusals became grounded, honest answers — but alone moved fact recall
+   only 0.078 → 0.108. Most residual misses said *"the evidence does not
+   mention X"*, and repro confirmed they were true: the fact-bearing
+   chunks were not in the retrieval.
+2. **The e5 query prefix** — stage 1's recorded deviation, now the
+   `GRAPH_QUERY_PREFIX` setting riding LightRAG's
+   `EmbeddingFunc(supports_asymmetric=True)` seam (verified live: 1.5.4's
+   query paths pass `context="query"`; passages stay unprefixed, so the
+   already-built graph needed no re-embedding) — was worth more than the
+   synthesis itself: 0.108 → 0.265 on `hybrid`.
+3. **`mix` mode** supplies what needle-fact questions still lacked:
+   `hybrid` retrieves only KG-mediated chunks (its raw search logs read
+   "0 vector chunks"), so facts no entity/relation path reaches — the
+   birthday date, the cabin inventory — never enter the context. `mix`
+   adds direct vector retrieval over chunks: 0.265 → **0.4216**.
+
+**Shipped defaults, chosen from the numbers** (owner-accepted):
+`GRAPH_QUERY_MODE=mix`, `GRAPH_QUERY_PREFIX=true` — landing with their
+consumers per the stage-2 plan (the prefix default flips in its Phase 2;
+the mode setting is born in its Phase 4). The ~12 s mean-latency premium
+of `mix` over `hybrid` is priced in. Relation questions remain LightRAG's
+weakest kind (0.286 vs. Graphiti's 0.571) — the document-grain regret
+this ADR already priced, unchanged.
+
+Measurement deviations, recorded rather than hidden:
+
+- **`SYNTHESIS_MAX_TOKENS` 1024 → 2048.** At 1024 the reasoning model
+  burned the whole budget inside its reasoning stage on roughly half of
+  calls; llama.cpp routes an unfinished think phase into
+  `reasoning_content`, so the non-streaming `generate()` saw empty
+  `content` and 5 of 17 answers scored as infrastructure zeros (the
+  condense 128→512 and HyDE 512→1024 precedents, one size larger).
+  ~2/17 residual empties persist at 2048, so gate numbers slightly
+  *under*-measure every synthesis config.
+- **The `mix` config was a diagnostic beyond the plan's three named
+  runs** — added once repro showed the residual misses were chunk-
+  targeting, not answering. It turned out to be the passing
+  configuration.
+- **Provenance reads null under `--skip-build`** (the known caveat above;
+  the gate is fact-recall-only by design).
+
+The LightRAG **rerank hook** (`rerank_model_func` → the infinity
+cross-encoder already serving `/v1/rerank`) was considered and left
+unmeasured: it changes retrieval against the measured bake-off and
+deserves its own pass. It is the first lever to try if `mix`'s relation
+recall needs to move.
