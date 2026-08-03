@@ -158,6 +158,7 @@ nav:
       - ADR-014 bun as the package manager: adr/ADR-014-bun-package-manager.md
       - ADR-015 In-app codebase map: adr/ADR-015-codebase-map.md
       - ADR-016 HyDE retrieval method: adr/ADR-016-hyde-retrieval.md
+      - ADR-017 GraphRAG engine: adr/ADR-017-graphrag-engine.md
   - API reference:
       - reference/index.md
       - Configuration & logging: reference/config.md
@@ -168,6 +169,7 @@ nav:
       - Stores: reference/stores.md
       - Retrieval: reference/retrieval.md
       - Chat engines: reference/chat.md
+      - GraphRAG: reference/graph.md
       - Generation: reference/generation.md
       - Orchestration: reference/pipeline.md
       - HTTP API: reference/api.md

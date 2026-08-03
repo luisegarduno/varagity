@@ -143,6 +143,7 @@ uv run main.py -v 2 chat           # verbose: full chunk/retrieval panels
 uv run --group eval main.py eval       # 7-config retrieval matrix + chunker sweep
 uv run --group eval main.py eval ocr   # OCR engine benchmark
 uv run --group eval main.py eval chat  # multi-turn chat-engine eval (ADR-011)
+uv run --group bakeoff main.py eval graph   # GraphRAG bake-off (ADR-017) — see below
 ```
 
 **The browser flow** is the same pipeline without a terminal: at
@@ -355,6 +356,85 @@ bun --cwd web run e2e         # or: cd web && bun run e2e
   port fails CORS before it fails a test.
 - Each spec runs twice: desktop chromium (1280×800) and mobile chromium
   (390×844, touch).
+
+## The GraphRAG bake-off (`eval graph`)
+
+`eval graph` is the harness that decided
+[ADR-017](adr/ADR-017-graphrag-engine.md) and now lives on as the
+GraphRAG regression guard (the `eval chat` shape): it builds a
+deterministic synthetic iMessage corpus, indexes it with every registered
+graph engine **sequentially**, and scores their answers against a golden
+QA set by fact recall and provenance recall.
+
+```bash
+uv sync --group bakeoff                            # once — the engines are heavy
+uv run --group bakeoff main.py eval graph          # smoke profile, all engines
+uv run --group bakeoff main.py eval graph --profile full --engine lightrag
+```
+
+- **`--group bakeoff`, not `--group eval`.** The three engine libraries
+  (`lightrag-hku`, `cognee`, `graphiti-core[falkordblite]`) live in their
+  own dependency group that is deliberately **excluded from `dev`**, so
+  CI never installs them. A selected engine whose library is missing
+  fails with a message naming the group.
+- **Needs the live GPU services, not Docker stores.** llama.cpp and
+  infinity must be up; postgres/Elasticsearch are irrelevant because
+  graph engines self-store. Running from the host means the usual
+  endpoint overrides — see
+  [Host-vs-container `.env` usage](#host-vs-container-env-usage).
+- **Artifacts** (all gitignored): corpora and per-engine working
+  directories under `data/eval/graph/`, results at
+  `data/eval/results/<timestamp>-graph.json`.
+- **While a run is in flight, use `uv run --no-sync` for everything
+  else.** A plain `uv run` in another shell re-syncs the virtualenv and
+  can prune the `bakeoff` group out from under the live process — a
+  multi-hour index dies to an unrelated command.
+
+**Flags**
+
+| Flag | Effect |
+|---|---|
+| `--profile smoke` (default) | 226 hand-scripted messages, 10 threads — plus an automatic incremental re-index check |
+| `--profile full` | 10,001 messages across 50 threads and 12 years (226 scripted + blocklist-clean filler) |
+| `--engine NAME` (repeatable) | run a subset; **one engine per session** is the sane default at full profile |
+| `--mode NAME` | override an engine's primary query mode for a recorded extra pass (e.g. LightRAG `global`) |
+| `--skip-build` | reuse the corpus **and** each engine's already-built graph — re-scores in seconds instead of hours |
+| `--message-target N` | cap the corpus at N messages: how an engine too slow for the uncapped corpus still gets a full-profile seat |
+
+**`--skip-build` has one honest caveat**: it re-scores fact recall and
+latency, but **not provenance** for engines whose citation→guid index is
+session state built during the index pass — those read `null` provenance
+on a re-score (the CLI warns). Re-index if provenance is what you are
+iterating on.
+
+**`--message-target` makes a different corpus, on purpose.** The
+database, manifest, and per-engine working directories are named for the
+cap (`full-mt500`), so a capped run can never clobber an uncapped one
+that another engine is still indexing against, and `--skip-build` reuse
+is keyed the same way. The scripted messages ride in every corpus (filler
+tops up to N), so golden anchors always resolve. The CLI prints a
+"comparable only to runs over the same corpus" note, and so must any
+table you build from it.
+
+**Expected wall-clock** (measured on this host — one llama.cpp slot, a
+reasoning model; budget a night per full-profile engine):
+
+| Run | Wall-clock |
+|---|---|
+| `--profile smoke`, all three engines | 4 h 51 m |
+| `--profile full`, LightRAG (10,001 messages) | 19.9 h index + 13 min queries |
+| `--profile full`, cognee (10,001 messages) | 14.2 h index + 7.3 h queries |
+| `--profile full --message-target 500`, Graphiti | 5.6 h index + 3 min queries |
+| `--skip-build`, one engine, 17 queries | ~2 min |
+
+Per-message index cost is the number that scales: **7.2 s** (LightRAG),
+**5.1 s** (cognee), **40.0 s** (Graphiti — which is why it ran capped; an
+uncapped 10,001-message build extrapolates to ~4.6 days).
+
+The `-m bakeoff` pytest marker (`uv run --group bakeoff pytest -m bakeoff
+--no-cov`) is the tiny per-engine live smoke test — build ~30 messages,
+ask one question. `--no-cov` because any `-m` run trips the repo-wide
+coverage floor.
 
 ## Volumes and resets
 

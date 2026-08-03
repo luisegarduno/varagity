@@ -21,3 +21,4 @@ conversation that produced it. Format: Context → Decision → Consequences.
 | [ADR-014](ADR-014-bun-package-manager.md) | bun as the package manager, Node as the runtime | Accepted |
 | [ADR-015](ADR-015-codebase-map.md) | In-app codebase map (`/map` + developer mode) — curated TS data, condensed foglamp-style canvas | Accepted (amended) |
 | [ADR-016](ADR-016-hyde-retrieval.md) | HyDE as a composing retriever, paired under rerank (default stays `hybrid`) | Accepted |
+| [ADR-017](ADR-017-graphrag-engine.md) | The GraphRAG engine + its storage/viz/degrade/defaults directives (bake-off-decided: LightRAG) | Proposed |

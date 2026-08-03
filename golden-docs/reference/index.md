@@ -22,6 +22,9 @@ One page per package:
   `reranked` composition over them
 - [Chat engines](chat.md) — the `PreparedQuery` two-string split, the
   registry, and the `simple` / `condense_context` engines
+- [GraphRAG](graph.md) — the message-source family (iMessage `chat.db`),
+  the `GraphEngine` seam, message rendering, and the ADR-017 bake-off
+  adapters
 - [Generation](generation.md) — context prompt & grounded answers
 - [Orchestration](pipeline.md) — the Prefect flows
 - [HTTP API](api.md) — the FastAPI service: SSE chat, conversations,
