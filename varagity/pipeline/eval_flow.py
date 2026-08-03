@@ -64,6 +64,7 @@ def graph_eval_flow(
     engines: Sequence[str] | None = None,
     mode: str | None = None,
     skip_build: bool = False,
+    message_target: int | None = None,
     verbose: int | None = None,
 ) -> dict[str, Any]:
     """Run the graph bake-off as a tracked flow run (spec_graphrag §12).
@@ -74,6 +75,9 @@ def graph_eval_flow(
         mode: Engine query mode override for every question.
         skip_build: Reuse the existing corpus and working directories
             instead of re-indexing.
+        message_target: Cap the corpus at this many messages instead of the
+            profile's own size (a capped run gets its own corpus and working
+            directories); ``None`` uses the profile's size.
         verbose: Console verbosity (0–2); defaults to
             ``settings.DEFAULT_VERBOSE``.
 
@@ -86,6 +90,7 @@ def graph_eval_flow(
         engines=engines,
         mode=mode,
         skip_build=skip_build,
+        message_target=message_target,
         verbose=verbose,
     )
 

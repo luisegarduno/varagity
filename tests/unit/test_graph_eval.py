@@ -30,6 +30,7 @@ from varagity.eval.graph_eval import (
     GRAPH_EVAL_ROOT,
     INCREMENTAL_DELTA_MESSAGES,
     MANIFEST_SUFFIX,
+    corpus_stem,
     engine_versions,
     manifest_settings_pins,
     match_fact_groups,
@@ -414,6 +415,17 @@ class TestValidateGoldenAgainstManifest:
             validate_golden_against_manifest(entries, _manifest())
 
 
+class TestCorpusStem:
+    def test_an_uncapped_run_keeps_the_bare_profile_name(self) -> None:
+        assert corpus_stem("full") == "full"
+        assert corpus_stem("smoke", None) == "smoke"
+
+    def test_a_capped_run_gets_its_own_name(self) -> None:
+        """★ A capped run must never write over the uncapped corpus."""
+        assert corpus_stem("full", 1000) == "full-mt1000"
+        assert corpus_stem("smoke", 50) == "smoke-mt50"
+
+
 class TestPrepareCorpus:
     def test_builds_the_database_and_writes_its_manifest(
         self, tmp_path: Path, at_repo_root: None
@@ -580,6 +592,90 @@ class TestRunGraphEval:
         assert results["engines"]["_probe"]["incremental"] is None
         assert results["incremental_new_messages"] is None
         assert results["seed"] == 7
+
+    def test_a_capped_run_gets_its_own_corpus_and_working_directory(
+        self, tmp_path: Path, at_repo_root: None, probe: ProbeEngine
+    ) -> None:
+        """★ The Phase-5 cap: an engine too slow for 10,001 messages.
+
+        Everything the capped run touches is named for the cap, so it cannot
+        disturb an uncapped run indexing the same profile beside it.
+        """
+        results = self._run(tmp_path, profile="full", message_target=250)
+        corpus_dir = tmp_path / "graph" / "corpus"
+
+        assert results["profile"] == "full"
+        assert results["message_target"] == 250
+        assert results["corpus_stem"] == "full-mt250"
+        assert results["corpus"]["messages"] == 250
+        assert results["corpus"]["filler"] == 250 - results["corpus"]["scripted"]
+
+        assert Path(results["corpus_path"]) == corpus_dir / "full-mt250.db"
+        assert (corpus_dir / f"full-mt250{MANIFEST_SUFFIX}").is_file()
+        # The uncapped names are the ones a parallel full run owns.
+        assert not (corpus_dir / "full.db").exists()
+        assert not (corpus_dir / f"full{MANIFEST_SUFFIX}").exists()
+
+        workdir = Path(results["engines"]["_probe"]["workdir"])
+        assert workdir == (tmp_path / "graph" / "full-mt250" / "_probe").resolve()
+        assert not (tmp_path / "graph" / "full").exists()
+
+        # The goldens still resolved: scripted messages ride in every corpus.
+        assert results["engines"]["_probe"]["build"]["messages_seen"] == 250
+        assert results["engines"]["_probe"]["summary"]["n_queries"] == 3
+
+    def test_a_capped_run_leaves_an_uncapped_corpus_alone(
+        self, tmp_path: Path, at_repo_root: None, probe: ProbeEngine
+    ) -> None:
+        """★ The live constraint: a full-profile run is mid-flight beside this."""
+        corpus_dir = tmp_path / "graph" / "corpus"
+        uncapped_path, uncapped = prepare_corpus(corpus_dir, profile="full")
+        assert uncapped.message_count > 10_000
+
+        # --skip-build must not mistake the uncapped corpus for this one.
+        results = self._run(tmp_path, profile="full", message_target=250, skip_build=True)
+        assert results["corpus"]["messages"] == 250
+
+        after = FixtureManifest.model_validate_json(
+            (corpus_dir / f"full{MANIFEST_SUFFIX}").read_text(encoding="utf-8")
+        )
+        assert after.message_count == uncapped.message_count
+        assert uncapped_path.is_file()
+
+    def test_skip_build_reuses_the_capped_run_s_own_corpus_and_workdir(
+        self, tmp_path: Path, at_repo_root: None, probe: ProbeEngine
+    ) -> None:
+        """Re-scoring a capped run must find the graph the cap built."""
+        first = self._run(tmp_path, profile="full", message_target=250)
+        sentinel = Path(first["engines"]["_probe"]["workdir"]) / "engine-state.bin"
+        sentinel.write_bytes(b"expensive")
+        builds_before = len(probe.builds)
+
+        second = self._run(tmp_path, profile="full", message_target=250, skip_build=True)
+        assert sentinel.is_file()
+        assert second["corpus_path"] == first["corpus_path"]
+        assert second["engines"]["_probe"]["workdir"] == first["engines"]["_probe"]["workdir"]
+        assert len(probe.builds) == builds_before  # nothing was re-indexed
+        assert second["engines"]["_probe"]["summary"]["n_queries"] == 3
+
+    def test_a_cap_below_the_script_still_carries_every_golden_anchor(
+        self,
+        tmp_path: Path,
+        at_repo_root: None,
+        probe: ProbeEngine,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The scripted messages are the floor — a cap under it is reported."""
+        with caplog.at_level("WARNING", logger="varagity.eval.graph_eval"):
+            results = self._run(tmp_path, profile="full", message_target=50)
+        assert results["corpus"]["messages"] == results["corpus"]["scripted"] > 50
+        assert results["corpus"]["filler"] == 0
+        assert results["engines"]["_probe"]["summary"]["n_queries"] == 3
+        assert "message_target 50 is below" in caplog.text
+
+    def test_a_non_positive_message_target_is_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="positive count"):
+            run_graph_eval(profile="full", message_target=0, engines=["_probe"], eval_root=tmp_path)
 
     def test_skip_build_reuses_the_corpus_and_the_workdir(
         self, tmp_path: Path, at_repo_root: None, probe: ProbeEngine

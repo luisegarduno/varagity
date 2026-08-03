@@ -508,7 +508,12 @@ class TestEvalFlows:
 
         monkeypatch.setattr(eval_flow_module, "run_graph_eval", fake_run_graph_eval)
         result = graph_eval_flow(
-            profile="full", engines=["lightrag"], mode="global", skip_build=True, verbose=2
+            profile="full",
+            engines=["lightrag"],
+            mode="global",
+            skip_build=True,
+            message_target=1000,
+            verbose=2,
         )
 
         assert result == {"kind": "graph_eval"}
@@ -517,6 +522,7 @@ class TestEvalFlows:
             "engines": ["lightrag"],
             "mode": "global",
             "skip_build": True,
+            "message_target": 1000,
             "verbose": 2,
         }
 

@@ -30,16 +30,26 @@ from the subject matter:
   the way the rest of the harness pins settings (environment export + cache
   clear — see :func:`varagity.eval.evaluate.pinned_eval_settings`).
 
-Two cost controls shape the run, because a full-profile index is hours per
+Three cost controls shape the run, because a full-profile index is hours per
 engine on a single-slot llama.cpp: ``--engine`` runs one engine per session,
-and ``--skip-build`` reuses the corpus *and* the engines' working directories
-so scoring can be iterated without re-paying an index. The **incremental
-re-index check** (criterion §8.2#3) therefore runs only on the ``smoke``
-profile and only when building: a second ``build`` over an overlapping batch —
-the same messages plus :data:`INCREMENTAL_DELTA_MESSAGES` new ones — measures
-what a re-export of a grown ``chat.db`` costs. The delta messages are
-generator filler, which is blocklist-guaranteed never to mention a golden
-term, so the check cannot perturb the scores that follow it.
+``--skip-build`` reuses the corpus *and* the engines' working directories so
+scoring can be iterated without re-paying an index, and ``--message-target``
+caps the corpus below its profile's size — Graphiti indexes at ~51 s/message,
+which makes an uncapped 10,001-message build about six days, so its
+full-profile seat is a capped slice and the cap is reported with the numbers.
+A capped run is a **different corpus**: :func:`corpus_stem` gives it its own
+database, manifest, and per-engine working directories (``full-mt1000``), so a
+capped run can never clobber the uncapped corpus another engine is still
+indexing against. The scripted messages are written in every corpus regardless
+of the cap, so the golden set's provenance anchors always resolve.
+
+The **incremental re-index check** (criterion §8.2#3) runs only on the
+``smoke`` profile and only when building: a second ``build`` over an
+overlapping batch — the same messages plus
+:data:`INCREMENTAL_DELTA_MESSAGES` new ones — measures what a re-export of a
+grown ``chat.db`` costs. The delta messages are generator filler, which is
+blocklist-guaranteed never to mention a golden term, so the check cannot
+perturb the scores that follow it.
 
 Engine libraries stay call-time imports (plan decision #8): selecting an
 engine whose library is missing raises a clear error naming the ``bakeoff``
@@ -186,6 +196,29 @@ def manifest_settings_pins(*manifests: FixtureManifest) -> dict[str, str]:
         ),
         "GRAPH_HANDLE_NAMES_FILE": "",
     }
+
+
+def corpus_stem(profile: str, message_target: int | None = None) -> str:
+    """Name the corpus (and the engines' workdir tier) for one run.
+
+    A ``--message-target`` run indexes a *different corpus* from its profile's
+    uncapped one, so it may not share either the generated database or the
+    engines' working directories: overwriting ``full.db`` while another
+    engine's multi-day full-profile build is still running against it would
+    corrupt that run's provenance silently, and reusing ``full/<engine>/``
+    would score a capped run against an uncapped graph.
+
+    Args:
+        profile: ``smoke`` or ``full``.
+        message_target: The ``--message-target`` override, or ``None`` for the
+            profile's own size.
+
+    Returns:
+        The file stem for the corpus and its manifest, and the directory name
+        holding each engine's workdir: ``full`` uncapped, ``full-mt1000``
+        capped.
+    """
+    return profile if message_target is None else f"{profile}-mt{message_target}"
 
 
 def prepare_corpus(
@@ -551,6 +584,7 @@ def run_graph_eval(
     engines: Sequence[str] | None = None,
     mode: str | None = None,
     skip_build: bool = False,
+    message_target: int | None = None,
     eval_root: Path = GRAPH_EVAL_ROOT,
     golden_path: Path = GRAPH_GOLDEN_PATH,
     results_dir: Path = RESULTS_DIR,
@@ -579,6 +613,12 @@ def run_graph_eval(
         skip_build: Reuse the existing corpus and each engine's already-built
             working directory, and skip the incremental check — the scoring
             iteration loop, which must not re-pay a multi-hour index.
+        message_target: Cap the corpus at this many messages instead of the
+            profile's own size — how an engine too slow for the uncapped
+            corpus (Graphiti, ~51 s/message) still gets a full-profile seat.
+            The scripted messages are always written, so the golden set holds;
+            filler tops the corpus up to the cap. A capped run gets its own
+            corpus and working directories (:func:`corpus_stem`).
         eval_root: Root for the generated corpus and the engines' working
             directories; resolved to an absolute path before use.
         golden_path: The graph golden Q&A file.
@@ -592,9 +632,9 @@ def run_graph_eval(
         ``"results_path"`` key naming the file.
 
     Raises:
-        ValueError: If ``profile`` or ``verbose`` is invalid, an engine name
-            is not registered, or a golden provenance anchor is missing from
-            the corpus.
+        ValueError: If ``profile``, ``message_target`` or ``verbose`` is
+            invalid, an engine name is not registered, or a golden provenance
+            anchor is missing from the corpus.
         FileNotFoundError: If the golden set or a fixture input is missing.
         RuntimeError: If a selected engine's library is not installed.
     """
@@ -602,6 +642,8 @@ def run_graph_eval(
         raise ValueError(
             f"unknown corpus profile {profile!r}; expected one of {[*PROFILE_TARGETS]}"
         )
+    if message_target is not None and message_target < 1:
+        raise ValueError(f"message_target must be a positive count, got {message_target}")
     verbose = check_verbose(get_settings().DEFAULT_VERBOSE if verbose is None else verbose)
     selected = select_engines(engines)
 
@@ -610,7 +652,25 @@ def run_graph_eval(
     # absolute before any session opens.
     eval_root = eval_root.resolve()
     corpus_dir = eval_root / "corpus"
-    db_path, manifest = prepare_corpus(corpus_dir, profile=profile, seed=seed, reuse=skip_build)
+    stem = corpus_stem(profile, message_target)
+    db_path, manifest = prepare_corpus(
+        corpus_dir,
+        profile=profile,
+        seed=seed,
+        message_target=message_target,
+        name=stem,
+        reuse=skip_build,
+    )
+    if message_target is not None and manifest.message_count > message_target:
+        logger.warning(
+            "message_target %d is below the %d scripted message(s), which every corpus "
+            "carries verbatim (the golden set is authored against them): the %s corpus "
+            "holds %d",
+            message_target,
+            manifest.scripted_count,
+            stem,
+            manifest.message_count,
+        )
 
     # The incremental re-index check (criterion §8.2#3) measures the marginal
     # cost of a re-export: the same messages plus a few new ones. Smoke only —
@@ -624,7 +684,7 @@ def run_graph_eval(
             profile="full",
             seed=seed,
             message_target=manifest.message_count + INCREMENTAL_DELTA_MESSAGES,
-            name=f"{profile}-delta",
+            name=f"{stem}-delta",
         )
 
     corpora = [manifest] if delta_manifest is None else [manifest, delta_manifest]
@@ -640,14 +700,14 @@ def run_graph_eval(
         validate_golden_against_manifest(entries, manifest)
 
         for name in selected:
-            workdir = eval_root / profile / name
+            workdir = eval_root / stem / name
             if not skip_build:
                 shutil.rmtree(workdir, ignore_errors=True)
             workdir.mkdir(parents=True, exist_ok=True)
             logger.info(
                 "graph eval: %s over the %s corpus (%d messages) in %s",
                 name,
-                profile,
+                stem,
                 len(batch.messages),
                 workdir,
             )
@@ -693,6 +753,11 @@ def run_graph_eval(
         "kind": "graph_eval",
         "timestamp": datetime.now(UTC).isoformat(),
         "profile": profile,
+        # The cap and the name it produced: a capped run's numbers are only
+        # comparable to another run over the same corpus, and the stem is what
+        # names both the corpus and every engine workdir recorded below.
+        "message_target": message_target,
+        "corpus_stem": stem,
         "seed": seed,
         "corpus_path": str(db_path),
         "golden_path": str(golden_path),

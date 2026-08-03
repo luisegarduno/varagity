@@ -166,6 +166,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="reuse the existing corpus and each engine's already-built working directory "
         "(and skip the incremental check): re-scores in seconds without re-paying an index",
     )
+    eval_graph.add_argument(
+        "--message-target",
+        type=int,
+        metavar="N",
+        help="cap the corpus at N messages instead of the profile's size — how an engine "
+        "too slow for the uncapped corpus still gets a full-profile seat. The scripted "
+        "messages are always present (filler tops up to N), and a capped run uses its own "
+        "corpus and working directories (`full-mt1000`), never the uncapped run's",
+    )
     return parser
 
 
@@ -199,6 +208,7 @@ def run(argv: list[str] | None = None) -> int:
                 engines=args.engine,
                 mode=args.mode,
                 skip_build=args.skip_build,
+                message_target=args.message_target,
             )
         return _run_eval(verbose)
     # chat is the default subcommand (spec §13).
@@ -331,6 +341,7 @@ def _run_eval_graph(
     engines: list[str] | None,
     mode: str | None,
     skip_build: bool,
+    message_target: int | None,
 ) -> int:
     """Execute the ``eval graph`` subcommand: the GraphRAG bake-off.
 
@@ -343,6 +354,8 @@ def _run_eval_graph(
             primary mode.
         skip_build: Reuse the corpus and working directories instead of
             re-indexing.
+        message_target: ``--message-target`` corpus cap, or ``None`` for the
+            profile's own size.
 
     Returns:
         ``0`` on success (a failed run raises).
@@ -352,6 +365,7 @@ def _run_eval_graph(
         engines=engines,
         mode=mode,
         skip_build=skip_build,
+        message_target=message_target,
         verbose=verbose,
     )
     _show_graph_results(results)
@@ -645,6 +659,14 @@ def _show_graph_results(results: dict[str, Any]) -> None:
             )
         if summary["errors"]:
             console.print(f"[yellow]{engine}: {summary['errors']} query(ies) raised[/]")
+    # Older result documents predate the cap; `.get` keeps them renderable.
+    target = results.get("message_target")
+    if target is not None:
+        console.print(
+            f"[yellow]--message-target {target}: a capped slice of the {results['profile']} "
+            f"corpus ('{results.get('corpus_stem')}'), comparable only to runs over the "
+            f"same corpus[/]"
+        )
     if results["skip_build"]:
         console.print("[dim]--skip-build: reused each engine's existing graph[/]")
     console.print(f"Results written to [bold]{results['results_path']}[/]")

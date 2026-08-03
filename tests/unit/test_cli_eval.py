@@ -154,6 +154,7 @@ class TestEvalDispatch:
                 "engines": None,  # every registered engine
                 "mode": None,
                 "skip_build": False,
+                "message_target": None,  # the profile's own size
                 "verbose": 0,
             }
         ]
@@ -182,6 +183,8 @@ class TestEvalDispatch:
                         "--mode",
                         "global",
                         "--skip-build",
+                        "--message-target",
+                        "1000",
                     ]
                 )
                 == 0
@@ -192,6 +195,7 @@ class TestEvalDispatch:
                 "engines": ["lightrag", "cognee"],
                 "mode": "global",
                 "skip_build": True,
+                "message_target": 1000,
                 "verbose": 0,
             }
         ]
@@ -199,6 +203,10 @@ class TestEvalDispatch:
     def test_eval_graph_rejects_an_unknown_profile(self) -> None:
         with pytest.raises(SystemExit):
             cli_app.run(["eval", "graph", "--profile", "enormous"])
+
+    def test_eval_graph_rejects_a_non_numeric_message_target(self) -> None:
+        with pytest.raises(SystemExit):
+            cli_app.run(["eval", "graph", "--message-target", "lots"])
 
 
 class TestShowMatrixResults:
@@ -415,6 +423,8 @@ def graph_doc() -> dict[str, Any]:
     return {
         "kind": "graph_eval",
         "profile": "smoke",
+        "message_target": None,
+        "corpus_stem": "smoke",
         "seed": 13,
         "n_queries": 3,
         "kinds": ["aggregation", "verification", "relation"],
@@ -502,6 +512,33 @@ class TestShowGraphResults:
         assert "timed out" in out
         assert "1 query(ies) raised" in out
         assert "20260726-graph.json" in out
+
+    def test_a_capped_run_says_so(self) -> None:
+        """A capped corpus's numbers only compare to the same corpus."""
+        doc = graph_doc()
+        doc["profile"] = "full"
+        doc["message_target"] = 1000
+        doc["corpus_stem"] = "full-mt1000"
+        with console.capture() as capture:
+            cli_app._show_graph_results(doc)
+        out = capture.get()
+        assert "--message-target 1000" in out
+        assert "full-mt1000" in out
+
+    def test_an_uncapped_run_says_nothing_about_a_cap(self) -> None:
+        with console.capture() as capture:
+            cli_app._show_graph_results(graph_doc())
+        assert "--message-target" not in capture.get()
+
+    def test_a_result_file_predating_the_cap_still_renders(self) -> None:
+        doc = graph_doc()
+        del doc["message_target"]
+        del doc["corpus_stem"]
+        with console.capture() as capture:
+            cli_app._show_graph_results(doc)
+        out = capture.get()
+        assert "GraphRAG bake-off" in out
+        assert "--message-target" not in out
 
     def test_a_skip_build_run_renders_without_build_numbers(self) -> None:
         doc = graph_doc()
