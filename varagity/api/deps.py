@@ -41,6 +41,14 @@ PROBE_TIMEOUT_SECONDS = 3.0
 # in-process API (see varagity.pipeline) — degraded tracking, working chat.
 CHAT_REQUIRED_SERVICES = ("postgres", "elasticsearch", "llamacpp", "infinity")
 
+# What a *graph* turn needs instead: the graph engine self-stores, so
+# Elasticsearch is off the path entirely — postgres stays (the turn
+# persists), and both GPU services are on it (the engine's keyword
+# extraction and query embedding). A graph turn that degraded to chunk RAG
+# runs the chunk preflight instead, ES included: the route picks the set
+# after it knows which corpus will actually answer.
+GRAPH_CHAT_REQUIRED_SERVICES = ("postgres", "llamacpp", "infinity")
+
 
 def get_llm() -> LLMClient:
     """Provide the chat LLM client (override seam for tests).
@@ -290,6 +298,29 @@ def get_services_preflight() -> Callable[[], Awaitable[None]]:
         :func:`require_chat_services`.
     """
     return require_chat_services
+
+
+async def require_graph_chat_services() -> None:
+    """Graph-chat preflight: 503 if a service the graph turn needs is down.
+
+    Raises:
+        HTTPException: ``503`` naming the first unreachable service among
+            :data:`GRAPH_CHAT_REQUIRED_SERVICES`.
+    """
+    statuses = await check_services(GRAPH_CHAT_REQUIRED_SERVICES)
+    for name in GRAPH_CHAT_REQUIRED_SERVICES:
+        status = statuses[name]
+        if not status.ok:
+            raise _unreachable(name, status.detail or "no detail")
+
+
+def get_graph_chat_preflight() -> Callable[[], Awaitable[None]]:
+    """Provide the graph-chat reachability preflight (override seam for tests).
+
+    Returns:
+        :func:`require_graph_chat_services`.
+    """
+    return require_graph_chat_services
 
 
 async def require_ingest_services() -> None:

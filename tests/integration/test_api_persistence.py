@@ -28,7 +28,7 @@ from tests.unit.test_api_chat import (
 from varagity.eval.containers import ephemeral_postgres
 from varagity.stores.conversation_store import DEFAULT_TITLE, ConversationStore
 from varagity.stores.migrate import MIGRATIONS_PATH, run_migrations
-from varagity.stores.records import RetrievalTrace, RetrievedChunk
+from varagity.stores.records import GraphSourceSnapshot, RetrievalTrace, RetrievedChunk
 
 pytestmark = pytest.mark.integration
 
@@ -40,6 +40,7 @@ ALL_MIGRATIONS = [
     "003_condensed_query.sql",
     "004_message_engine.sql",
     "005_conversation_groups.sql",
+    "006_graph_turns.sql",
 ]
 
 
@@ -93,6 +94,10 @@ class TestMigrationRunner:
             columns = _message_columns(conn)
             assert columns["condensed_query"] == ("text", "YES")
             assert columns["chat_engine"] == ("text", "YES")
+            # …and the stage-2 pair (006), nullable by design: NULL is
+            # "pre-stage-2 history" and, for graph_evidence, "it degraded".
+            assert columns["target_corpus"] == ("text", "YES")
+            assert columns["graph_evidence"] == ("jsonb", "YES")
             # Idempotent: a second run applies nothing and changes nothing.
             assert run_migrations(conn) == []
             applied = conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall()
@@ -214,6 +219,74 @@ class TestConversationStoreRoundTrip:
             summaries = store.list_conversations()
             assert summaries[0].conversation_id == created.conversation_id
             assert summaries[0].message_count == 2
+
+    def test_a_graph_turn_round_trips_through_the_006_columns(self, migrated_conninfo: str) -> None:
+        """★ The stage-2 turn, real Postgres: JSONB evidence + day snapshots."""
+        with ConversationStore(migrated_conninfo) as store:
+            created = store.create_conversation()
+            store.append_message(created.conversation_id, "user", "what about Bob?")
+            store.append_message(
+                created.conversation_id,
+                "assistant",
+                "Bob built a PC. [SOURCE]: Hardware Talk (2016-03-04)",
+                retrieval_method="mix",
+                chat_engine="simple",
+                target_corpus="graph",
+                graph_evidence={
+                    "mode": "mix",
+                    "entities": [{"name": "Bob", "type": "person", "summary": None}],
+                    "relations": [],
+                },
+                graph_sources=[
+                    GraphSourceSnapshot(
+                        doc_key="iMessage;-;+15125550101::2016-03-04",
+                        thread_name="Hardware Talk",
+                        span="2016-03-04",
+                        excerpt="[18:22] Bob: I built the PC",
+                        message_guids=["g1", "g2"],
+                    )
+                ],
+            )
+
+            detail = store.get_conversation(created.conversation_id)
+            assert detail is not None
+            user, assistant = detail.messages
+            assert user.target_corpus is None  # provenance is assistant-only
+            assert assistant.target_corpus == "graph"
+            assert assistant.retrieval_method == "mix"  # the graph's vocabulary
+            assert assistant.graph_evidence is not None
+            assert assistant.graph_evidence["entities"][0]["name"] == "Bob"
+            (source,) = assistant.sources
+            assert source.rank == 1
+            assert source.chunk_id == "iMessage;-;+15125550101::2016-03-04"
+            assert source.trace == {
+                "kind": "graph_transcript",
+                "thread_name": "Hardware Talk",
+                "span": "2016-03-04",
+                "excerpt": "[18:22] Bob: I built the PC",
+                "message_guids": ["g1", "g2"],
+            }
+
+    def test_a_degraded_graph_turn_records_the_request_with_null_evidence(
+        self, migrated_conninfo: str
+    ) -> None:
+        """★ ADR-017's honest record survives the round trip."""
+        with ConversationStore(migrated_conninfo) as store:
+            created = store.create_conversation()
+            store.append_message(
+                created.conversation_id,
+                "assistant",
+                "It is 42.",
+                retrieval_method="hybrid",
+                target_corpus="graph",
+                sources=[make_chunk(0)],
+            )
+            detail = store.get_conversation(created.conversation_id)
+            assert detail is not None
+            (assistant,) = detail.messages
+            assert assistant.target_corpus == "graph"
+            assert assistant.graph_evidence is None
+            assert assistant.sources[0].chunk_id == "doc::0"
 
     def test_delete_cascades_to_messages_and_sources(self, migrated_conninfo: str) -> None:
         with ConversationStore(migrated_conninfo) as store:

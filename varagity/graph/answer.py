@@ -7,6 +7,13 @@ engine adapter rather than reimplemented per engine — it started as the
 Graphiti adapter's private synthesis (the fact-shaped candidate had no answer
 pipeline of its own) and was generalized when it became the shipped design.
 
+Two renderers, one diet: :func:`synthesis_context` grounds the harness's
+non-streaming :func:`synthesize` (and the adapter's ``+synthesis`` modes),
+while :func:`graph_answer_context` renders the *same* facts and passages in
+the chunk-RAG ``[SOURCE]`` block shape the streamed API path answers from.
+Keeping the two payloads identical is what lets ``eval graph`` keep guarding
+the shipped query path.
+
 Two rules run through it:
 
 * **The context is the whole retrieval payload**, not just relation facts:
@@ -27,9 +34,10 @@ cap has to be applied here — see :func:`synthesis_max_chars`.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
-from varagity.graph.records import GraphEvidence, TranscriptExcerpt
+from varagity.generation.answer import format_source_block
+from varagity.graph.records import GraphEvidence, GraphRetrieval, TranscriptExcerpt
 from varagity.models.llm import LLMClient, clean_response
 
 logger = logging.getLogger(__name__)
@@ -79,8 +87,29 @@ _MIN_CONTEXT_CHARS = 1000
 
 _FACTS_HEADER = "FACTS:"
 _EXCERPTS_HEADER = "TRANSCRIPT EXCERPTS:"
+# The facts header of the *streamed* path, whose context is read under
+# varagity.generation.answer.ANSWER_PROMPT ("cite the [SOURCE] of any facts
+# you use"). Deliberately not a [SOURCE] block: relations are derived from
+# the transcripts below them, so a citable label here would produce chips
+# the evidence panel has no card for.
+_GRAPH_FACTS_HEADER = "GRAPH FACTS (relations extracted from the transcripts below):"
 _SECTION_SEPARATOR = "\n\n"
 _ELLIPSIS = " […]"
+
+
+def answer_context_max_chars(context_tokens: int, generation_tokens: int) -> int:
+    """Size a grounding context so prompt + answer fits the context window.
+
+    Args:
+        context_tokens: The served model's context window
+            (``LLM_CONTEXT_TOKENS``).
+        generation_tokens: The generation cap the answer call will request.
+
+    Returns:
+        The character budget, never below :data:`_MIN_CONTEXT_CHARS`.
+    """
+    budget = context_tokens - generation_tokens - _PROMPT_HEADROOM_TOKENS
+    return max(_MIN_CONTEXT_CHARS, budget * _CHARS_PER_TOKEN)
 
 
 def synthesis_max_chars(context_tokens: int) -> int:
@@ -94,8 +123,25 @@ def synthesis_max_chars(context_tokens: int) -> int:
         The character budget for :func:`synthesis_context`, never below
         :data:`_MIN_CONTEXT_CHARS`.
     """
-    budget = context_tokens - SYNTHESIS_MAX_TOKENS - _PROMPT_HEADROOM_TOKENS
-    return max(_MIN_CONTEXT_CHARS, budget * _CHARS_PER_TOKEN)
+    return answer_context_max_chars(context_tokens, SYNTHESIS_MAX_TOKENS)
+
+
+def transcript_label(excerpt: TranscriptExcerpt) -> str:
+    """Render the citation label of one transcript passage.
+
+    The one owner of the label, because it is matched three ways: the model
+    cites it out of the prompt, the evidence panel keys its cards by it, and
+    the persisted ``message_sources`` snapshot stores it. A day-grain label
+    is also the ADR-017 honesty line — the engines cannot attribute a single
+    message, so nothing here pretends to.
+
+    Args:
+        excerpt: The retrieved passage.
+
+    Returns:
+        ``"{thread_name} ({span})"``.
+    """
+    return f"{excerpt.thread_name} ({excerpt.span})"
 
 
 def facts_block(evidence: GraphEvidence) -> str:
@@ -128,8 +174,9 @@ def excerpts_block(excerpts: Sequence[TranscriptExcerpt], *, max_chars: int) -> 
     Whole excerpts are packed until the next one would not fit; a single
     excerpt larger than the whole budget is truncated rather than dropped
     (one oversized passage must not cost the answer its only grounding). The
-    label is ``[{thread_name} ({span})]`` — the same shape the shipped query
-    path cites with, so the model learns one source format.
+    label is ``[{thread_name} ({span})]`` — the same
+    :func:`transcript_label` the shipped query path cites with, so the model
+    learns one source format.
 
     Args:
         excerpts: Retrieved passages, most relevant first (the engine's
@@ -139,18 +186,68 @@ def excerpts_block(excerpts: Sequence[TranscriptExcerpt], *, max_chars: int) -> 
     Returns:
         The blocks, blank-line separated, never longer than ``max_chars``.
     """
+    return _pack(
+        excerpts,
+        max_chars=max_chars,
+        render=lambda excerpt, body: f"[{transcript_label(excerpt)}]\n{body}",
+    )
+
+
+def transcript_blocks(excerpts: Sequence[TranscriptExcerpt], *, max_chars: int) -> str:
+    """Render retrieved transcript passages as ``[SOURCE]`` provenance blocks.
+
+    :func:`excerpts_block`'s twin for the *streamed* answer path, which is
+    read under :data:`varagity.generation.answer.ANSWER_PROMPT` rather than
+    :data:`SYNTHESIS_PROMPT`: same packing, same labels, but the chunk-RAG
+    block shape, so a graph turn's citations, chips, and evidence-card
+    matching all work through the machinery chunk turns already use.
+
+    Args:
+        excerpts: Retrieved passages, most relevant first.
+        max_chars: Character budget for the whole block.
+
+    Returns:
+        The blocks, blank-line separated, never longer than ``max_chars``.
+    """
+    return _pack(
+        excerpts,
+        max_chars=max_chars,
+        render=lambda excerpt, body: format_source_block(
+            source=transcript_label(excerpt), context="", content=body
+        ),
+    )
+
+
+def _pack(
+    excerpts: Sequence[TranscriptExcerpt],
+    *,
+    max_chars: int,
+    render: Callable[[TranscriptExcerpt, str], str],
+) -> str:
+    """Fit as many rendered excerpts as a character budget holds.
+
+    Args:
+        excerpts: Retrieved passages, most relevant first (packing drops
+            from the tail, keeping the engine's relevance order).
+        max_chars: Character budget for the whole block.
+        render: Renders one excerpt's block around a body; called with an
+            empty body to measure the block's own overhead.
+
+    Returns:
+        The rendered blocks, blank-line separated, never longer than
+        ``max_chars``.
+    """
     blocks: list[str] = []
     used = 0
     for excerpt in excerpts:
         cost = used + (len(_SECTION_SEPARATOR) if blocks else 0)
-        header = f"[{excerpt.thread_name} ({excerpt.span})]"
-        room = max_chars - cost - len(header) - 1  # -1 for the header's newline
+        room = max_chars - cost - len(render(excerpt, ""))
         if room <= 0:
             break
         body = _truncate(excerpt.text.strip(), room)
         if not body:
             break
-        block = f"{header}\n{body}"
+        block = render(excerpt, body)
         used = cost + len(block)
         blocks.append(block)
     return _SECTION_SEPARATOR.join(blocks)
@@ -196,6 +293,46 @@ def synthesis_context(
     rendered = excerpts_block(excerpts, max_chars=max(0, room))
     if rendered:
         sections.append(f"{_EXCERPTS_HEADER}\n{rendered}")
+    return _SECTION_SEPARATOR.join(sections)
+
+
+def graph_answer_context(retrieval: GraphRetrieval, *, max_chars: int) -> str:
+    """Render one graph retrieval into the chunk-RAG grounding context.
+
+    :func:`synthesis_context`'s twin for the shipped streaming path
+    (stage-2 decision #5): the same diet — relation facts first, then as
+    many transcript passages as the budget holds — rendered in the shape
+    :data:`varagity.generation.answer.ANSWER_PROMPT` expects, so a graph
+    turn inherits the repo's grounding prompt, ``<think>`` splitting,
+    citation contract, abort handling, and token accounting whole.
+
+    The diets are deliberately identical: the ``eval graph`` harness scores
+    :func:`synthesis_context`, and it can only keep guarding this path while
+    both ground on the same evidence.
+
+    Args:
+        retrieval: What the engine found (entities and relations plus the
+            transcript passages).
+        max_chars: Character budget for the whole context — size it with
+            :func:`answer_context_max_chars`.
+
+    Returns:
+        The context block, never longer than ``max_chars``, and ``""`` when
+        the retrieval surfaced nothing at all (which the grounding prompt
+        turns into an honest "I don't know", not a fabrication).
+    """
+    sections: list[str] = []
+    used = 0
+    facts = facts_block(retrieval.evidence)
+    if facts:
+        section = _truncate(f"{_GRAPH_FACTS_HEADER}\n{facts}", max_chars)
+        if section:
+            sections.append(section)
+            used = len(section)
+    room = max_chars - used - (len(_SECTION_SEPARATOR) if sections else 0)
+    blocks = transcript_blocks(retrieval.excerpts, max_chars=max(0, room))
+    if blocks:
+        sections.append(blocks)
     return _SECTION_SEPARATOR.join(sections)
 
 

@@ -16,17 +16,21 @@ from varagity.graph import answer as graph_answer
 from varagity.graph.answer import (
     NO_EVIDENCE_ANSWER,
     SYNTHESIS_MAX_TOKENS,
+    answer_context_max_chars,
     excerpts_block,
     facts_block,
+    graph_answer_context,
     synthesis_context,
     synthesis_max_chars,
     synthesize,
+    transcript_label,
 )
 from varagity.graph.records import (
     GraphCommunity,
     GraphEntity,
     GraphEvidence,
     GraphRelation,
+    GraphRetrieval,
     TranscriptExcerpt,
 )
 
@@ -72,6 +76,12 @@ def excerpt(
         "text": text,
     }
     return TranscriptExcerpt(**{**defaults, **kwargs})
+
+
+def retrieval(
+    *, excerpts: list[TranscriptExcerpt] | None = None, mode: str = "mix"
+) -> GraphRetrieval:
+    return GraphRetrieval(evidence=evidence(), excerpts=excerpts or [], mode=mode)
 
 
 class TestFactsBlock:
@@ -188,13 +198,81 @@ class TestSynthesisContext:
         assert synthesis_context(evidence(), [excerpt()], max_chars=0) == ""
 
 
-class TestSynthesisMaxChars:
+class TestGraphAnswerContext:
+    """The streamed path's renderer — same diet, chunk-RAG block shape."""
+
+    def test_transcripts_render_as_citable_source_blocks(self) -> None:
+        """★ The label is the citation contract: chips resolve to cards by it."""
+        rendered = graph_answer_context(retrieval(excerpts=[excerpt()]), max_chars=1000)
+        assert rendered.splitlines() == [
+            "GRAPH FACTS (relations extracted from the transcripts below):",
+            "- Bob prefers mechanical keyboards",
+            "",
+            "[SOURCE]:  Hardware Talk (2016-03-04)",
+            "[CONTEXT]: ",
+            "[CONTENT]: [2016-03-04 18:22] Bob: I built the PC",
+        ]
+
+    def test_the_source_label_is_what_the_evidence_cards_are_keyed_by(self) -> None:
+        assert transcript_label(excerpt()) == "Hardware Talk (2016-03-04)"
+
+    def test_the_facts_block_is_not_itself_citable(self) -> None:
+        """A [SOURCE] there would produce chips with no card behind them."""
+        rendered = graph_answer_context(retrieval(), max_chars=1000)
+        assert "[SOURCE]" not in rendered
+
+    def test_transcripts_alone_still_ground_an_answer(self) -> None:
+        rendered = graph_answer_context(
+            GraphRetrieval(evidence=GraphEvidence(), excerpts=[excerpt()], mode="mix"),
+            max_chars=1000,
+        )
+        assert rendered.startswith("[SOURCE]:")
+
+    def test_an_empty_retrieval_renders_nothing(self) -> None:
+        """Which the grounding prompt turns into "I don't know", not a fabrication."""
+        empty = GraphRetrieval(evidence=GraphEvidence(), excerpts=[], mode="mix")
+        assert graph_answer_context(empty, max_chars=1000) == ""
+
+    def test_facts_are_kept_when_the_budget_only_fits_them(self) -> None:
+        rendered = graph_answer_context(retrieval(excerpts=[excerpt(text="x" * 900)]), max_chars=95)
+        assert rendered.startswith("GRAPH FACTS")
+        assert "[SOURCE]" not in rendered
+
+    @pytest.mark.parametrize("max_chars", [40, 120, 400, 4000])
+    def test_the_whole_context_honors_the_budget(self, max_chars: int) -> None:
+        rendered = graph_answer_context(
+            retrieval(
+                excerpts=[
+                    excerpt(text="x" * 900),
+                    excerpt(text="y" * 900, span="2016-03-05"),
+                ]
+            ),
+            max_chars=max_chars,
+        )
+        assert len(rendered) <= max_chars
+
+    def test_it_grounds_on_exactly_what_the_harness_measures(self) -> None:
+        """★ Same facts, same passages — only the block shape differs."""
+        payload = retrieval(excerpts=[excerpt(), excerpt(text="second", span="2016-03-05")])
+        streamed = graph_answer_context(payload, max_chars=4000)
+        scored = synthesis_context(payload.evidence, payload.excerpts, max_chars=4000)
+        for fragment in ("Bob prefers mechanical keyboards", "I built the PC", "second"):
+            assert fragment in streamed
+            assert fragment in scored
+
+
+class TestContextBudgets:
     def test_the_budget_leaves_room_for_the_answer_and_the_prompt(self) -> None:
         assert synthesis_max_chars(16384) == (16384 - SYNTHESIS_MAX_TOKENS - 1024) * 3
 
     def test_a_tiny_window_still_gets_a_floor(self) -> None:
         assert synthesis_max_chars(1024) == 1000
         assert synthesis_max_chars(0) == 1000
+
+    def test_the_streamed_budget_reserves_the_real_generation_cap(self) -> None:
+        """MAX_TOKENS, not the synthesis cap — the streamed answer may be long."""
+        assert answer_context_max_chars(16384, 8192) == (16384 - 8192 - 1024) * 3
+        assert answer_context_max_chars(16384, 16384) == 1000
 
 
 class TestSynthesize:

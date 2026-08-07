@@ -27,10 +27,12 @@ be silently kept: the shipped adapter diffs rendered content hashes against
 
 The rest of the protocol is what an application needs beyond a benchmark
 (stage-2 decision #11): :meth:`GraphSession.resume` to finish a killed build,
-:meth:`GraphSession.export` to draw the graph, :meth:`GraphSession.delete_documents`
-to retract sources, and :meth:`GraphSession.document_statuses` to report
-progress. Sessions are **single-writer per working directory** by engine
-invariant, which is why exactly one process (the API) ever opens one.
+:meth:`GraphSession.retrieve` to feed a *streamed* answer the app writes
+itself, :meth:`GraphSession.export` to draw the graph,
+:meth:`GraphSession.delete_documents` to retract sources, and
+:meth:`GraphSession.document_statuses` to report progress. Sessions are
+**single-writer per working directory** by engine invariant, which is why
+exactly one process (the API) ever opens one.
 """
 
 from collections.abc import Callable, Sequence
@@ -38,7 +40,13 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from varagity.graph.records import BuildReport, GraphAnswer, GraphExport, GraphStats
+from varagity.graph.records import (
+    BuildReport,
+    GraphAnswer,
+    GraphExport,
+    GraphRetrieval,
+    GraphStats,
+)
 from varagity.graph.sources.base import MessageBatch
 
 
@@ -87,6 +95,31 @@ class GraphSession(Protocol):
         Returns:
             What the pass did. ``messages_seen`` describes the corpus already
             indexed, not a fresh hand-off.
+        """
+        ...
+
+    def retrieve(
+        self, question: str, *, mode: str | None = None, verbose: int = 0
+    ) -> GraphRetrieval:
+        """Find the evidence for one question, writing no answer at all.
+
+        The shipped query path's first half (ADR-017's retrieval-only
+        decision): the app streams its own grounded answer over what this
+        returns, so an engine must be able to retrieve *without* spending its
+        own answer call. :meth:`query` is this composed with an answer stage,
+        which is what keeps the harness measuring the shipped diet.
+
+        Args:
+            question: The search query, verbatim — already condensed by the
+                chat engine when the turn needed it (the answer prompt still
+                gets the user's own words; spec_v3 §4.2).
+            mode: Engine query mode; ``None`` uses the adapter's primary.
+            verbose: Validated console verbosity (0–2).
+
+        Returns:
+            The evidence and transcript passages, empty when the engine
+            could not retrieve (a graph turn degrades to "no facts", it does
+            not raise).
         """
         ...
 

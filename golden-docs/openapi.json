@@ -106,7 +106,7 @@
         "type": "object"
       },
       "ChatRequest": {
-        "description": "Body of ``POST /api/chat`` (spec_v2 \u00a74.2).\n\nAttributes:\n    query: The user's question.\n    conversation_id: Existing conversation to append the turn to; a new\n        conversation is created when omitted.\n    overrides: Optional per-request setting overrides.",
+        "description": "Body of ``POST /api/chat`` (spec_v2 \u00a74.2, spec_graphrag \u00a74.2).\n\nAttributes:\n    query: The user's question.\n    conversation_id: Existing conversation to append the turn to; a new\n        conversation is created when omitted.\n    overrides: Optional per-request setting overrides.\n    corpus: Which corpus to answer from \u2014 ``\"rag\"`` (the chunk corpus,\n        the default when omitted) or ``\"graph\"`` (the message archive).\n        The **router-fillable** field: automatic routing is out of scope\n        (spec_graphrag \u00a76), so today the composer sets it and later a\n        router fills the same field, changing no contract.",
         "properties": {
           "conversation_id": {
             "anyOf": [
@@ -118,6 +118,21 @@
               }
             ],
             "title": "Conversation Id"
+          },
+          "corpus": {
+            "anyOf": [
+              {
+                "enum": [
+                  "rag",
+                  "graph"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corpus"
           },
           "overrides": {
             "anyOf": [
@@ -943,6 +958,44 @@
         "title": "GraphDocumentOut",
         "type": "object"
       },
+      "GraphEntityOut": {
+        "description": "One entity the graph retrieval surfaced (spec_graphrag \u00a710.2).\n\nAttributes:\n    name: The entity's canonical name, as the engine resolved it.\n    type: The engine's entity type/category (``None`` when untyped) \u2014\n        what the evidence chips and the graph view color by, LightRAG\n        having no community tier (ADR-017).\n    summary: The engine's description of the entity.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Summary"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Type"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "GraphEntityOut",
+        "type": "object"
+      },
       "GraphParseSummary": {
         "description": "What the last build's scan found inside one graph source file.\n\nAttributes:\n    messages: Recoverable messages parsed from the file.\n    threads: Distinct conversations they belong to.\n    first: Oldest message timestamp (``None`` for an empty parse).\n    last: Newest message timestamp (``None`` for an empty parse).",
         "properties": {
@@ -984,6 +1037,87 @@
           "threads"
         ],
         "title": "GraphParseSummary",
+        "type": "object"
+      },
+      "GraphRelationOut": {
+        "description": "One relation the graph retrieval surfaced (spec_graphrag \u00a710.2).\n\nAttributes:\n    source: Name of the edge's source entity.\n    target: Name of the edge's target entity.\n    label: Short relation label/keywords (``None`` when unlabelled).\n    description: The engine's longer description \u2014 the *fact* the answer\n        grounds on.",
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ],
+        "title": "GraphRelationOut",
+        "type": "object"
+      },
+      "GraphRetrievalPayload": {
+        "description": "The graph half of the SSE ``retrieval`` event (spec_graphrag \u00a74.3).\n\nAttributes:\n    mode: The engine query mode the turn retrieved with\n        (``GRAPH_QUERY_MODE``).\n    entities: Entities the retrieval surfaced.\n    relations: Relations the retrieval surfaced.\n    transcripts: The cited transcript days, best first \u2014 the cards a\n        citation chip resolves to, labelled ``\"{thread} ({span})\"``.",
+        "properties": {
+          "entities": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GraphEntityOut"
+            },
+            "title": "Entities",
+            "type": "array"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "relations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GraphRelationOut"
+            },
+            "title": "Relations",
+            "type": "array"
+          },
+          "transcripts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GraphTranscriptOut"
+            },
+            "title": "Transcripts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "title": "GraphRetrievalPayload",
         "type": "object"
       },
       "GraphStatusOut": {
@@ -1059,6 +1193,40 @@
           "building"
         ],
         "title": "GraphStatusOut",
+        "type": "object"
+      },
+      "GraphTranscriptOut": {
+        "description": "One cited transcript day of a graph answer (spec_graphrag \u00a74.3).\n\nEvidence is **day-grain, not message-grain**: that is what the engines\ncan honestly attribute (ADR-017's priced regret), so this is the card\nthe evidence panel draws and the label the answer cites.\n\nAttributes:\n    doc_key: The transcript document key \u2014 the join back to the corpus.\n    thread_name: Human-facing thread label.\n    span: The document's day span (``YYYY-MM-DD`` or ``first..last``).\n    excerpt: The retrieved passage, capped for the wire.\n    message_count: Messages the graph's manifest accounts for in that\n        document (``0`` when it cannot say \u2014 never a claim of empty).",
+        "properties": {
+          "doc_key": {
+            "title": "Doc Key",
+            "type": "string"
+          },
+          "excerpt": {
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "message_count": {
+            "default": 0,
+            "title": "Message Count",
+            "type": "integer"
+          },
+          "span": {
+            "title": "Span",
+            "type": "string"
+          },
+          "thread_name": {
+            "title": "Thread Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "doc_key",
+          "thread_name",
+          "span",
+          "excerpt"
+        ],
+        "title": "GraphTranscriptOut",
         "type": "object"
       },
       "GraphUploadResponse": {
@@ -1398,7 +1566,7 @@
         "type": "object"
       },
       "MessageOut": {
-        "description": "One persisted message in a transcript.\n\nAttributes:\n    message_id: The app-generated id.\n    role: ``\"user\"`` or ``\"assistant\"``.\n    content: The question or the generated answer.\n    created_at: Persistence timestamp.\n    retrieval_method: Retrieval method of an assistant turn.\n    latency_ms: Per-stage timings of an assistant turn.\n    reasoning: Captured ``<think>`` stream, if any.\n    condensed_query: The standalone search query that drove an\n        assistant turn's retrieval (spec_v3 \u00a78 \u2014 snapshot semantics,\n        like the sources: it explains a historical answer). ``None``\n        when the search used the user's words verbatim.\n    chat_engine: Registry name of the chat engine that produced an\n        assistant turn (``None`` for user turns and pre-v3 history).\n    sources: The turn's snapshotted evidence, rank order.",
+        "description": "One persisted message in a transcript.\n\nAttributes:\n    message_id: The app-generated id.\n    role: ``\"user\"`` or ``\"assistant\"``.\n    content: The question or the generated answer.\n    created_at: Persistence timestamp.\n    retrieval_method: Retrieval method of an assistant turn.\n    latency_ms: Per-stage timings of an assistant turn.\n    reasoning: Captured ``<think>`` stream, if any.\n    condensed_query: The standalone search query that drove an\n        assistant turn's retrieval (spec_v3 \u00a78 \u2014 snapshot semantics,\n        like the sources: it explains a historical answer). ``None``\n        when the search used the user's words verbatim.\n    chat_engine: Registry name of the chat engine that produced an\n        assistant turn (``None`` for user turns and pre-v3 history).\n    target_corpus: The corpus the turn asked for (``\"rag\"`` |\n        ``\"graph\"``); ``None`` for user turns and pre-stage-2 history,\n        which clients read as chunk RAG. Recorded even when the graph\n        turn degraded \u2014 the request is part of the record (ADR-017).\n    graph_evidence: The graph retrieval's ``mode``/``entities``/\n        ``relations`` snapshot; ``None`` for chunk turns and for a\n        degraded graph turn, whose evidence is chunk-shaped in\n        ``sources``.\n    sources: The turn's snapshotted evidence, rank order.",
         "properties": {
           "chat_engine": {
             "anyOf": [
@@ -1430,6 +1598,18 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "graph_evidence": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Graph Evidence"
           },
           "latency_ms": {
             "anyOf": [
@@ -1480,6 +1660,17 @@
             },
             "title": "Sources",
             "type": "array"
+          },
+          "target_corpus": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Corpus"
           }
         },
         "required": [
@@ -1492,7 +1683,7 @@
         "type": "object"
       },
       "MessageSourceOut": {
-        "description": "One snapshotted evidence row of a persisted assistant turn.\n\nAttributes:\n    rank: Final rank in the answer's evidence (1-based).\n    chunk_id: Soft reference to the producing chunk.\n    trace: The spec_v2 \u00a79.1 snapshot: score, content, context, source\n        provenance, and the serialized retrieval trace.",
+        "description": "One snapshotted evidence row of a persisted assistant turn.\n\nAttributes:\n    rank: Final rank in the answer's evidence (1-based).\n    chunk_id: Soft reference to the producing chunk \u2014 or, on a graph\n        turn, the cited transcript day's ``doc_key``.\n    trace: The spec_v2 \u00a79.1 snapshot: score, content, context, source\n        provenance, and the serialized retrieval trace. A graph turn's\n        rows carry the other shape (``kind=\"graph_transcript\"`` plus\n        thread/span/excerpt/guids), so clients branch on ``kind``.",
         "properties": {
           "chunk_id": {
             "title": "Chunk Id",
@@ -1657,7 +1848,7 @@
         "type": "object"
       },
       "RetrievalEvent": {
-        "description": "Payload of the SSE ``retrieval`` event \u2014 the provenance panel's data.\n\nEmitted once retrieval (+rerank) completes, **before** any answer token\n(spec_v2 \u00a74.3): the browser gets the evidence before the prose.\n\nAttributes:\n    chunks: The retrieved chunks, best first, each carrying its full\n        metadata record and (when the method fills it) the\n        :class:`~varagity.stores.records.RetrievalTrace`.\n    method: The retrieval method that produced them.\n    top_k: Chunks requested from the retriever.\n    reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrowed\n        the list; ``None`` otherwise.\n    condensed_query: The standalone search query the chat engine\n        rewrote this turn into (spec_v3 \u00a74.7) \u2014 retrieval metadata,\n        like ``method``: it names what was actually searched.\n        ``None`` whenever the search used the user's words verbatim\n        (the ``simple`` engine, a first turn, the kill switch, or the\n        condense fallback).",
+        "description": "Payload of the SSE ``retrieval`` event \u2014 the provenance panel's data.\n\nEmitted once retrieval (+rerank) completes, **before** any answer token\n(spec_v2 \u00a74.3): the browser gets the evidence before the prose. One\nevent name covers both corpora (spec_graphrag \u00a74.3): a graph turn fills\n``graph`` and leaves ``chunks`` empty, and a graph turn that *degraded*\nto a chunk answer is visibly exactly that \u2014 ``corpus=\"graph\"`` with\n``graph=null`` and chunks present (ADR-017's degrade semantics).\n\nAttributes:\n    chunks: The retrieved chunks, best first, each carrying its full\n        metadata record and (when the method fills it) the\n        :class:`~varagity.stores.records.RetrievalTrace`. Empty for a\n        graph turn.\n    method: What actually retrieved, in the corpus's own vocabulary: the\n        retrieval-method registry name for a chunk turn, the engine\n        query mode for a graph one (also in ``graph.mode``).\n    top_k: Chunks requested from the retriever \u2014 a chunk-retrieval knob,\n        reported unchanged on a graph turn, which bounds its evidence\n        engine-side instead.\n    reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrowed\n        the list; ``None`` otherwise.\n    condensed_query: The standalone search query the chat engine\n        rewrote this turn into (spec_v3 \u00a74.7) \u2014 retrieval metadata,\n        like ``method``: it names what was actually searched.\n        ``None`` whenever the search used the user's words verbatim\n        (the ``simple`` engine, a first turn, the kill switch, or the\n        condense fallback). Applies to both corpora: the condensed\n        words are what the graph engine searched too.\n    corpus: The corpus the turn asked for (``\"rag\"`` | ``\"graph\"``).\n    graph: The graph evidence, present only on a graph turn that the\n        engine actually answered.",
         "properties": {
           "chunks": {
             "items": {
@@ -1677,6 +1868,22 @@
             ],
             "default": null,
             "title": "Condensed Query"
+          },
+          "corpus": {
+            "default": "rag",
+            "title": "Corpus",
+            "type": "string"
+          },
+          "graph": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphRetrievalPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "method": {
             "title": "Method",

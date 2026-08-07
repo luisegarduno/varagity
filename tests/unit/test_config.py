@@ -285,6 +285,41 @@ class TestGraphEngineValidation:
         assert len(GRAPH_ENGINE_REGISTRY) == 1  # lightrag, since ADR-017
 
 
+class TestGraphQueryModeValidation:
+    """``GRAPH_QUERY_MODE`` (spec_graphrag §4.3) — the shipped retrieval mode."""
+
+    def test_the_default_is_the_acceptance_gates_winner(self) -> None:
+        """★ ADR-017: prefixed ``mix`` scored 0.4216 against the 0.37 bar."""
+        assert Settings(_env_file=None).GRAPH_QUERY_MODE == "mix"
+
+    @pytest.mark.parametrize("mode", ["local", "global", "hybrid", "naive", "mix"])
+    def test_every_engine_mode_is_accepted(self, mode: str) -> None:
+        assert mode == Settings(_env_file=None, GRAPH_QUERY_MODE=mode).GRAPH_QUERY_MODE
+
+    @pytest.mark.parametrize("bad", ["Mix", "", "hybrid+synthesis", "made_up"])
+    def test_unknown_modes_fail_fast(self, bad: str) -> None:
+        """A typo must not silently answer from the engine's own default mode."""
+        with pytest.raises(ValidationError, match="GRAPH_QUERY_MODE"):
+            Settings(_env_file=None, GRAPH_QUERY_MODE=bad)
+
+    def test_vocabulary_matches_the_adapters(self) -> None:
+        """config.py hard-codes the tuple (circular import); keep them equal."""
+        from varagity.graph.engines.lightrag import QUERY_MODES
+
+        for name in QUERY_MODES:
+            assert name == Settings(_env_file=None, GRAPH_QUERY_MODE=name).GRAPH_QUERY_MODE
+        assert len(QUERY_MODES) == 5
+
+    def test_the_settings_drawer_offers_exactly_those_modes(self) -> None:
+        """The overridable catalog reads the adapter, so it cannot drift."""
+        from varagity.api.runtime_settings import OVERRIDABLE
+        from varagity.graph.engines.lightrag import QUERY_MODES
+
+        choices = OVERRIDABLE["GRAPH_QUERY_MODE"].choices
+        assert choices is not None
+        assert choices() == list(QUERY_MODES)
+
+
 class TestCondenseValidation:
     """The condense-stage knobs (spec_v3 §4.6) and their domains."""
 

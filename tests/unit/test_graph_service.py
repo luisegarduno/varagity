@@ -23,6 +23,7 @@ from varagity.graph.records import (
     GraphEvidence,
     GraphExport,
     GraphExportNode,
+    GraphRetrieval,
     GraphStats,
 )
 from varagity.graph.service import (
@@ -44,6 +45,7 @@ class FakeSession:
         self.builds: list[bool] = []
         self.resumes = 0
         self.queries: list[tuple[str, str | None]] = []
+        self.retrievals: list[tuple[str, str | None]] = []
         self.deleted: list[str] = []
         self.exports: list[tuple[str, int, int]] = []
 
@@ -63,6 +65,12 @@ class FakeSession:
     def resume(self, *, verbose: int = 0) -> BuildReport:
         self.resumes += 1
         return BuildReport(messages_seen=3, wall_clock_s=0.0)
+
+    def retrieve(
+        self, question: str, *, mode: str | None = None, verbose: int = 0
+    ) -> GraphRetrieval:
+        self.retrievals.append((question, mode))
+        return GraphRetrieval(evidence=GraphEvidence(), mode=mode or "hybrid")
 
     def query(self, question: str, *, mode: str | None = None, verbose: int = 0) -> GraphAnswer:
         self.queries.append((question, mode))
@@ -287,6 +295,9 @@ class TestWriteLock:
         try:
             assert entered.wait(timeout=5)
             assert resolved.query("who is Bob?", mode="mix").answer == "ok"
+            # The chat path's read — a graph question mid-backfill is the
+            # whole reason reads take no lock (decision #10).
+            assert resolved.retrieve("who is Bob?", mode="mix").mode == "mix"
             assert resolved.stats() == GraphStats(entities=4, relations=3, communities=None)
             assert resolved.document_statuses() == {"processed": 9}
             assert [node.id for node in resolved.export("Bob", max_nodes=5).nodes] == ["Bob"]
@@ -313,11 +324,21 @@ class TestWriteLock:
     def test_reads_forward_their_arguments(self, registered: Any, tmp_path: Path) -> None:
         resolved, engine = service(registered, tmp_path)
         resolved.query("q", mode="global")
+        resolved.retrieve("q", mode="mix")
         resolved.export("Bob", max_depth=1, max_nodes=25)
         resolved.close()
         (session,) = engine.sessions
         assert session.queries == [("q", "global")]
+        assert session.retrievals == [("q", "mix")]
         assert session.exports == [("Bob", 1, 25)]
+
+    def test_an_unopenable_engine_surfaces_as_a_degradable_error(
+        self, registered: Any, tmp_path: Path
+    ) -> None:
+        """The chat route turns this into ADR-017's per-turn degrade."""
+        resolved, _ = service(registered, tmp_path, fail_open=True)
+        with pytest.raises(GraphUnavailable):
+            resolved.retrieve("q")
 
 
 class TestSingleton:

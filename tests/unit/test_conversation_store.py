@@ -19,9 +19,10 @@ from varagity.stores.conversation_store import (
     DEFAULT_TITLE,
     ConversationStore,
     _generate_title,
+    _graph_source_snapshot,
     _source_snapshot,
 )
-from varagity.stores.records import RetrievalTrace, RetrievedChunk
+from varagity.stores.records import GraphSourceSnapshot, RetrievalTrace, RetrievedChunk
 
 CREATED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=UTC)
 UPDATED_AT = datetime(2026, 7, 21, 9, 5, 0, tzinfo=UTC)
@@ -88,6 +89,27 @@ class TestSourceSnapshot:
         snapshot = _source_snapshot(chunk)
         assert snapshot["file_created_at"] is None
         assert snapshot["file_modified_at"] is None
+
+    def test_a_graph_snapshot_is_discriminated_and_self_contained(self) -> None:
+        """★ Two shapes share the column, so the graph one has to say so."""
+        snapshot = _graph_source_snapshot(
+            GraphSourceSnapshot(
+                doc_key="thread::2016-03-04",
+                thread_name="Hardware Talk",
+                span="2016-03-04",
+                excerpt="[18:22] Bob: I built the PC",
+                message_guids=["g1"],
+            )
+        )
+        assert snapshot == {
+            "kind": "graph_transcript",
+            "thread_name": "Hardware Talk",
+            "span": "2016-03-04",
+            "excerpt": "[18:22] Bob: I built the PC",
+            "message_guids": ["g1"],
+        }
+        # The chunk shape stays undiscriminated: nothing was migrated.
+        assert "kind" not in _source_snapshot(make_chunk())
 
 
 class ScriptedLLM:
@@ -363,7 +385,19 @@ class TestGetConversation:
         )
         message_rows = ScriptedCursor(
             rows=[
-                ("m1", "user", "How long?", CREATED_AT, None, None, None, None, None),
+                (
+                    "m1",
+                    "user",
+                    "How long?",
+                    CREATED_AT,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
                 (
                     "m2",
                     "assistant",
@@ -374,6 +408,8 @@ class TestGetConversation:
                     "thinking…",
                     "kelp corridor length",
                     "condense_context",
+                    "rag",
+                    None,
                 ),
             ]
         )
@@ -386,8 +422,86 @@ class TestGetConversation:
         assert assistant.retrieval_method == "reranked"
         assert assistant.condensed_query == "kelp corridor length"
         assert assistant.chat_engine == "condense_context"
+        assert assistant.target_corpus == "rag"
+        assert assistant.graph_evidence is None
         assert [source.chunk_id for source in assistant.sources] == ["doc::0", "doc::1"]
         assert assistant.sources[0].trace == {"score": 0.9}
+
+    def test_a_graph_turn_hydrates_its_corpus_evidence_and_day_sources(self) -> None:
+        """★ The stage-2 columns read back as one turn, snapshot and all."""
+        conversation_row = ScriptedCursor(row=("Bob", CREATED_AT, UPDATED_AT))
+        source_rows = ScriptedCursor(
+            rows=[
+                (
+                    "m1",
+                    1,
+                    "iMessage;-;+1555::2016-03-04",
+                    {
+                        "kind": "graph_transcript",
+                        "thread_name": "Hardware Talk",
+                        "span": "2016-03-04",
+                        "excerpt": "[18:22] Bob: I built the PC",
+                        "message_guids": ["g1"],
+                    },
+                )
+            ]
+        )
+        message_rows = ScriptedCursor(
+            rows=[
+                (
+                    "m1",
+                    "assistant",
+                    "Bob built a PC.",
+                    UPDATED_AT,
+                    "mix",
+                    {"retrieval": 900},
+                    None,
+                    None,
+                    "simple",
+                    "graph",
+                    {"mode": "mix", "entities": [{"name": "Bob"}], "relations": []},
+                )
+            ]
+        )
+        conn = ScriptedConnection([conversation_row, source_rows, message_rows])
+        detail = store_with(conn).get_conversation("c1")
+        assert detail is not None
+        (assistant,) = detail.messages
+        assert assistant.target_corpus == "graph"
+        assert assistant.graph_evidence == {
+            "mode": "mix",
+            "entities": [{"name": "Bob"}],
+            "relations": [],
+        }
+        (source,) = assistant.sources
+        assert source.chunk_id == "iMessage;-;+1555::2016-03-04"
+        assert source.trace["kind"] == "graph_transcript"
+
+    def test_a_pre_stage_two_turn_reads_as_chunk_rag(self) -> None:
+        """NULL target_corpus is history, not a broken row — no back-fill."""
+        conversation_row = ScriptedCursor(row=("Kelp", CREATED_AT, UPDATED_AT))
+        message_rows = ScriptedCursor(
+            rows=[
+                (
+                    "m1",
+                    "assistant",
+                    "About 12 km.",
+                    UPDATED_AT,
+                    "hybrid",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            ]
+        )
+        conn = ScriptedConnection([conversation_row, ScriptedCursor(rows=[]), message_rows])
+        detail = store_with(conn).get_conversation("c1")
+        assert detail is not None
+        assert detail.messages[0].target_corpus is None
+        assert detail.messages[0].graph_evidence is None
 
 
 class TestAppendMessage:
@@ -421,7 +535,77 @@ class TestAppendMessage:
         store_with(conn).append_message("c1", "user", "How long?")
         insert, bump = conn.queries
         assert insert[1][5] is None  # latency_ms stays NULL, not Json(None)
+        assert insert[1][9] is None  # …and so does target_corpus
+        assert insert[1][10] is None  # …and graph_evidence
         assert "UPDATE conversations" in bump[0]
+
+    def test_a_graph_turn_persists_its_corpus_evidence_and_day_sources(self) -> None:
+        """★ Migration 006's two columns plus the transcript-day snapshots."""
+        conn = ScriptedConnection()
+        message_id = store_with(conn).append_message(
+            "c1",
+            "assistant",
+            "Bob built a PC.",
+            retrieval_method="mix",
+            chat_engine="simple",
+            target_corpus="graph",
+            graph_evidence={"mode": "mix", "entities": [], "relations": []},
+            graph_sources=[
+                GraphSourceSnapshot(
+                    doc_key="iMessage;-;+1555::2016-03-04",
+                    thread_name="Hardware Talk",
+                    span="2016-03-04",
+                    excerpt="[18:22] Bob: I built the PC",
+                    message_guids=["g1", "g2"],
+                )
+            ],
+        )
+        insert, source_insert, bump = conn.queries
+        assert insert[1][9] == "graph"
+        assert isinstance(insert[1][10], Json)  # graph_evidence marshalled as JSONB
+        assert source_insert[1][:3] == (message_id, 1, "iMessage;-;+1555::2016-03-04")
+        assert source_insert[1][3].obj == {
+            "kind": "graph_transcript",
+            "thread_name": "Hardware Talk",
+            "span": "2016-03-04",
+            "excerpt": "[18:22] Bob: I built the PC",
+            "message_guids": ["g1", "g2"],
+        }
+        assert "UPDATE conversations SET updated_at" in bump[0]
+
+    def test_a_degraded_graph_turn_records_the_request_and_no_evidence(self) -> None:
+        """★ ADR-017's honest record: corpus asked for, graph produced nothing."""
+        conn = ScriptedConnection()
+        store_with(conn).append_message(
+            "c1",
+            "assistant",
+            "About 12 km.",
+            retrieval_method="hybrid",
+            target_corpus="graph",
+            sources=[make_chunk()],
+        )
+        insert, source_insert, _ = conn.queries
+        assert insert[1][9] == "graph"
+        assert insert[1][10] is None  # NULL graph_evidence *is* the degrade marker
+        assert source_insert[1][2] == "doc::3"  # chunk evidence, as usual
+
+    def test_graph_rows_continue_the_chunk_ranks(self) -> None:
+        """One rank sequence per message — the primary key demands it."""
+        conn = ScriptedConnection()
+        store_with(conn).append_message(
+            "c1",
+            "assistant",
+            "Both.",
+            sources=[make_chunk()],
+            graph_sources=[
+                GraphSourceSnapshot(
+                    doc_key="thread::2016-03-04", thread_name="T", span="2016-03-04", excerpt="x"
+                )
+            ],
+        )
+        _, chunk_row, graph_row, _ = conn.queries
+        assert chunk_row[1][1] == 1
+        assert graph_row[1][1] == 2
 
 
 class TestAutoTitle:

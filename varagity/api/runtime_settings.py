@@ -115,6 +115,20 @@ def _chat_engine_names() -> list[str]:
     return sorted(CHAT_ENGINE_REGISTRY)
 
 
+def _graph_query_modes() -> list[str]:
+    """List the graph engine's query modes (lazy adapter import).
+
+    Returns:
+        The engine's own vocabulary, in its own order (``local`` → ``mix``
+        is a progression, not an alphabet), read from the adapter rather
+        than re-listed here — the config validator's hard-coded tuple is the
+        one place that has to repeat it, and a test pins the two together.
+    """
+    from varagity.graph.engines.lightrag import QUERY_MODES
+
+    return list(QUERY_MODES)
+
+
 # The GUI-overridable settings (spec §4.7 groups; the Display group is
 # client-side — theme and panel preferences never reach the pipeline).
 # RERANK_BASE_METHOD's and HYDE_BASE_METHOD's choices mirror config.py's
@@ -158,12 +172,16 @@ OVERRIDABLE: dict[str, OverridableSetting] = {
         "ingestion", reingest_affecting=True, choices=_ocr_engine_names
     ),
     "ALLOWED_EXTENSIONS": OverridableSetting("ingestion"),
-    # The graph kill switch is runtime-mutable (stage-2 decision #2), the
-    # company RERANK_ENABLED/CONDENSE_ENABLED keep. GRAPH_ENGINE deliberately
-    # is not: switching engines re-indexes the corpus from scratch, which is
-    # a redeploy, not a drawer toggle. Nothing here is reingest_affecting —
-    # the graph has its own staleness flag, set by source-file deletion.
+    # The graph kill switch and its query mode are runtime-mutable (stage-2
+    # decision #2), the company RERANK_ENABLED/CONDENSE_ENABLED keep.
+    # GRAPH_ENGINE deliberately is not: switching engines re-indexes the
+    # corpus from scratch, which is a redeploy, not a drawer toggle — and
+    # neither is GRAPH_QUERY_PREFIX, which changes how *queries* are embedded
+    # against passages the build already wrote. Nothing here is
+    # reingest_affecting: the graph has its own staleness flag, set by
+    # source-file deletion.
     "GRAPH_ENABLED": OverridableSetting("graph"),
+    "GRAPH_QUERY_MODE": OverridableSetting("graph", choices=_graph_query_modes),
 }
 
 REINGEST_AFFECTING: frozenset[str] = frozenset(

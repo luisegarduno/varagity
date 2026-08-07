@@ -319,6 +319,15 @@ class Settings(BaseSettings):
             the same ``handle=Name`` pairs, one per line (trailing commas
             fine) — the bulk alternative to the inline setting (e.g.
             ``"./graph-docs/contacts.txt"``). Empty = no file.
+        GRAPH_QUERY_MODE: Engine query mode a graph-targeted chat turn
+            retrieves with (``local`` | ``global`` | ``hybrid`` | ``naive`` |
+            ``mix``; :data:`varagity.graph.engines.lightrag.QUERY_MODES` is
+            the vocabulary this validator mirrors). ``mix`` is the ADR-017
+            acceptance gate's measured winner — it fuses the dual-level
+            keyword retrieval with the chunk plane, which is what the
+            transcript-grounded answers needed. Runtime-mutable (stage-2
+            decision #2), unlike ``GRAPH_ENGINE``: re-reading the graph a
+            different way costs a query, not a re-index.
         GRAPH_QUERY_PREFIX: Whether graph-engine *queries* are wrapped in
             e5's asymmetric instruction format (spec §9.5;
             :func:`varagity.models.embeddings.format_query` owns the format).
@@ -425,10 +434,9 @@ class Settings(BaseSettings):
     GRAFANA_PORT: int = 3001
 
     # Graph corpus (spec_graphrag §10) — the kill switch, the GraphRAG message
-    # corpus root and its upload cap, the engine and its storage root, and the
-    # owner/handle identity the iMessage parser consumes. The runtime query
-    # budgets land with their consumers in the later stage-2 phases (no dead
-    # config).
+    # corpus root and its upload cap, the engine and its storage root, the
+    # owner/handle identity the iMessage parser consumes, and the query-path
+    # knobs (both gate-measured — ADR-017).
     GRAPH_ENABLED: bool = True
     GRAPH_DOCS_PATH: str = "./graph-docs"
     GRAPH_UPLOAD_MAX_MB: int = 4096
@@ -437,6 +445,7 @@ class Settings(BaseSettings):
     GRAPH_OWNER_ALIASES: str = ""
     GRAPH_HANDLE_NAMES: str = ""
     GRAPH_HANDLE_NAMES_FILE: str = ""
+    GRAPH_QUERY_MODE: str = "mix"  # gate-measured default (ADR-017)
     GRAPH_QUERY_PREFIX: bool = True  # gate-measured default (ADR-017)
 
     @property
@@ -1020,6 +1029,33 @@ class Settings(BaseSettings):
         allowed = ("lightrag",)
         if value not in allowed:
             raise ValueError(f"GRAPH_ENGINE must be one of {allowed}; got {value!r}")
+        return value
+
+    @field_validator("GRAPH_QUERY_MODE")
+    @classmethod
+    def _validate_graph_query_mode(cls, value: str) -> str:
+        """Reject graph query modes the engine would not accept.
+
+        Hard-coded for the same circular-import reason as
+        :meth:`_validate_graph_engine` — the adapter reads this module — and
+        pinned by a regression test to
+        :data:`varagity.graph.engines.lightrag.QUERY_MODES`, which is the
+        engine's own vocabulary. Catching a typo here matters more than
+        usual: the engine treats an unknown mode as its own default and
+        answers anyway, so a misconfigured mode would be invisible.
+
+        Args:
+            value: The configured ``GRAPH_QUERY_MODE`` value.
+
+        Returns:
+            The validated value, unchanged.
+
+        Raises:
+            ValueError: If ``value`` is not one of the engine's modes.
+        """
+        allowed = ("local", "global", "hybrid", "naive", "mix")
+        if value not in allowed:
+            raise ValueError(f"GRAPH_QUERY_MODE must be one of {allowed}; got {value!r}")
         return value
 
     @field_validator("GRAPH_HANDLE_NAMES")

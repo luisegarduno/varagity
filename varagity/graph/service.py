@@ -36,7 +36,13 @@ from pathlib import Path
 
 from varagity.config import get_settings
 from varagity.graph.base import GraphSession, get_graph_engine
-from varagity.graph.records import BuildReport, GraphAnswer, GraphExport, GraphStats
+from varagity.graph.records import (
+    BuildReport,
+    GraphAnswer,
+    GraphExport,
+    GraphRetrieval,
+    GraphStats,
+)
 from varagity.graph.sources.base import MessageBatch
 
 logger = logging.getLogger(__name__)
@@ -197,6 +203,28 @@ class GraphService:
         """
         with self._writing():
             return self.session().delete_documents(doc_keys)
+
+    def retrieve(
+        self, question: str, *, mode: str | None = None, verbose: int = 0
+    ) -> GraphRetrieval:
+        """Find evidence for one question — never blocked by a build.
+
+        The chat path's read: the API streams its own grounded answer over
+        what this returns, so no engine answer call is spent here.
+
+        Args:
+            question: The search query, verbatim.
+            mode: Engine query mode; ``None`` uses the adapter's primary.
+            verbose: Validated console verbosity (0–2).
+
+        Returns:
+            The evidence and transcript excerpts.
+
+        Raises:
+            GraphUnavailable: If the session cannot be opened (the caller
+                turns that into ADR-017's per-turn degrade).
+        """
+        return self.session().retrieve(question, mode=mode, verbose=verbose)
 
     def query(self, question: str, *, mode: str | None = None, verbose: int = 0) -> GraphAnswer:
         """Answer one question from the graph — never blocked by a build.

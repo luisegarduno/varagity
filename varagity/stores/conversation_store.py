@@ -6,7 +6,11 @@ evidence is **snapshotted** into ``message_sources.trace`` — content,
 context, source provenance, and the
 :class:`~varagity.stores.records.RetrievalTrace` — with ``chunk_id`` kept
 only as a soft reference, so a historical conversation still explains
-itself after a reingest replaces the chunk rows.
+itself after a reingest replaces the chunk rows. A graph-targeted turn
+(spec_graphrag §4.2) rides the same table under a ``kind`` discriminator:
+its cited transcript days are snapshotted with ``chunk_id`` holding the
+transcript ``doc_key``, and the same reasoning applies — a graph rebuild
+re-derives keys, and the answer must still explain itself afterwards.
 
 The tables are created by the migration runner
 (:mod:`varagity.stores.migrate`), not ``schema.sql``.
@@ -24,7 +28,7 @@ from pydantic import BaseModel
 
 from varagity.models.llm import LLMClient, clean_response
 from varagity.stores.base import ClosingContextMixin
-from varagity.stores.records import RetrievedChunk
+from varagity.stores.records import GraphSourceSnapshot, RetrievedChunk
 from varagity.stores.vector_store import default_conninfo
 
 logger = logging.getLogger(__name__)
@@ -59,7 +63,7 @@ ORDER BY lower(name), created_at
 
 _SELECT_MESSAGES_SQL = """
 SELECT message_id, role, content, created_at, retrieval_method, latency_ms, reasoning,
-       condensed_query, chat_engine
+       condensed_query, chat_engine, target_corpus, graph_evidence
 FROM messages
 WHERE conversation_id = %s
 ORDER BY created_at, message_id
@@ -125,11 +129,16 @@ class StoredSource(BaseModel):
 
     Attributes:
         rank: Final rank in the answer's evidence (1-based).
-        chunk_id: Soft reference to the chunk that produced the snapshot.
+        chunk_id: Soft reference to the chunk that produced the snapshot —
+            or, on a graph turn, to the cited transcript day's ``doc_key``.
         trace: The persisted snapshot: ``score``, ``content``, ``context``,
             source provenance fields, and the serialized
             :class:`~varagity.stores.records.RetrievalTrace` under
-            ``"trace"`` (``None`` when the retriever attached none).
+            ``"trace"`` (``None`` when the retriever attached none). A graph
+            turn's rows carry the other shape instead —
+            ``kind="graph_transcript"`` plus thread/span/excerpt/guids
+            (:func:`_graph_source_snapshot`) — so readers branch on
+            ``kind``.
     """
 
     rank: int
@@ -155,7 +164,16 @@ class MessageRecord(BaseModel):
             used the user's words verbatim).
         chat_engine: Registry name of the chat engine that produced an
             assistant turn (``None`` for user turns and pre-v3 rows).
-        sources: The turn's snapshotted evidence, rank order.
+        target_corpus: Which corpus the turn *asked* for (``"rag"`` |
+            ``"graph"``); ``None`` for user turns and pre-stage-2 history,
+            which read as chunk RAG. Recorded even when a graph turn
+            degraded, so the request stays attributable (ADR-017).
+        graph_evidence: The graph retrieval's entities/relations and the
+            engine query mode, or ``None`` — which on a ``"graph"`` turn is
+            the honest record of a degrade.
+        sources: The turn's snapshotted evidence, rank order. Chunk turns
+            snapshot retrieved chunks; graph turns snapshot the cited
+            transcript days under ``trace.kind = "graph_transcript"``.
     """
 
     message_id: str
@@ -167,6 +185,8 @@ class MessageRecord(BaseModel):
     reasoning: str | None = None
     condensed_query: str | None = None
     chat_engine: str | None = None
+    target_corpus: str | None = None
+    graph_evidence: dict[str, Any] | None = None
     sources: list[StoredSource] = []
 
 
@@ -213,6 +233,29 @@ def _source_snapshot(chunk: RetrievedChunk) -> dict[str, Any]:
         "file_created_at": chunk.metadata.get("file_created_at"),
         "file_modified_at": chunk.metadata.get("file_modified_at"),
         "trace": None if chunk.trace is None else chunk.trace.model_dump(mode="json"),
+    }
+
+
+def _graph_source_snapshot(source: GraphSourceSnapshot) -> dict[str, Any]:
+    """Build the ``message_sources.trace`` snapshot for one cited transcript day.
+
+    Carries a ``kind`` discriminator because the column now holds two
+    shapes: chunk snapshots (no ``kind``, the v2 shape every historical row
+    has) and graph transcript days. Readers branch on it; nothing was
+    migrated.
+
+    Args:
+        source: The cited transcript day.
+
+    Returns:
+        The JSONB-ready snapshot dict.
+    """
+    return {
+        "kind": "graph_transcript",
+        "thread_name": source.thread_name,
+        "span": source.span,
+        "excerpt": source.excerpt,
+        "message_guids": list(source.message_guids),
     }
 
 
@@ -333,6 +376,8 @@ class ConversationStore(ClosingContextMixin):
                 reasoning=row[6],
                 condensed_query=row[7],
                 chat_engine=row[8],
+                target_corpus=row[9],
+                graph_evidence=row[10],
                 sources=sources_by_message.get(row[0], []),
             )
             for row in self._conn.execute(_SELECT_MESSAGES_SQL, (conversation_id,))
@@ -478,6 +523,9 @@ class ConversationStore(ClosingContextMixin):
         condensed_query: str | None = None,
         chat_engine: str | None = None,
         sources: Sequence[RetrievedChunk] = (),
+        target_corpus: str | None = None,
+        graph_evidence: dict[str, Any] | None = None,
+        graph_sources: Sequence[GraphSourceSnapshot] = (),
     ) -> str:
         """Persist one turn, snapshotting an assistant turn's evidence.
 
@@ -489,7 +537,9 @@ class ConversationStore(ClosingContextMixin):
             conversation_id: The conversation the turn belongs to.
             role: ``"user"`` or ``"assistant"``.
             content: The question or the generated answer.
-            retrieval_method: Retrieval method used (assistant turns).
+            retrieval_method: Retrieval method used (assistant turns) — the
+                registry name for a chunk turn, the engine query mode for a
+                graph one (``target_corpus`` says which vocabulary applies).
             latency_ms: Per-stage timings (assistant turns).
             reasoning: Captured ``<think>`` stream, if any.
             condensed_query: The standalone search query that drove the
@@ -498,7 +548,18 @@ class ConversationStore(ClosingContextMixin):
             chat_engine: Registry name of the chat engine that produced
                 the turn (assistant turns).
             sources: The answer's retrieved chunks, best first; each is
-                snapshotted via the spec_v2 §9.1 trace blob.
+                snapshotted via the spec_v2 §9.1 trace blob. Empty on a
+                graph turn, which cites transcript days instead.
+            target_corpus: Which corpus the turn asked for (``"rag"`` |
+                ``"graph"``), recorded even when a graph turn degraded to a
+                chunk answer (ADR-017's honest record).
+            graph_evidence: The graph retrieval's entities/relations and
+                mode; ``None`` for chunk turns *and* for degraded graph
+                turns — there was no graph retrieval to record.
+            graph_sources: The cited transcript days, best first; each
+                becomes a ``message_sources`` row keyed by its ``doc_key``,
+                continuing after ``sources`` in rank order (in practice one
+                list or the other is empty).
 
         Returns:
             The new message's id.
@@ -511,8 +572,9 @@ class ConversationStore(ClosingContextMixin):
         with self._conn.transaction():
             self._conn.execute(
                 "INSERT INTO messages (message_id, conversation_id, role, content, "
-                "retrieval_method, latency_ms, reasoning, condensed_query, chat_engine) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "retrieval_method, latency_ms, reasoning, condensed_query, chat_engine, "
+                "target_corpus, graph_evidence) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     message_id,
                     conversation_id,
@@ -523,13 +585,27 @@ class ConversationStore(ClosingContextMixin):
                     reasoning,
                     condensed_query,
                     chat_engine,
+                    target_corpus,
+                    None if graph_evidence is None else Json(graph_evidence),
                 ),
             )
+            rank = 0
             for rank, chunk in enumerate(sources, start=1):
                 self._conn.execute(
                     "INSERT INTO message_sources (message_id, rank, chunk_id, trace) "
                     "VALUES (%s, %s, %s, %s)",
                     (message_id, rank, chunk.chunk_id, Json(_source_snapshot(chunk))),
+                )
+            for offset, source in enumerate(graph_sources, start=1):
+                self._conn.execute(
+                    "INSERT INTO message_sources (message_id, rank, chunk_id, trace) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (
+                        message_id,
+                        rank + offset,
+                        source.doc_key,
+                        Json(_graph_source_snapshot(source)),
+                    ),
                 )
             self._conn.execute(
                 "UPDATE conversations SET updated_at = now() WHERE conversation_id = %s",

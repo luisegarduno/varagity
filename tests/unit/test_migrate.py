@@ -104,6 +104,7 @@ def test_default_directory_is_the_package_migrations() -> None:
         "003_condensed_query.sql",
         "004_message_engine.sql",
         "005_conversation_groups.sql",
+        "006_graph_turns.sql",
     ]
     conn = FakeConnection(applied=names)
     assert run_migrations(conn) == []  # type: ignore[arg-type]

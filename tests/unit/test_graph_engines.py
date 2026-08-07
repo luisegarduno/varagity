@@ -51,6 +51,7 @@ from varagity.models.embeddings import format_query
 
 THREAD = "iMessage;-;+15125550101"
 START = datetime(2016, 3, 4, 18, 22, tzinfo=UTC)
+PRIMARY = lightrag_adapter.PRIMARY_MODE
 
 
 def message(
@@ -1160,6 +1161,53 @@ class TestLightRAGAdapter:
         assert "I built the PC" in llm.prompt
         assert "What does Bob think about computers?" in llm.prompt
 
+    def test_retrieve_returns_evidence_and_excerpts_without_an_answer_call(
+        self, tmp_path: Path
+    ) -> None:
+        """★ The shipped query path's half: the app writes the answer, not the engine."""
+        llm = ScriptedLLM()
+        session = lightrag_session(tmp_path, query_data=LIGHTRAG_QUERY_DATA, llm=llm)
+        retrieval = session.retrieve("What does Bob think about computers?")
+        session.close()
+        assert retrieval.mode == lightrag_adapter.PRIMARY_MODE
+        assert [entity.name for entity in retrieval.evidence.entities] == ["Bob"]
+        assert retrieval.evidence.message_guids == ["g1", "g2"]
+        assert [excerpt.doc_key for excerpt in retrieval.excerpts] == [f"{THREAD}::2016-03-04"]
+        assert [param.mode for param in session._rag.data_queries] == ["hybrid"]
+        assert session._rag.queries == []  # aquery is never touched
+        assert llm.calls == []  # …and neither is an LLM
+
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [("mix", "mix"), ("mix+synthesis", "mix"), ("synthesis", PRIMARY), (None, PRIMARY)],
+    )
+    def test_retrieve_ignores_the_synthesis_suffix_when_choosing_a_base_mode(
+        self, tmp_path: Path, mode: str | None, expected: str
+    ) -> None:
+        """Retrieval is the same either way — the suffix only names who answers."""
+        session = lightrag_session(tmp_path, query_data=LIGHTRAG_QUERY_DATA)
+        retrieval = session.retrieve("q", mode=mode)
+        session.close()
+        assert [param.mode for param in session._rag.data_queries] == [expected]
+        assert retrieval.mode == (mode or PRIMARY)  # what the caller asked for, recorded
+
+    def test_a_failed_retrieval_is_empty_rather_than_raised(self, tmp_path: Path) -> None:
+        """A graph turn with no evidence is answerable; a raise is not."""
+        session = lightrag_session(tmp_path, fail_query_data=True)
+        retrieval = session.retrieve("q")
+        session.close()
+        assert retrieval.evidence == GraphEvidence()
+        assert retrieval.excerpts == []
+
+    def test_synthesis_and_the_streamed_path_retrieve_identically(self, tmp_path: Path) -> None:
+        """★ The harness only guards the shipped path while both diets match."""
+        session = lightrag_session(tmp_path, query_data=LIGHTRAG_QUERY_DATA, llm=ScriptedLLM())
+        answered = session.query("q", mode="mix+synthesis")
+        retrieved = session.retrieve("q", mode="mix")
+        session.close()
+        assert answered.evidence == retrieved.evidence
+        assert [param.mode for param in session._rag.data_queries] == ["mix", "mix"]
+
     def test_a_bare_synthesis_mode_retrieves_with_the_sessions_primary(
         self, tmp_path: Path
     ) -> None:
@@ -1359,6 +1407,10 @@ class TestLightRAGAdapter:
             lightrag_adapter.fit_max_tokens([{"role": "user", "content": None}], 128, 16384) == 128
         )
 
+    def test_the_primary_mode_is_one_of_the_engines_own(self) -> None:
+        """The shipped `GRAPH_QUERY_MODE` vocabulary is this tuple (see test_config)."""
+        assert lightrag_adapter.PRIMARY_MODE in lightrag_adapter.QUERY_MODES
+
     def test_the_environment_pins_hold_the_engine_to_one_slot(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1486,6 +1538,7 @@ class TestSessionProtocol:
         assert GraphSession.__protocol_attrs__ == {
             "build",
             "resume",
+            "retrieve",
             "query",
             "stats",
             "document_statuses",

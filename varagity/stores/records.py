@@ -264,6 +264,39 @@ class RetrievedChunk(BaseModel):
     trace: RetrievalTrace | None = None
 
 
+class GraphSourceSnapshot(BaseModel):
+    """One cited transcript day of a graph-targeted turn (spec_graphrag §4.2).
+
+    The graph twin of :class:`RetrievedChunk` *for persistence only*: a graph
+    answer's evidence is document-grain (ADR-017's priced regret — the
+    engines cannot honestly attribute a single message), so what gets
+    snapshotted into ``message_sources`` is the transcript day the answer
+    cited, keyed by its ``doc_key``.
+
+    A plain record rather than
+    :class:`varagity.graph.records.TranscriptExcerpt` on purpose: the store
+    layer must not import :mod:`varagity.graph` (the same rule that keeps
+    ``recent_turns`` returning primitive pairs instead of chat turns), and
+    the snapshot is a *frozen* shape — it has to keep explaining a
+    conversation after the graph it came from was rebuilt.
+
+    Attributes:
+        doc_key: The transcript document key, a soft reference exactly like
+            ``chunk_id`` (no FK: a rebuild re-derives keys).
+        thread_name: Human-facing thread label.
+        span: The document's day span (``YYYY-MM-DD`` or ``first..last``).
+        excerpt: The retrieved passage, capped for storage by the caller.
+        message_guids: Per-message provenance for the day, or ``[]`` when the
+            graph's manifest could not resolve the key.
+    """
+
+    doc_key: str
+    thread_name: str
+    span: str
+    excerpt: str
+    message_guids: list[str] = []
+
+
 class DocumentInfo(BaseModel):
     """One ingested document, as listed by ``GET /api/documents`` (spec_v2 §4.2).
 

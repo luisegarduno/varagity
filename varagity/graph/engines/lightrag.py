@@ -54,12 +54,16 @@ Two more things this adapter owns, both recorded rather than hidden (spec §6):
   variables is the mechanism rather than a smell (varagity's own config is
   still read only through :func:`~varagity.config.get_settings`).
 
-Answer composition is **ours, not the engine's**, on any ``<base>+synthesis``
-mode (ADR-017's retrieval-only decision): one ``aquery_data`` call returns
-structured entities/relations/chunks with no LLM answer stage, and
-:mod:`varagity.graph.answer` writes the grounded answer over them. Unsuffixed
-modes keep the bake-off's engine-composed path verbatim, so ADR-017's numbers
-stay reproducible.
+Answer composition is **ours, not the engine's** (ADR-017's retrieval-only
+decision). :meth:`_LightRAGSession.retrieve` is that half on its own: one
+``aquery_data`` call returning structured entities/relations/chunks with no
+LLM answer stage. The app streams its answer over it
+(:func:`varagity.pipeline.graph_flow.graph_query_stream_flow`), and a
+``<base>+synthesis`` mode composes the same retrieval with
+:mod:`varagity.graph.answer`'s non-streaming writer — which is what the
+``eval graph`` harness scores, so the harness keeps guarding the shipped
+path. Unsuffixed modes keep the bake-off's engine-composed path verbatim, so
+ADR-017's numbers stay reproducible.
 """
 
 import asyncio
@@ -97,6 +101,7 @@ from varagity.graph.records import (
     GraphExportEdge,
     GraphExportNode,
     GraphRelation,
+    GraphRetrieval,
     GraphStats,
     TranscriptExcerpt,
 )
@@ -117,10 +122,17 @@ logger = logging.getLogger(__name__)
 # fuses its dual-level (entity + relation) keyword retrieval and is the
 # adapter's primary; `--mode global` is the recorded extra pass the
 # aggregation questions get (stage-1 decision #13). The *shipped* query mode
-# is a setting (`mix`, the acceptance gate's winner) and lands with its
-# consumer in the query-path phase; this constant stays what the bake-off
-# ran, so its numbers stay reproducible.
+# is a setting (`GRAPH_QUERY_MODE`, defaulting to `mix` — the acceptance
+# gate's winner); this constant stays what the bake-off ran, so its numbers
+# stay reproducible.
 PRIMARY_MODE = "hybrid"
+
+# The engine's accepted base modes — the vocabulary `GRAPH_QUERY_MODE` is
+# validated against. `varagity/config.py` hard-codes the same tuple (it
+# cannot import this module: the adapter reads settings), and a regression
+# test pins the two together, exactly as the retriever and chat-engine
+# registries are pinned to their validators.
+QUERY_MODES = ("local", "global", "hybrid", "naive", "mix")
 
 # Mode suffix selecting ADR-017's retrieval-only design: `hybrid+synthesis`
 # retrieves with `hybrid` and lets varagity.graph.answer write the answer.
@@ -775,13 +787,43 @@ class _LightRAGSession:
             return GraphExport()
         return export_from_knowledge_graph(graph)
 
+    def retrieve(
+        self, question: str, *, mode: str | None = None, verbose: int = 0
+    ) -> GraphRetrieval:
+        """Retrieve evidence for one question without spending an answer call.
+
+        One ``aquery_data`` call: LightRAG forces ``only_need_context``
+        internally and hands back structured entities, relations, and
+        chunks, which is exactly ADR-017's retrieval-only design. Both
+        answer paths are built on this — :meth:`query`'s non-streaming
+        synthesis and the API's streamed generation — so the ``eval graph``
+        harness and a chat turn ground on the same payload.
+
+        Args:
+            question: The search query, verbatim.
+            mode: LightRAG query mode, with or without the ``+synthesis``
+                suffix (retrieval is the same either way — the suffix only
+                names who writes the answer); ``None`` uses the session's
+                primary.
+            verbose: Validated console verbosity (0–2).
+
+        Returns:
+            The normalized evidence and transcript excerpts, both empty when
+            retrieval failed — an unanswerable turn, never a raise.
+        """
+        used = mode or self._mode
+        evidence, excerpts = retrieval_from_query_data(
+            self._query_data(question, self._base_mode(used)), self._index
+        )
+        return GraphRetrieval(evidence=evidence, excerpts=excerpts, mode=used)
+
     def query(self, question: str, *, mode: str | None = None, verbose: int = 0) -> GraphAnswer:
         """Answer one question, with either the engine's pipeline or ours.
 
-        A ``<base>+synthesis`` mode runs ADR-017's shipped design: one
-        ``aquery_data`` retrieval (structured, no engine answer call) and a
-        grounded answer written by :mod:`varagity.graph.answer` over the
-        entities, relations, **and** transcript excerpts it returned.
+        A ``<base>+synthesis`` mode runs ADR-017's shipped design:
+        :meth:`retrieve` (structured, no engine answer call) and a grounded
+        answer written by :mod:`varagity.graph.answer` over the entities,
+        relations, **and** transcript excerpts it returned.
 
         An unsuffixed mode keeps the bake-off's engine-composed path
         verbatim: retrieval runs twice, once for LightRAG's own answer and
@@ -799,21 +841,19 @@ class _LightRAGSession:
             mode string that produced it.
         """
         used = mode or self._mode
-        base, wants_synthesis = _split_mode(used)
-        if not base:
-            base = _split_mode(self._mode)[0] or PRIMARY_MODE
+        base = self._base_mode(used)
         started = time.perf_counter()
-        if wants_synthesis:
-            evidence, excerpts = retrieval_from_query_data(
-                self._query_data(question, base), self._index
-            )
+        if _split_mode(used)[1]:
+            retrieval = self.retrieve(question, mode=used, verbose=verbose)
             context = synthesis_context(
-                evidence, excerpts, max_chars=synthesis_max_chars(get_settings().LLM_CONTEXT_TOKENS)
+                retrieval.evidence,
+                retrieval.excerpts,
+                max_chars=synthesis_max_chars(get_settings().LLM_CONTEXT_TOKENS),
             )
             answer_text = synthesize(self._llm_client(), question, context)
             return GraphAnswer(
                 answer=answer_text,
-                evidence=evidence,
+                evidence=retrieval.evidence,
                 mode=used,
                 latency_s=time.perf_counter() - started,
             )
@@ -1061,6 +1101,19 @@ class _LightRAGSession:
             entities=stats.entities,
             relations=stats.relations,
         )
+
+    def _base_mode(self, mode: str) -> str:
+        """Resolve the engine mode a query string actually retrieves with.
+
+        Args:
+            mode: The caller's mode, optionally ``+synthesis``-suffixed.
+
+        Returns:
+            The base engine mode: the caller's when it named one, else the
+            session's primary (a bare ``"synthesis"`` names none).
+        """
+        base = _split_mode(mode)[0]
+        return base or _split_mode(self._mode)[0] or PRIMARY_MODE
 
     def _llm_client(self) -> LLMClient:
         """Return the session's chat client, building it on first use.

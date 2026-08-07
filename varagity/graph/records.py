@@ -135,6 +135,31 @@ class GraphEvidence(BaseModel):
     raw: dict[str, Any] | None = None
 
 
+class GraphRetrieval(BaseModel):
+    """What one graph retrieval found, before any answer is written.
+
+    The unit ADR-017's retrieval-only design turns on: the engine finds
+    entities, relations, and transcript passages, and *this repo* writes the
+    answer over them — non-streaming for the harness
+    (:func:`varagity.graph.answer.synthesize`), streamed for a chat turn
+    (:func:`varagity.pipeline.graph_flow.graph_query_stream_flow`). Both
+    paths therefore ground on the same payload, which is what keeps the
+    ``eval graph`` harness a regression guard for the shipped query path.
+
+    Attributes:
+        evidence: Entities and relations the retrieval surfaced (plus
+            communities, for an engine that has them — LightRAG does not).
+        excerpts: The retrieved transcript passages, in the engine's own
+            relevance order.
+        mode: The engine query mode that produced it, as the caller named it
+            (a ``+synthesis`` suffix included — it records what ran).
+    """
+
+    evidence: GraphEvidence
+    excerpts: list[TranscriptExcerpt] = []
+    mode: str
+
+
 class GraphAnswer(BaseModel):
     """One engine's answer to one question, with its evidence.
 

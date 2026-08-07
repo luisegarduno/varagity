@@ -71,6 +71,30 @@ class QueryState(TypedDict):
     answer: str
 
 
+def format_source_block(*, source: str, context: str, content: str) -> str:
+    """Render one ``[SOURCE]/[CONTEXT]/[CONTENT]`` provenance block (spec §10.2).
+
+    The single owner of the block format, because ``[SOURCE]`` is a
+    contract, not a decoration: :data:`ANSWER_PROMPT` tells the model to cite
+    it, the web rewrites those citations into chips *before* markdown parsing
+    (``web/lib/citations.ts``), and the evidence panel matches a chip to a
+    card by that exact label. A second renderer with its own spacing would
+    break citation matching silently — which is why the graph query path
+    (:func:`varagity.graph.answer.graph_answer_context`) grounds through this
+    function rather than a copy of the template.
+
+    Args:
+        source: The provenance label the answer should cite (a file path for
+            chunk RAG; ``"{thread} ({span})"`` for a graph transcript day).
+        context: The situating blurb, or ``""`` when there is none.
+        content: The passage itself.
+
+    Returns:
+        The formatted block.
+    """
+    return _CHUNK_BLOCK.format(source=source, context=context, content=content)
+
+
 def format_context(chunks: list[RetrievedChunk]) -> str:
     """Format retrieved chunks into the context block (spec §10.2).
 
@@ -83,8 +107,8 @@ def format_context(chunks: list[RetrievedChunk]) -> str:
         blurb (ingested with ``CONTEXTUALIZE`` off).
     """
     return "\n\n".join(
-        _CHUNK_BLOCK.format(
-            source=chunk.metadata.get("source", ""),
+        format_source_block(
+            source=str(chunk.metadata.get("source", "")),
             context=chunk.context or "",
             content=chunk.content,
         )

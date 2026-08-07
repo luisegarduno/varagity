@@ -8,7 +8,7 @@ because they cross the same wire.
 """
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -65,32 +65,121 @@ class ChatOverrides(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    """Body of ``POST /api/chat`` (spec_v2 §4.2).
+    """Body of ``POST /api/chat`` (spec_v2 §4.2, spec_graphrag §4.2).
 
     Attributes:
         query: The user's question.
         conversation_id: Existing conversation to append the turn to; a new
             conversation is created when omitted.
         overrides: Optional per-request setting overrides.
+        corpus: Which corpus to answer from — ``"rag"`` (the chunk corpus,
+            the default when omitted) or ``"graph"`` (the message archive).
+            The **router-fillable** field: automatic routing is out of scope
+            (spec_graphrag §6), so today the composer sets it and later a
+            router fills the same field, changing no contract.
     """
 
     query: str = Field(min_length=1)
     conversation_id: str | None = None
     overrides: ChatOverrides | None = None
+    corpus: Literal["rag", "graph"] | None = None
+
+
+class GraphEntityOut(BaseModel):
+    """One entity the graph retrieval surfaced (spec_graphrag §10.2).
+
+    Attributes:
+        name: The entity's canonical name, as the engine resolved it.
+        type: The engine's entity type/category (``None`` when untyped) —
+            what the evidence chips and the graph view color by, LightRAG
+            having no community tier (ADR-017).
+        summary: The engine's description of the entity.
+    """
+
+    name: str
+    type: str | None = None
+    summary: str | None = None
+
+
+class GraphRelationOut(BaseModel):
+    """One relation the graph retrieval surfaced (spec_graphrag §10.2).
+
+    Attributes:
+        source: Name of the edge's source entity.
+        target: Name of the edge's target entity.
+        label: Short relation label/keywords (``None`` when unlabelled).
+        description: The engine's longer description — the *fact* the answer
+            grounds on.
+    """
+
+    source: str
+    target: str
+    label: str | None = None
+    description: str | None = None
+
+
+class GraphTranscriptOut(BaseModel):
+    """One cited transcript day of a graph answer (spec_graphrag §4.3).
+
+    Evidence is **day-grain, not message-grain**: that is what the engines
+    can honestly attribute (ADR-017's priced regret), so this is the card
+    the evidence panel draws and the label the answer cites.
+
+    Attributes:
+        doc_key: The transcript document key — the join back to the corpus.
+        thread_name: Human-facing thread label.
+        span: The document's day span (``YYYY-MM-DD`` or ``first..last``).
+        excerpt: The retrieved passage, capped for the wire.
+        message_count: Messages the graph's manifest accounts for in that
+            document (``0`` when it cannot say — never a claim of empty).
+    """
+
+    doc_key: str
+    thread_name: str
+    span: str
+    excerpt: str
+    message_count: int = 0
+
+
+class GraphRetrievalPayload(BaseModel):
+    """The graph half of the SSE ``retrieval`` event (spec_graphrag §4.3).
+
+    Attributes:
+        mode: The engine query mode the turn retrieved with
+            (``GRAPH_QUERY_MODE``).
+        entities: Entities the retrieval surfaced.
+        relations: Relations the retrieval surfaced.
+        transcripts: The cited transcript days, best first — the cards a
+            citation chip resolves to, labelled ``"{thread} ({span})"``.
+    """
+
+    mode: str
+    entities: list[GraphEntityOut] = []
+    relations: list[GraphRelationOut] = []
+    transcripts: list[GraphTranscriptOut] = []
 
 
 class RetrievalEvent(BaseModel):
     """Payload of the SSE ``retrieval`` event — the provenance panel's data.
 
     Emitted once retrieval (+rerank) completes, **before** any answer token
-    (spec_v2 §4.3): the browser gets the evidence before the prose.
+    (spec_v2 §4.3): the browser gets the evidence before the prose. One
+    event name covers both corpora (spec_graphrag §4.3): a graph turn fills
+    ``graph`` and leaves ``chunks`` empty, and a graph turn that *degraded*
+    to a chunk answer is visibly exactly that — ``corpus="graph"`` with
+    ``graph=null`` and chunks present (ADR-017's degrade semantics).
 
     Attributes:
         chunks: The retrieved chunks, best first, each carrying its full
             metadata record and (when the method fills it) the
-            :class:`~varagity.stores.records.RetrievalTrace`.
-        method: The retrieval method that produced them.
-        top_k: Chunks requested from the retriever.
+            :class:`~varagity.stores.records.RetrievalTrace`. Empty for a
+            graph turn.
+        method: What actually retrieved, in the corpus's own vocabulary: the
+            retrieval-method registry name for a chunk turn, the engine
+            query mode for a graph one (also in ``graph.mode``).
+        top_k: Chunks requested from the retriever — a chunk-retrieval knob,
+            reported unchanged on a graph turn, which bounds its evidence
+            engine-side instead.
         reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrowed
             the list; ``None`` otherwise.
         condensed_query: The standalone search query the chat engine
@@ -98,7 +187,11 @@ class RetrievalEvent(BaseModel):
             like ``method``: it names what was actually searched.
             ``None`` whenever the search used the user's words verbatim
             (the ``simple`` engine, a first turn, the kill switch, or the
-            condense fallback).
+            condense fallback). Applies to both corpora: the condensed
+            words are what the graph engine searched too.
+        corpus: The corpus the turn asked for (``"rag"`` | ``"graph"``).
+        graph: The graph evidence, present only on a graph turn that the
+            engine actually answered.
     """
 
     chunks: list[RetrievedChunk]
@@ -106,6 +199,8 @@ class RetrievalEvent(BaseModel):
     top_k: int
     reranked_to: int | None = None
     condensed_query: str | None = None
+    corpus: str = "rag"
+    graph: GraphRetrievalPayload | None = None
 
 
 class DeltaEvent(BaseModel):
@@ -249,9 +344,12 @@ class MessageSourceOut(BaseModel):
 
     Attributes:
         rank: Final rank in the answer's evidence (1-based).
-        chunk_id: Soft reference to the producing chunk.
+        chunk_id: Soft reference to the producing chunk — or, on a graph
+            turn, the cited transcript day's ``doc_key``.
         trace: The spec_v2 §9.1 snapshot: score, content, context, source
-            provenance, and the serialized retrieval trace.
+            provenance, and the serialized retrieval trace. A graph turn's
+            rows carry the other shape (``kind="graph_transcript"`` plus
+            thread/span/excerpt/guids), so clients branch on ``kind``.
     """
 
     rank: int
@@ -276,6 +374,14 @@ class MessageOut(BaseModel):
             when the search used the user's words verbatim.
         chat_engine: Registry name of the chat engine that produced an
             assistant turn (``None`` for user turns and pre-v3 history).
+        target_corpus: The corpus the turn asked for (``"rag"`` |
+            ``"graph"``); ``None`` for user turns and pre-stage-2 history,
+            which clients read as chunk RAG. Recorded even when the graph
+            turn degraded — the request is part of the record (ADR-017).
+        graph_evidence: The graph retrieval's ``mode``/``entities``/
+            ``relations`` snapshot; ``None`` for chunk turns and for a
+            degraded graph turn, whose evidence is chunk-shaped in
+            ``sources``.
         sources: The turn's snapshotted evidence, rank order.
     """
 
@@ -288,6 +394,8 @@ class MessageOut(BaseModel):
     reasoning: str | None = None
     condensed_query: str | None = None
     chat_engine: str | None = None
+    target_corpus: str | None = None
+    graph_evidence: dict[str, Any] | None = None
     sources: list[MessageSourceOut] = []
 
 
