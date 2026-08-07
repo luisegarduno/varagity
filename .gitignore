@@ -10,6 +10,10 @@
 # Graph ingest corpus (the GRAPH_DOCS_PATH input — copied iMessage chat.db files)
 /graph-docs/
 
+# Graph engine storage (the GRAPH_STORAGE_PATH workdir root — in compose this
+# is the `graphdata` volume; host-mode runs write it here)
+/graph-data/
+
 # Timestamped eval results (the golden set and OCR ground truth ARE tracked)
 /data/eval/results/
 

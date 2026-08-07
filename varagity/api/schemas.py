@@ -7,7 +7,7 @@ SSE event payloads (spec_v2 §4.3) are models too — one per event type —
 because they cross the same wire.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -442,10 +442,14 @@ class SettingsResponse(BaseModel):
         settings: The full overridable catalog with effective values.
         corpus_stale: Whether a reingest-affecting setting changed since the
             corpus was last (re)ingested — the "Re-ingest to apply" banner.
+        graph_stale: Whether the graph corpus changed since the graph was
+            last (re)built — the graph tab's "Re-build to apply" banner
+            (stage-2 decision #16).
     """
 
     settings: list[SettingOut]
     corpus_stale: bool
+    graph_stale: bool = False
 
 
 class SettingsPatchRequest(BaseModel):
@@ -570,6 +574,9 @@ class UploadedFileOut(BaseModel):
             ``invalid_filename`` | ``invalid_path`` | ``path_too_deep`` |
             ``write_failed`` — the last is a server-side problem, escalated
             to a structured ``500`` when no file in the batch landed).
+            Graph corpus uploads add ``unsupported_graph_source``: the file
+            landed, no registered message source claimed it, and it was
+            removed again (spec_graphrag §10.2).
         relative_path: The stored path relative to ``DOCS_PATH`` when the
             upload declared one (folder uploads, spec_v3 §5.2); ``None``
             for flat uploads and rejections.
@@ -753,6 +760,260 @@ class IngestLogEvent(BaseModel):
     Relayed ``varagity.ingest`` log records (the per-file outcome lines the
     terminal shows: skipped-unchanged, no-text, failure tracebacks' heads),
     so the browser progress view mirrors the CLI run.
+
+    Attributes:
+        level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).
+        message: The formatted log message.
+    """
+
+    level: str
+    message: str
+
+
+class GraphParseSummary(BaseModel):
+    """What the last build's scan found inside one graph source file.
+
+    Attributes:
+        messages: Recoverable messages parsed from the file.
+        threads: Distinct conversations they belong to.
+        first: Oldest message timestamp (``None`` for an empty parse).
+        last: Newest message timestamp (``None`` for an empty parse).
+    """
+
+    messages: int
+    threads: int
+    first: datetime | None = None
+    last: datetime | None = None
+
+
+class GraphDocumentOut(BaseModel):
+    """One file in the ``GET /api/graph/documents`` list (spec_graphrag §10.2).
+
+    Unlike the chunk-RAG corpus list — which reports the ``documents``
+    *table* — this is a directory listing: the graph's own record of what it
+    indexed lives in the engine's workdir, and the tab's job is to show what
+    has been dropped in. Non-source files (a contacts list, the ``-wal`` /
+    ``-shm`` sidecars a ``chat.db`` needs) are listed too, with a ``None``
+    ``doc_id``: they are on disk and the user put them there.
+
+    Attributes:
+        name: Base name of the file.
+        relative_path: Its POSIX path relative to ``GRAPH_DOCS_PATH`` (the
+            delete route's key).
+        size_bytes: Size on disk.
+        modified_at: The file's mtime.
+        doc_id: The stable id a build derives for it (path relative to
+            ``GRAPH_DOCS_PATH`` + byte hash), or ``None`` when no build has
+            scanned this file yet — or when no registered message source
+            claims it.
+        parse: What the last scan parsed out of it, or ``None`` when no
+            build has scanned it (parsing a multi-gigabyte database is a
+            build's job, not a list request's).
+    """
+
+    name: str
+    relative_path: str
+    size_bytes: int
+    modified_at: datetime
+    doc_id: str | None = None
+    parse: GraphParseSummary | None = None
+
+
+class GraphUploadResponse(BaseModel):
+    """Response of ``POST /api/graph/documents``.
+
+    Attributes:
+        files: Per-file outcomes, in upload order (the corpus upload's
+            shape, plus its ``unsupported_graph_source`` rejection).
+    """
+
+    files: list[UploadedFileOut]
+
+
+class GraphDocumentDeleteResponse(BaseModel):
+    """Response of ``DELETE /api/graph/documents/{name}``.
+
+    Attributes:
+        relative_path: The removed file's path under ``GRAPH_DOCS_PATH``.
+        graph_stale: Whether the graph is now flagged stale — it keeps the
+            deleted file's messages until the next rebuild, and saying so is
+            the honest alternative to silently diverging (stage-2 decision
+            #16). ``False`` only when the flag could not be persisted.
+    """
+
+    relative_path: str
+    graph_stale: bool
+
+
+class GraphBuildRequest(BaseModel):
+    """Body of ``POST /api/graph/build`` (spec_graphrag §5.2).
+
+    Attributes:
+        reingest: Wipe the engine's working directory and index from
+            scratch. The **only** thing that clears the graph-stale flag
+            (stage-2 decision #16) — and the only reason to pay a full
+            backfill twice.
+        message_limit: Index at most this many messages, newest first — the
+            bounded escape hatch that makes a minutes-long spot check
+            possible on an archive whose full build runs for days. A bounded
+            build never prunes: its render is partial by construction, so
+            documents it does not mention are kept, not deleted.
+        since: Ignore messages older than this date (the other half of the
+            bound; same no-prune rule).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reingest: bool = False
+    message_limit: int | None = Field(default=None, ge=1)
+    since: date | None = None
+
+
+class GraphBuildSummaryOut(BaseModel):
+    """The graph build's counters (terminal runs only).
+
+    Attributes:
+        files_scanned: Files found under ``GRAPH_DOCS_PATH``.
+        files_parsed: Of those, files a registered message source claimed.
+        files_failed: Files that raised while parsing (the run continued).
+        messages_parsed: Messages recovered from every parsed file.
+        messages_indexed: Messages handed to the engine after the bounds
+            were applied (equal to ``messages_parsed`` for an unbounded
+            build, before guid-merging collapses overlaps).
+        messages_seen: What the engine reported after guid-merging the
+            batches — the upsert grain.
+        wall_clock_s: Seconds the engine spent indexing.
+        resumed: Documents already in flight (or failed) when this run
+            started — the work a killed build left behind and this one
+            picked up.
+        documents: The engine's document counts by status when the run
+            finished.
+        failures: Per-step failures the build caught and continued past.
+    """
+
+    files_scanned: int
+    files_parsed: int
+    files_failed: int
+    messages_parsed: int
+    messages_indexed: int
+    messages_seen: int
+    wall_clock_s: float
+    resumed: int
+    documents: dict[str, int] = {}
+    failures: list[str] = []
+
+
+class GraphBuildRunOut(BaseModel):
+    """One graph build run's state (``POST /api/graph/build`` + its stream).
+
+    Attributes:
+        run_id: The run handle.
+        state: ``running`` | ``completed`` | ``failed``.
+        reingest: Whether the run wiped the working directory first.
+        bounded: Whether ``message_limit``/``since`` narrowed the render (a
+            bounded run deliberately skips the removal pass).
+        message_limit: The requested message cap, if any.
+        since: The requested date floor, if any.
+        started_at: When the run started.
+        finished_at: When it reached a terminal state (``None`` while
+            running).
+        summary: The final counters (terminal states only; a run that died
+            before the engine returned carries ``None``).
+        error: The run-level failure (``failed`` only; per-document failures
+            ride in ``summary.failures`` and the document statuses).
+    """
+
+    run_id: str
+    state: str
+    reingest: bool
+    bounded: bool
+    message_limit: int | None = None
+    since: date | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    summary: GraphBuildSummaryOut | None = None
+    error: str | None = None
+
+
+class GraphStatusOut(BaseModel):
+    """Response of ``GET /api/graph/status`` — the graph tab's poll surface.
+
+    Every size field is optional because "nothing has been built here yet"
+    and "the engine would not say" are both real states, and reporting them
+    as ``0`` would read like an empty graph (the honesty rule
+    :class:`~varagity.graph.records.GraphStats` sets).
+
+    Attributes:
+        enabled: The ``GRAPH_ENABLED`` kill switch.
+        stale: Whether a source file was deleted since the last rebuild.
+        building: Whether a build is running in this API process.
+        documents: The engine's document counts by status (its own
+            vocabulary: ``pending``, ``processing``, ``processed``,
+            ``failed``, …); empty when nothing has been indexed.
+        entities: Entity count from the workdir's summary sidecar.
+        relations: Relation count from the same.
+        message_guids: Messages the workdir's manifest accounts for.
+        last_build: The current (or last) build run in this API process.
+    """
+
+    enabled: bool
+    stale: bool
+    building: bool
+    documents: dict[str, int] = {}
+    entities: int | None = None
+    relations: int | None = None
+    message_guids: int | None = None
+    last_build: GraphBuildRunOut | None = None
+
+
+class GraphBuildStatusEvent(BaseModel):
+    """Payload of the graph-build SSE ``status`` event.
+
+    The stream's first frame (a snapshot on connect) and its last (the
+    terminal state). ``run=None`` means no build has run in this API
+    process — the stream closes immediately after.
+
+    Attributes:
+        run: The current (or last) run, if any.
+    """
+
+    run: GraphBuildRunOut | None = None
+
+
+class GraphBuildProgressEvent(BaseModel):
+    """Payload of the graph-build SSE ``progress`` event.
+
+    Two phases, because a graph build has two very different clocks:
+    ``scan``/``parse`` walk the corpus directory in seconds, then
+    ``index``/``process`` hand the merged messages to the engine and sample
+    its own document statuses for hours (the extraction pass — ADR-017's
+    7.17 s/message).
+
+    Attributes:
+        stage: ``scan`` | ``parse`` | ``bound`` | ``reset`` | ``index`` |
+            ``process``.
+        file: The file being parsed (``None`` outside ``parse``).
+        current: Intra-stage progress (files parsed so far; messages kept by
+            ``bound``).
+        total: Stage denominator (files found, messages parsed).
+        docs_done: Documents the engine reports as processed (``process``).
+        docs_total: Documents the engine holds in any status (``process``).
+    """
+
+    stage: str
+    file: str | None = None
+    current: int | None = None
+    total: int | None = None
+    docs_done: int | None = None
+    docs_total: int | None = None
+
+
+class GraphBuildLogEvent(BaseModel):
+    """Payload of the graph-build SSE ``log`` event.
+
+    Relayed ``varagity.graph`` log records (the parse summaries, the build
+    diff's new/changed/unchanged counts, per-document failures), so the
+    browser sees what the server log would show.
 
     Attributes:
         level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).

@@ -45,7 +45,7 @@ class OverridableSetting:
 
     Attributes:
         group: The spec §4.7 drawer group (``retrieval`` | ``generation`` |
-            ``ingestion``).
+            ``ingestion`` | ``graph``).
         reingest_affecting: Whether changing it does **not** change content
             hashes (the v1 footgun) — the corpus goes stale until
             ``ingest --reingest``.
@@ -158,6 +158,12 @@ OVERRIDABLE: dict[str, OverridableSetting] = {
         "ingestion", reingest_affecting=True, choices=_ocr_engine_names
     ),
     "ALLOWED_EXTENSIONS": OverridableSetting("ingestion"),
+    # The graph kill switch is runtime-mutable (stage-2 decision #2), the
+    # company RERANK_ENABLED/CONDENSE_ENABLED keep. GRAPH_ENGINE deliberately
+    # is not: switching engines re-indexes the corpus from scratch, which is
+    # a redeploy, not a drawer toggle. Nothing here is reingest_affecting —
+    # the graph has its own staleness flag, set by source-file deletion.
+    "GRAPH_ENABLED": OverridableSetting("graph"),
 }
 
 REINGEST_AFFECTING: frozenset[str] = frozenset(

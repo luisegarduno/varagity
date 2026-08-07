@@ -10,7 +10,11 @@ from typing import Any
 import psycopg
 import pytest
 
-from varagity.stores.app_settings_store import CORPUS_STALE_KEY, AppSettingsStore
+from varagity.stores.app_settings_store import (
+    CORPUS_STALE_KEY,
+    GRAPH_STALE_KEY,
+    AppSettingsStore,
+)
 
 
 class FakeCursor:
@@ -94,3 +98,29 @@ class TestCorpusStaleFlag:
         conn = FakeConnection()
         store_with(conn).set_corpus_stale(stale)
         assert conn.queries[0][1] == {"key": CORPUS_STALE_KEY, "value": encoded}
+
+
+class TestGraphStaleFlag:
+    """The corpus flag's twin — a graph source deleted since the last rebuild."""
+
+    def test_absent_row_reads_not_stale(self) -> None:
+        assert store_with(FakeConnection([FakeCursor()])).is_graph_stale() is False
+
+    @pytest.mark.parametrize(("stored", "expected"), [("true", True), ("false", False)])
+    def test_reads_the_string_encoding(self, stored: str, expected: bool) -> None:
+        conn = FakeConnection([FakeCursor(row=(stored,))])
+        assert store_with(conn).is_graph_stale() is expected
+
+    @pytest.mark.parametrize(("stale", "encoded"), [(True, "true"), (False, "false")])
+    def test_writes_the_string_encoding(self, stale: bool, encoded: str) -> None:
+        conn = FakeConnection()
+        store_with(conn).set_graph_stale(stale)
+        assert conn.queries[0][1] == {"key": GRAPH_STALE_KEY, "value": encoded}
+
+    def test_the_two_flags_are_separate_rows(self) -> None:
+        """★ A reingest must never clear the graph's flag, or vice versa."""
+        assert CORPUS_STALE_KEY != GRAPH_STALE_KEY
+
+    def test_neither_flag_surfaces_as_an_override(self) -> None:
+        for key in (CORPUS_STALE_KEY, GRAPH_STALE_KEY):
+            assert key.startswith("_")  # excluded by load_overrides' SQL

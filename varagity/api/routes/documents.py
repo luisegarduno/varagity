@@ -230,19 +230,29 @@ def _store_upload(
     max_bytes: int,
     raw_path: str | None = None,
     raw_modified: str | None = None,
+    *,
+    allowed_extensions: frozenset[str] | None = None,
 ) -> UploadedFileOut:
-    """Validate and write one uploaded file into the corpus directory.
+    """Validate and write one uploaded file into a corpus directory.
+
+    Shared by both corpus surfaces: the chunk-RAG upload passes its
+    extension allow-list, while the graph corpus
+    (:mod:`varagity.api.routes.graph`) passes ``None`` and decides format by
+    sniffing the stored bytes instead — a copied ``chat.db`` is routinely
+    renamed, so its name proves nothing.
 
     Args:
         upload: The multipart part (spooled by Starlette).
-        docs_root: The resolved ``DOCS_PATH`` directory.
-        max_bytes: The per-file cap (``UPLOAD_MAX_MB`` in bytes).
+        docs_root: The corpus directory to write into.
+        max_bytes: The per-file cap, in bytes.
         raw_path: The client-declared relative path for this file (folder
             uploads, spec_v3 §5.2). ``None`` or ``""`` keeps the flat
             single-file contract byte-identical.
         raw_modified: The client-declared last-modified time for this file
             (epoch milliseconds), applied to the stored file's mtime.
             ``None`` or ``""`` keeps the write time.
+        allowed_extensions: Extensions this corpus accepts; ``None``
+            disables the gate entirely (the caller vets the file itself).
 
     Returns:
         The per-file outcome (rejections are reported, never raised — one
@@ -272,7 +282,7 @@ def _store_upload(
             )
         name = flat_name
     extension = Path(name).suffix.lower()
-    if extension not in settings.allowed_extension_set:
+    if allowed_extensions is not None and extension not in allowed_extensions:
         return UploadedFileOut(
             file_name=name, size_bytes=0, stored=False, reason="extension_not_allowed"
         )
@@ -440,7 +450,14 @@ def upload_documents(
         list(modified) if modified is not None else [None] * len(files)
     )
     results = [
-        _store_upload(upload, docs_root, max_bytes, raw_path, raw_modified)
+        _store_upload(
+            upload,
+            docs_root,
+            max_bytes,
+            raw_path,
+            raw_modified,
+            allowed_extensions=settings.allowed_extension_set,
+        )
         for upload, raw_path, raw_modified in zip(
             files, matched_paths, matched_modified, strict=True
         )

@@ -7,9 +7,13 @@ pydantic-settings parses from the environment, so the override layer
 (:mod:`varagity.api.runtime_settings`) replays rows as env vars verbatim.
 
 Keys beginning with ``_`` are reserved for app metadata and never surface
-as overrides; the one in use is :data:`CORPUS_STALE_KEY` — the "an
-ingest-affecting setting changed since the last reingest" flag behind the
-GUI's persistent "Re-ingest to apply" affordance.
+as overrides. Two are in use, both "the stores no longer match what would
+be produced today" flags behind a persistent GUI affordance:
+:data:`CORPUS_STALE_KEY` (an ingest-affecting setting changed since the
+last reingest) and :data:`GRAPH_STALE_KEY` (a graph source file was
+deleted, so the graph still holds messages whose source is gone —
+stage-2 decision #16). Each is cleared **only** by a completed API-driven
+rebuild of its own corpus.
 """
 
 import logging
@@ -23,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 CORPUS_STALE_KEY = "_corpus_stale"
 """Reserved metadata key flagging the corpus stale (needs ``--reingest``)."""
+
+GRAPH_STALE_KEY = "_graph_stale"
+"""Reserved metadata key flagging the graph stale (needs a rebuild)."""
 
 _UPSERT_SQL = """
 INSERT INTO app_settings (key, value, updated_at)
@@ -107,4 +114,28 @@ class AppSettingsStore(ClosingContextMixin):
         """
         self._conn.execute(
             _UPSERT_SQL, {"key": CORPUS_STALE_KEY, "value": "true" if stale else "false"}
+        )
+
+    def is_graph_stale(self) -> bool:
+        """Read the graph-stale metadata flag.
+
+        Returns:
+            ``True`` when the graph no longer matches its source corpus —
+            set by deleting a graph source file (the graph keeps that
+            file's messages until it is rebuilt), cleared **only** by a
+            completed ``POST /api/graph/build`` with ``reingest=true``.
+        """
+        row = self._conn.execute(
+            "SELECT value FROM app_settings WHERE key = %s", (GRAPH_STALE_KEY,)
+        ).fetchone()
+        return row is not None and row[0] == "true"
+
+    def set_graph_stale(self, stale: bool) -> None:
+        """Write the graph-stale metadata flag.
+
+        Args:
+            stale: The new flag value (stored as ``"true"``/``"false"``).
+        """
+        self._conn.execute(
+            _UPSERT_SQL, {"key": GRAPH_STALE_KEY, "value": "true" if stale else "false"}
         )

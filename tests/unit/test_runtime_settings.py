@@ -42,6 +42,7 @@ class TestCatalog:
             "retrieval",
             "generation",
             "ingestion",
+            "graph",  # spec_graphrag; stage-2 decision #2
         }
 
     def test_reingest_affecting_is_the_ingest_time_knob_set(self) -> None:

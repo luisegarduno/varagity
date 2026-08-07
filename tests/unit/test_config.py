@@ -257,6 +257,13 @@ class TestGraphEngineValidation:
         # On is the acceptance gate's measured winner; passages stay
         # unprefixed either way, so this needs no re-embedding to flip.
         assert settings.GRAPH_QUERY_PREFIX is True
+        assert settings.GRAPH_ENABLED is True
+
+    def test_the_graph_upload_cap_dwarfs_the_document_one(self) -> None:
+        """★ A decade of iMessage is one file; the corpus cap is per document."""
+        settings = Settings(_env_file=None)
+        assert settings.GRAPH_UPLOAD_MAX_MB == 4096
+        assert settings.GRAPH_UPLOAD_MAX_MB > settings.UPLOAD_MAX_MB
 
     @pytest.mark.parametrize("bad", ["LightRAG", "", "made_up", "cognee", "graphiti"])
     def test_unknown_engine_fails_fast(self, bad: str) -> None:

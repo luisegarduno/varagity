@@ -51,6 +51,13 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev
 
+# Pre-create the graph workdir mount point owned by the app user: the
+# `graphdata` named volume copies this path's ownership on first mount —
+# left to Docker it comes up root-owned and every engine open dies with
+# EACCES (the model_cache lesson; ./graph-docs needs no twin because bind
+# mounts keep the host owner, uid 1000 by the APP_UID contract above).
+RUN mkdir -p /app/graph-data && chown user:user /app/graph-data
+
 # Use the non-root user to run the server
 USER user
 

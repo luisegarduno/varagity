@@ -33,6 +33,7 @@ from varagity.api.routes import (
     chat,
     conversations,
     documents,
+    graph,
     groups,
     ingest,
     metrics,
@@ -45,6 +46,9 @@ from varagity.api.schemas import (
     ErrorBody,
     ErrorEvent,
     ErrorResponse,
+    GraphBuildLogEvent,
+    GraphBuildProgressEvent,
+    GraphBuildStatusEvent,
     IngestLogEvent,
     IngestProgressEvent,
     IngestStatusEvent,
@@ -61,11 +65,11 @@ from varagity.stores.vector_store import default_conninfo
 logger = logging.getLogger(__name__)
 
 # The SSE protocols' event payloads (spec_v2 §4.3 chat + §4.2 ingest
-# status). No route returns them directly (they ride inside the event
-# streams), so FastAPI would omit them from the OpenAPI schema — and the
-# web app's generated TypeScript types are the *whole* wire contract, SSE
-# payloads included (schemas.py). create_app() merges their JSON schemas
-# into components/schemas.
+# status + spec_graphrag §5.2 graph build). No route returns them directly
+# (they ride inside the event streams), so FastAPI would omit them from the
+# OpenAPI schema — and the web app's generated TypeScript types are the
+# *whole* wire contract, SSE payloads included (schemas.py). create_app()
+# merges their JSON schemas into components/schemas.
 _SSE_EVENT_MODELS = (
     RetrievalEvent,
     DeltaEvent,
@@ -75,6 +79,9 @@ _SSE_EVENT_MODELS = (
     IngestStatusEvent,
     IngestProgressEvent,
     IngestLogEvent,
+    GraphBuildStatusEvent,
+    GraphBuildProgressEvent,
+    GraphBuildLogEvent,
 )
 
 # Stable codes for statuses raised with a plain-string detail; handlers fall
@@ -137,11 +144,32 @@ def _warm_registries() -> None:
 
     The route modules already import them transitively; doing it here makes
     startup fail loudly if a registration import breaks, instead of at the
-    first request.
+    first request. The graph packages are import-light by construction
+    (stage-1 decision #8: engine libraries load inside ``session()``), so
+    warming them costs nothing and makes ``GRAPH_ENGINE`` resolvable and the
+    upload sniff's message-source registry populated.
     """
     import varagity.chunking  # noqa: F401
+    import varagity.graph.engines  # noqa: F401
+    import varagity.graph.sources  # noqa: F401
     import varagity.ingest.parsers  # noqa: F401
     import varagity.retrieval  # noqa: F401
+
+
+def _close_graph_session() -> None:
+    """Tear the graph engine's session down at shutdown (best-effort).
+
+    The API is the single writer of the graph working directory (ADR-017),
+    so an orderly shutdown must finalize the engine's storages rather than
+    leave them to a killed process. Failures are logged, never raised — a
+    teardown that raised would take the shutdown with it.
+    """
+    from varagity.graph.service import get_graph_service
+
+    try:
+        get_graph_service().close()
+    except Exception:
+        logger.warning("could not close the graph session at shutdown", exc_info=True)
 
 
 @asynccontextmanager
@@ -159,7 +187,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # After migrations (the app_settings table must exist) and before the
     # first request: overrides survive an api restart (spec_v2 §4.7).
     await run_in_threadpool(_load_runtime_overrides)
-    yield
+    try:
+        yield
+    finally:
+        await run_in_threadpool(_close_graph_session)
 
 
 def _error_payload(code: str, message: str) -> dict[str, object]:
@@ -352,6 +383,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_routes.router)
     app.include_router(documents.router)
     app.include_router(ingest.router)
+    app.include_router(graph.router)
     if settings.METRICS_ENABLED:
         # The corpus gauges are collected at scrape time, so they only need
         # to exist when something can scrape them (spec_v3 §6.1a).

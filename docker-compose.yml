@@ -173,6 +173,16 @@ services:
       # user uid defaults to 1000 to match the host owner of ./docs — writes
       # (uploads, per-doc delete) need it (see Dockerfile.api).
       - ./docs:/app/docs
+      # The GraphRAG message corpus (copied chat.db files + their -wal/-shm
+      # sidecars), uploaded via POST /api/graph/documents. A host bind like
+      # ./docs, so it survives `docker compose down -v`.
+      - ./graph-docs:/app/graph-docs
+      # The graph engine's self-stored working directory. A named volume,
+      # mounted into the **api service only**: the engine's storages are
+      # single-writer per working directory (ADR-017), so exactly one
+      # process may ever open them — which is why graph builds are
+      # API-only and there is deliberately no CLI graph build.
+      - graphdata:/app/graph-data
       # POST /api/ingest runs the same parsers as the CLI, so the
       # API shares the model cache: Docling layout/table models and EasyOCR
       # weights download once and survive container recreation.
@@ -371,3 +381,7 @@ volumes:
   prefect:
   prometheus_data:
   grafana_data:
+  # The graph engine's storage (ADR-017's file-storage decision). Reset it
+  # with `docker compose down && docker volume rm varagity_graphdata`; the
+  # source corpus in ./graph-docs is a bind mount and survives.
+  graphdata:

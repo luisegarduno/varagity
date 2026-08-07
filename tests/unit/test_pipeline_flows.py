@@ -23,6 +23,7 @@ from prometheus_client import REGISTRY
 
 from tests.unit.test_loader import FakeBM25, FakeEmbeddings, FakeStore
 from varagity.chat import PreparedQuery, Turn
+from varagity.graph.records import BuildReport
 from varagity.pipeline import ingest_flow, query_flow
 from varagity.pipeline.ingest_flow import (
     chunk_document_task,
@@ -544,3 +545,39 @@ class TestEvalFlows:
         assert result == {"kind": "ocr_benchmark"}
         assert captured["ingest"] is ingest_flow
         assert captured["verbose"] == 1
+
+
+class TestGraphBuildFlow:
+    """The graph build's tracking shell — the service does the work."""
+
+    class FakeService:
+        """Records what the flow handed the graph service."""
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, bool, int]] = []
+
+        def build(
+            self,
+            batches: Sequence[object],
+            *,
+            verbose: int = 0,
+            prune_removed: bool = True,
+        ) -> BuildReport:
+            self.calls.append((len(batches), prune_removed, verbose))
+            return BuildReport(messages_seen=7, wall_clock_s=2.5, failures=["one doc refused"])
+
+    def test_the_flow_forwards_to_the_service_and_is_a_tracked_run(self) -> None:
+        from varagity.pipeline import graph_build_flow
+
+        service = self.FakeService()
+        report = graph_build_flow(service, [object(), object()], prune_removed=False, verbose=2)
+
+        assert report.messages_seen == 7
+        assert service.calls == [(2, False, 2)]
+        assert graph_build_flow.name == "graph-build"
+
+    def test_the_flow_carries_no_retries(self) -> None:
+        """★ A failed backfill must surface, not silently re-run hours of extraction."""
+        from varagity.pipeline import graph_build_flow
+
+        assert graph_build_flow.retries in (0, None)

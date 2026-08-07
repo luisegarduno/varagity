@@ -46,6 +46,23 @@
         "title": "Body_upload_documents_api_documents_post",
         "type": "object"
       },
+      "Body_upload_graph_documents_api_graph_documents_post": {
+        "properties": {
+          "files": {
+            "items": {
+              "contentMediaType": "application/octet-stream",
+              "type": "string"
+            },
+            "title": "Files",
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "title": "Body_upload_graph_documents_api_graph_documents_post",
+        "type": "object"
+      },
       "ChatOverrides": {
         "additionalProperties": false,
         "description": "Per-request overrides of query-time settings (spec_v2 \u00a74.2).\n\nUnknown fields are rejected so a typo'd override fails loudly instead\nof silently running with defaults.\n\nAttributes:\n    retrieval_method: Registry name of the retrieval method for this\n        question only (``semantic`` | ``bm25`` | ``hybrid`` |\n        ``reranked`` | ``hyde``).\n    top_k: Number of chunks retrieved for this question only.\n    chat_engine: Registry name of the chat engine for this question\n        only (``simple`` | ``condense_context`` \u2014 spec_v3 \u00a74.2).",
@@ -550,6 +567,515 @@
           "error"
         ],
         "title": "ErrorResponse",
+        "type": "object"
+      },
+      "GraphBuildLogEvent": {
+        "description": "Payload of the graph-build SSE ``log`` event.\n\nRelayed ``varagity.graph`` log records (the parse summaries, the build\ndiff's new/changed/unchanged counts, per-document failures), so the\nbrowser sees what the server log would show.\n\nAttributes:\n    level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).\n    message: The formatted log message.",
+        "properties": {
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "level",
+          "message"
+        ],
+        "title": "GraphBuildLogEvent",
+        "type": "object"
+      },
+      "GraphBuildProgressEvent": {
+        "description": "Payload of the graph-build SSE ``progress`` event.\n\nTwo phases, because a graph build has two very different clocks:\n``scan``/``parse`` walk the corpus directory in seconds, then\n``index``/``process`` hand the merged messages to the engine and sample\nits own document statuses for hours (the extraction pass \u2014 ADR-017's\n7.17 s/message).\n\nAttributes:\n    stage: ``scan`` | ``parse`` | ``bound`` | ``reset`` | ``index`` |\n        ``process``.\n    file: The file being parsed (``None`` outside ``parse``).\n    current: Intra-stage progress (files parsed so far; messages kept by\n        ``bound``).\n    total: Stage denominator (files found, messages parsed).\n    docs_done: Documents the engine reports as processed (``process``).\n    docs_total: Documents the engine holds in any status (``process``).",
+        "properties": {
+          "current": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Current"
+          },
+          "docs_done": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Docs Done"
+          },
+          "docs_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Docs Total"
+          },
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total"
+          }
+        },
+        "required": [
+          "stage"
+        ],
+        "title": "GraphBuildProgressEvent",
+        "type": "object"
+      },
+      "GraphBuildRequest": {
+        "additionalProperties": false,
+        "description": "Body of ``POST /api/graph/build`` (spec_graphrag \u00a75.2).\n\nAttributes:\n    reingest: Wipe the engine's working directory and index from\n        scratch. The **only** thing that clears the graph-stale flag\n        (stage-2 decision #16) \u2014 and the only reason to pay a full\n        backfill twice.\n    message_limit: Index at most this many messages, newest first \u2014 the\n        bounded escape hatch that makes a minutes-long spot check\n        possible on an archive whose full build runs for days. A bounded\n        build never prunes: its render is partial by construction, so\n        documents it does not mention are kept, not deleted.\n    since: Ignore messages older than this date (the other half of the\n        bound; same no-prune rule).",
+        "properties": {
+          "message_limit": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Limit"
+          },
+          "reingest": {
+            "default": false,
+            "title": "Reingest",
+            "type": "boolean"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          }
+        },
+        "title": "GraphBuildRequest",
+        "type": "object"
+      },
+      "GraphBuildRunOut": {
+        "description": "One graph build run's state (``POST /api/graph/build`` + its stream).\n\nAttributes:\n    run_id: The run handle.\n    state: ``running`` | ``completed`` | ``failed``.\n    reingest: Whether the run wiped the working directory first.\n    bounded: Whether ``message_limit``/``since`` narrowed the render (a\n        bounded run deliberately skips the removal pass).\n    message_limit: The requested message cap, if any.\n    since: The requested date floor, if any.\n    started_at: When the run started.\n    finished_at: When it reached a terminal state (``None`` while\n        running).\n    summary: The final counters (terminal states only; a run that died\n        before the engine returned carries ``None``).\n    error: The run-level failure (``failed`` only; per-document failures\n        ride in ``summary.failures`` and the document statuses).",
+        "properties": {
+          "bounded": {
+            "title": "Bounded",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "message_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Limit"
+          },
+          "reingest": {
+            "title": "Reingest",
+            "type": "boolean"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphBuildSummaryOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "state",
+          "reingest",
+          "bounded",
+          "started_at"
+        ],
+        "title": "GraphBuildRunOut",
+        "type": "object"
+      },
+      "GraphBuildStatusEvent": {
+        "description": "Payload of the graph-build SSE ``status`` event.\n\nThe stream's first frame (a snapshot on connect) and its last (the\nterminal state). ``run=None`` means no build has run in this API\nprocess \u2014 the stream closes immediately after.\n\nAttributes:\n    run: The current (or last) run, if any.",
+        "properties": {
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphBuildRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "GraphBuildStatusEvent",
+        "type": "object"
+      },
+      "GraphBuildSummaryOut": {
+        "description": "The graph build's counters (terminal runs only).\n\nAttributes:\n    files_scanned: Files found under ``GRAPH_DOCS_PATH``.\n    files_parsed: Of those, files a registered message source claimed.\n    files_failed: Files that raised while parsing (the run continued).\n    messages_parsed: Messages recovered from every parsed file.\n    messages_indexed: Messages handed to the engine after the bounds\n        were applied (equal to ``messages_parsed`` for an unbounded\n        build, before guid-merging collapses overlaps).\n    messages_seen: What the engine reported after guid-merging the\n        batches \u2014 the upsert grain.\n    wall_clock_s: Seconds the engine spent indexing.\n    resumed: Documents already in flight (or failed) when this run\n        started \u2014 the work a killed build left behind and this one\n        picked up.\n    documents: The engine's document counts by status when the run\n        finished.\n    failures: Per-step failures the build caught and continued past.",
+        "properties": {
+          "documents": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "default": {},
+            "title": "Documents",
+            "type": "object"
+          },
+          "failures": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Failures",
+            "type": "array"
+          },
+          "files_failed": {
+            "title": "Files Failed",
+            "type": "integer"
+          },
+          "files_parsed": {
+            "title": "Files Parsed",
+            "type": "integer"
+          },
+          "files_scanned": {
+            "title": "Files Scanned",
+            "type": "integer"
+          },
+          "messages_indexed": {
+            "title": "Messages Indexed",
+            "type": "integer"
+          },
+          "messages_parsed": {
+            "title": "Messages Parsed",
+            "type": "integer"
+          },
+          "messages_seen": {
+            "title": "Messages Seen",
+            "type": "integer"
+          },
+          "resumed": {
+            "title": "Resumed",
+            "type": "integer"
+          },
+          "wall_clock_s": {
+            "title": "Wall Clock S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "files_scanned",
+          "files_parsed",
+          "files_failed",
+          "messages_parsed",
+          "messages_indexed",
+          "messages_seen",
+          "wall_clock_s",
+          "resumed"
+        ],
+        "title": "GraphBuildSummaryOut",
+        "type": "object"
+      },
+      "GraphDocumentDeleteResponse": {
+        "description": "Response of ``DELETE /api/graph/documents/{name}``.\n\nAttributes:\n    relative_path: The removed file's path under ``GRAPH_DOCS_PATH``.\n    graph_stale: Whether the graph is now flagged stale \u2014 it keeps the\n        deleted file's messages until the next rebuild, and saying so is\n        the honest alternative to silently diverging (stage-2 decision\n        #16). ``False`` only when the flag could not be persisted.",
+        "properties": {
+          "graph_stale": {
+            "title": "Graph Stale",
+            "type": "boolean"
+          },
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "relative_path",
+          "graph_stale"
+        ],
+        "title": "GraphDocumentDeleteResponse",
+        "type": "object"
+      },
+      "GraphDocumentOut": {
+        "description": "One file in the ``GET /api/graph/documents`` list (spec_graphrag \u00a710.2).\n\nUnlike the chunk-RAG corpus list \u2014 which reports the ``documents``\n*table* \u2014 this is a directory listing: the graph's own record of what it\nindexed lives in the engine's workdir, and the tab's job is to show what\nhas been dropped in. Non-source files (a contacts list, the ``-wal`` /\n``-shm`` sidecars a ``chat.db`` needs) are listed too, with a ``None``\n``doc_id``: they are on disk and the user put them there.\n\nAttributes:\n    name: Base name of the file.\n    relative_path: Its POSIX path relative to ``GRAPH_DOCS_PATH`` (the\n        delete route's key).\n    size_bytes: Size on disk.\n    modified_at: The file's mtime.\n    doc_id: The stable id a build derives for it (path relative to\n        ``GRAPH_DOCS_PATH`` + byte hash), or ``None`` when no build has\n        scanned this file yet \u2014 or when no registered message source\n        claims it.\n    parse: What the last scan parsed out of it, or ``None`` when no\n        build has scanned it (parsing a multi-gigabyte database is a\n        build's job, not a list request's).",
+        "properties": {
+          "doc_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doc Id"
+          },
+          "modified_at": {
+            "format": "date-time",
+            "title": "Modified At",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parse": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphParseSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "relative_path",
+          "size_bytes",
+          "modified_at"
+        ],
+        "title": "GraphDocumentOut",
+        "type": "object"
+      },
+      "GraphParseSummary": {
+        "description": "What the last build's scan found inside one graph source file.\n\nAttributes:\n    messages: Recoverable messages parsed from the file.\n    threads: Distinct conversations they belong to.\n    first: Oldest message timestamp (``None`` for an empty parse).\n    last: Newest message timestamp (``None`` for an empty parse).",
+        "properties": {
+          "first": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First"
+          },
+          "last": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last"
+          },
+          "messages": {
+            "title": "Messages",
+            "type": "integer"
+          },
+          "threads": {
+            "title": "Threads",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "messages",
+          "threads"
+        ],
+        "title": "GraphParseSummary",
+        "type": "object"
+      },
+      "GraphStatusOut": {
+        "description": "Response of ``GET /api/graph/status`` \u2014 the graph tab's poll surface.\n\nEvery size field is optional because \"nothing has been built here yet\"\nand \"the engine would not say\" are both real states, and reporting them\nas ``0`` would read like an empty graph (the honesty rule\n:class:`~varagity.graph.records.GraphStats` sets).\n\nAttributes:\n    enabled: The ``GRAPH_ENABLED`` kill switch.\n    stale: Whether a source file was deleted since the last rebuild.\n    building: Whether a build is running in this API process.\n    documents: The engine's document counts by status (its own\n        vocabulary: ``pending``, ``processing``, ``processed``,\n        ``failed``, \u2026); empty when nothing has been indexed.\n    entities: Entity count from the workdir's summary sidecar.\n    relations: Relation count from the same.\n    message_guids: Messages the workdir's manifest accounts for.\n    last_build: The current (or last) build run in this API process.",
+        "properties": {
+          "building": {
+            "title": "Building",
+            "type": "boolean"
+          },
+          "documents": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "default": {},
+            "title": "Documents",
+            "type": "object"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "entities": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entities"
+          },
+          "last_build": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphBuildRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message_guids": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Guids"
+          },
+          "relations": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relations"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "stale",
+          "building"
+        ],
+        "title": "GraphStatusOut",
+        "type": "object"
+      },
+      "GraphUploadResponse": {
+        "description": "Response of ``POST /api/graph/documents``.\n\nAttributes:\n    files: Per-file outcomes, in upload order (the corpus upload's\n        shape, plus its ``unsupported_graph_source`` rejection).",
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/UploadedFileOut"
+            },
+            "title": "Files",
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "title": "GraphUploadResponse",
         "type": "object"
       },
       "GroupCreateRequest": {
@@ -1462,10 +1988,15 @@
         "type": "object"
       },
       "SettingsResponse": {
-        "description": "Response of ``GET /api/settings`` and ``PATCH /api/settings``.\n\nAttributes:\n    settings: The full overridable catalog with effective values.\n    corpus_stale: Whether a reingest-affecting setting changed since the\n        corpus was last (re)ingested \u2014 the \"Re-ingest to apply\" banner.",
+        "description": "Response of ``GET /api/settings`` and ``PATCH /api/settings``.\n\nAttributes:\n    settings: The full overridable catalog with effective values.\n    corpus_stale: Whether a reingest-affecting setting changed since the\n        corpus was last (re)ingested \u2014 the \"Re-ingest to apply\" banner.\n    graph_stale: Whether the graph corpus changed since the graph was\n        last (re)built \u2014 the graph tab's \"Re-build to apply\" banner\n        (stage-2 decision #16).",
         "properties": {
           "corpus_stale": {
             "title": "Corpus Stale",
+            "type": "boolean"
+          },
+          "graph_stale": {
+            "default": false,
+            "title": "Graph Stale",
             "type": "boolean"
           },
           "settings": {
@@ -1520,7 +2051,7 @@
         "type": "object"
       },
       "UploadedFileOut": {
-        "description": "Outcome for one file of a ``POST /api/documents`` upload.\n\nAttributes:\n    file_name: The stored (sanitized) file name (rejections echo the\n        client-supplied name/path they rejected).\n    size_bytes: Bytes written (``0`` when rejected).\n    stored: Whether the file landed in ``DOCS_PATH``.\n    replaced: Whether an existing file at the same target was\n        overwritten (a re-upload; the next ingest re-processes it under\n        a new hash).\n    reason: Rejection reason when ``stored`` is false\n        (``extension_not_allowed`` | ``file_too_large`` |\n        ``invalid_filename`` | ``invalid_path`` | ``path_too_deep`` |\n        ``write_failed`` \u2014 the last is a server-side problem, escalated\n        to a structured ``500`` when no file in the batch landed).\n    relative_path: The stored path relative to ``DOCS_PATH`` when the\n        upload declared one (folder uploads, spec_v3 \u00a75.2); ``None``\n        for flat uploads and rejections.",
+        "description": "Outcome for one file of a ``POST /api/documents`` upload.\n\nAttributes:\n    file_name: The stored (sanitized) file name (rejections echo the\n        client-supplied name/path they rejected).\n    size_bytes: Bytes written (``0`` when rejected).\n    stored: Whether the file landed in ``DOCS_PATH``.\n    replaced: Whether an existing file at the same target was\n        overwritten (a re-upload; the next ingest re-processes it under\n        a new hash).\n    reason: Rejection reason when ``stored`` is false\n        (``extension_not_allowed`` | ``file_too_large`` |\n        ``invalid_filename`` | ``invalid_path`` | ``path_too_deep`` |\n        ``write_failed`` \u2014 the last is a server-side problem, escalated\n        to a structured ``500`` when no file in the batch landed).\n        Graph corpus uploads add ``unsupported_graph_source``: the file\n        landed, no registered message source claimed it, and it was\n        removed again (spec_graphrag \u00a710.2).\n    relative_path: The stored path relative to ``DOCS_PATH`` when the\n        upload declared one (folder uploads, spec_v3 \u00a75.2); ``None``\n        for flat uploads and rejections.",
         "properties": {
           "file_name": {
             "title": "File Name",
@@ -2231,6 +2762,266 @@
         "summary": "Preview Page",
         "tags": [
           "documents"
+        ]
+      }
+    },
+    "/api/graph/build": {
+      "post": {
+        "description": "Trigger a background graph build and return its handle.\n\n**This is also how a killed build resumes.** The engine keeps document\nstatuses on disk and re-selects every in-flight or failed document, so\npressing Build again after a crash finishes the work instead of\nrepeating it \u2014 the run's summary reports what it inherited as\n``resumed``. That is why ``reingest`` is a separate, explicit flag: it\nis the one path that throws the working directory away.\n\nArgs:\n    payload: ``reingest`` (wipe and re-index \u2014 the only thing that\n        clears the graph-stale flag), plus the ``message_limit`` /\n        ``since`` bounds that make a minutes-long spot check possible on\n        an archive whose full build runs for days.\n    runner: The process-wide graph build runner.\n    preflight: The awaitable reachability check (structured 503).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``403 graph_disabled`` when the kill switch is off;\n        ``409 graph_build_running`` while a build is in flight; ``503\n        <service>_unreachable`` when a required model service is down.",
+        "operationId": "start_graph_build_api_graph_build_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GraphBuildRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphBuildRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Start Graph Build",
+        "tags": [
+          "graph"
+        ]
+      }
+    },
+    "/api/graph/build/status": {
+      "get": {
+        "description": "Stream the current (or last) graph build's progress as SSE.\n\nFrames: ``status`` (snapshot; also terminal, with the summary),\n``progress`` (``scan`` \u2192 ``parse`` per file \u2192 ``bound``/``reset`` \u2192\n``index`` \u2192 sampled ``process`` ticks), ``log`` (relayed\n``varagity.graph`` lines). The stream replays from the start, so a\nbrowser opened six hours into a backfill renders the same picture one\nopened at the start did.\n\nArgs:\n    runner: The process-wide graph build runner.\n\nYields:\n    The framed events, oldest first, then live until terminal.",
+        "operationId": "graph_build_status_api_graph_build_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Graph Build Status",
+        "tags": [
+          "graph"
+        ]
+      }
+    },
+    "/api/graph/documents": {
+      "get": {
+        "description": "List every file in the graph corpus directory.\n\nA directory scan, not a table read: the graph's own record of what it\nindexed lives in the engine's workdir, and what this tab must show is\nwhat has been dropped in \u2014 sidecars and contacts files included. Files\nthe last build parsed also carry their ``doc_id`` and a parse summary;\nfiles no build has scanned carry ``None`` for both, because parsing a\nmulti-gigabyte database is a build's job.\n\nArgs:\n    runner: The process-wide graph build runner (holds the last scan).\n\nReturns:\n    One entry per file, in path order.",
+        "operationId": "list_graph_documents_api_graph_documents_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/GraphDocumentOut"
+                  },
+                  "title": "Response List Graph Documents Api Graph Documents Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Graph Documents",
+        "tags": [
+          "graph"
+        ]
+      },
+      "post": {
+        "description": "Upload message-source file(s) into ``GRAPH_DOCS_PATH`` (no auto-build).\n\nEach file is written independently and then **sniffed**: a file no\nregistered message source claims is deleted again and reported as\n``unsupported_graph_source``, so a mixed drop partially succeeds and the\ncorpus directory never fills with unreadable files. The chunk-RAG\n``ALLOWED_EXTENSIONS`` list does not apply \u2014 contents decide.\n\nCopy the whole SQLite set \u2014 ``chat.db`` **and** its ``-wal``/``-shm``\nsidecars: a live database keeps its most recent messages in the\nwrite-ahead log, and uploading the ``.db`` alone silently loses them.\nSidecars are stored beside their database without being sniffed.\n\nArgs:\n    files: The multipart file parts.\n\nReturns:\n    Per-file outcomes, in upload order.\n\nRaises:\n    HTTPException: ``403 graph_disabled`` when the kill switch is off;\n        ``422 too_many_files`` when the batch busts ``UPLOAD_MAX_FILES``;\n        ``422 no_file_stored`` when every file was rejected on its own\n        merits; ``500 graph_docs_path_not_writable`` when nothing landed\n        because the server couldn't write ``GRAPH_DOCS_PATH`` (in\n        compose, the ``./graph-docs`` bind mount must be writable by the\n        api container's user).",
+        "operationId": "upload_graph_documents_api_graph_documents_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_graph_documents_api_graph_documents_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphUploadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Graph Documents",
+        "tags": [
+          "graph"
+        ]
+      }
+    },
+    "/api/graph/documents/{name}": {
+      "delete": {
+        "description": "Remove one file from the graph corpus directory and flag the graph stale.\n\nDeleting the *source* does not retract what the graph already extracted\nfrom it \u2014 that costs a rebuild \u2014 so this sets the graph-stale flag and\nthe tab surfaces it, rather than letting the graph and its corpus\ndiverge silently (stage-2 decision #16).\n\nArgs:\n    name: The file's path relative to ``GRAPH_DOCS_PATH``.\n    store: The per-request app-settings store (the stale flag).\n\nReturns:\n    What was removed and whether the graph is now flagged stale.\n\nRaises:\n    HTTPException: ``404 graph_document_not_found`` when no such file\n        lives inside ``GRAPH_DOCS_PATH`` \u2014 which covers a path trying to\n        escape it, since an escaping path is not a file this route has.",
+        "operationId": "delete_graph_document_api_graph_documents__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphDocumentDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Graph Document",
+        "tags": [
+          "graph"
+        ]
+      }
+    },
+    "/api/graph/status": {
+      "get": {
+        "description": "Report the graph's size, staleness, and build state (the tab's poll).\n\nReads the workdir's summary sidecar rather than the graph itself, so a\npoll never walks a multi-megabyte graphml (stage-2 decision #18), and\nskips the engine entirely when nothing has been built here \u2014 an\nunbuilt graph must not make a status poll open a session and pay an\nengine's startup.\n\nArgs:\n    runner: The process-wide graph build runner (build state).\n    service: The process-wide graph service (document statuses).\n    store: The per-request app-settings store (the stale flag).\n\nReturns:\n    The status snapshot; every size field is ``None``/empty when\n    nothing has been indexed, never a zero that would read like an\n    empty graph.",
+        "operationId": "graph_status_api_graph_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Graph Status",
+        "tags": [
+          "graph"
         ]
       }
     },

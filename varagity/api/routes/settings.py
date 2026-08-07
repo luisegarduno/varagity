@@ -1,8 +1,9 @@
 """``GET``/``PATCH /api/settings`` — the live settings surface (spec_v2 §4.7).
 
 ``GET`` returns the full overridable catalog (effective values, groups,
-override/reingest flags, registry-derived choices) plus the corpus-stale
-flag; ``PATCH`` merges new overrides over the active set, validates the
+override/reingest flags, registry-derived choices) plus both staleness
+flags — the chunk corpus' and the graph's;
+``PATCH`` merges new overrides over the active set, validates the
 whole through the config validators, persists to ``app_settings``, clears
 the settings cache (via :mod:`varagity.api.runtime_settings`), and flags
 the corpus stale when a reingest-affecting knob actually changed on a
@@ -39,13 +40,16 @@ SettingsStoreDep = Annotated[AppSettingsStore, Depends(get_app_settings_store)]
 VectorStoreDep = Annotated[ContextualVectorDB, Depends(get_vector_store)]
 
 
-def _catalog(settings: Settings, overridden: set[str], corpus_stale: bool) -> SettingsResponse:
+def _catalog(
+    settings: Settings, overridden: set[str], corpus_stale: bool, graph_stale: bool
+) -> SettingsResponse:
     """Render the overridable catalog in its stable (grouped) order.
 
     Args:
         settings: The effective settings.
         overridden: Names with an active runtime override.
-        corpus_stale: The persisted stale flag.
+        corpus_stale: The persisted chunk-corpus stale flag.
+        graph_stale: The persisted graph stale flag.
 
     Returns:
         The full response body (shared by ``GET`` and ``PATCH``).
@@ -63,6 +67,7 @@ def _catalog(settings: Settings, overridden: set[str], corpus_stale: bool) -> Se
             for name, spec in OVERRIDABLE.items()
         ],
         corpus_stale=corpus_stale,
+        graph_stale=graph_stale,
     )
 
 
@@ -76,7 +81,12 @@ def read_settings(store: SettingsStoreDep) -> SettingsResponse:
     Returns:
         The overridable catalog with effective (env + override) values.
     """
-    return _catalog(get_settings(), set(active_overrides()), store.is_corpus_stale())
+    return _catalog(
+        get_settings(),
+        set(active_overrides()),
+        store.is_corpus_stale(),
+        store.is_graph_stale(),
+    )
 
 
 @router.patch("/api/settings")
@@ -148,6 +158,7 @@ def patch_settings(
             name for name in REINGEST_AFFECTING if getattr(settings, name) != before_reingest[name]
         )
         corpus_stale = store.is_corpus_stale()
+        graph_stale = store.is_graph_stale()
         if changed_reingest and not corpus_stale and vector_store.document_count() > 0:
             store.set_corpus_stale(True)
             corpus_stale = True
@@ -167,4 +178,4 @@ def patch_settings(
             },
         ) from error
 
-    return _catalog(settings, set(candidate), corpus_stale)
+    return _catalog(settings, set(candidate), corpus_stale, graph_stale)

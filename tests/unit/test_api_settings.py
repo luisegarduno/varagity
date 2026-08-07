@@ -41,6 +41,12 @@ class FakeAppSettingsStore:
     def set_corpus_stale(self, stale: bool) -> None:
         self._state["stale"] = stale
 
+    def is_graph_stale(self) -> bool:
+        return self._state["graph_stale"]
+
+    def set_graph_stale(self, stale: bool) -> None:
+        self._state["graph_stale"] = stale
+
 
 class FakeVectorStore:
     """document_count-only double for the corpus-emptiness check."""
@@ -62,7 +68,7 @@ def isolate_overrides() -> Iterator[None]:
 
 @pytest.fixture
 def store_state() -> dict[str, Any]:
-    return {"overrides": {}, "stale": False}
+    return {"overrides": {}, "stale": False, "graph_stale": False}
 
 
 @pytest.fixture
@@ -104,8 +110,26 @@ class TestGetSettings:
         assert settings["CHAT_MODEL_TYPE"]["group"] == "generation"
         assert settings["CHUNKING_STRATEGY"]["group"] == "ingestion"
         assert settings["CHUNKING_STRATEGY"]["reingest_affecting"] is True
+        assert settings["GRAPH_ENABLED"]["group"] == "graph"
         assert settings["TOP_K"]["reingest_affecting"] is False
         assert body["corpus_stale"] is False
+        assert body["graph_stale"] is False
+
+    async def test_the_graph_stale_flag_is_reported_alongside_the_corpus_one(
+        self, app: FastAPI, store_state: dict[str, Any]
+    ) -> None:
+        """★ Two corpora, two staleness stories — neither may speak for the other."""
+        store_state["graph_stale"] = True
+        body = (await get_catalog(app)).json()
+        assert (body["corpus_stale"], body["graph_stale"]) == (False, True)
+
+    async def test_a_reingest_affecting_patch_never_flags_the_graph(
+        self, app: FastAPI, store_state: dict[str, Any]
+    ) -> None:
+        response = await patch_settings(app, {"CHUNK_SIZE": 512})
+        assert response.status_code == 200
+        assert response.json()["graph_stale"] is False
+        assert store_state["graph_stale"] is False
 
     async def test_choices_reflect_the_registries(self, app: FastAPI) -> None:
         settings = by_name((await get_catalog(app)).json())

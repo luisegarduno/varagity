@@ -5,4 +5,10 @@
 # Ingest corpus — bind-mounted at runtime (./docs:/app/docs), never baked in
 docs/
 
+# Graph corpus + engine workdir — mounted at runtime (./graph-docs:/app/graph-docs
+# bind, graphdata:/app/graph-data volume), never baked in: the corpus holds REAL
+# personal message archives and the workdir runs to gigabytes on a full build
+graph-docs/
+graph-data/
+
 .git/

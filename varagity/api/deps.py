@@ -320,3 +320,32 @@ def get_ingest_preflight() -> Callable[[], Awaitable[None]]:
         :func:`require_ingest_services`.
     """
     return require_ingest_services
+
+
+async def require_graph_build_services() -> None:
+    """Graph-build preflight: 503 with a machine-readable code if a model service is down.
+
+    A graph build talks to the two GPU services and nothing else — the
+    engine self-stores in its working directory, so neither postgres nor
+    Elasticsearch is required (only the stale flag touches postgres, and
+    that failure is logged rather than raised). Runs before ``POST
+    /api/graph/build`` spawns a run that would otherwise fail hours in.
+
+    Raises:
+        HTTPException: ``503`` naming the first unreachable service.
+    """
+    required: tuple[str, ...] = ("llamacpp", "infinity")
+    statuses = await check_services(required)
+    for name in required:
+        status = statuses[name]
+        if not status.ok:
+            raise _unreachable(name, status.detail or "no detail")
+
+
+def get_graph_build_preflight() -> Callable[[], Awaitable[None]]:
+    """Provide the graph-build reachability preflight (override seam for tests).
+
+    Returns:
+        :func:`require_graph_build_services`.
+    """
+    return require_graph_build_services

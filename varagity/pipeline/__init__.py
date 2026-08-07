@@ -28,12 +28,14 @@ from varagity.pipeline.eval_flow import (  # noqa: E402
     graph_eval_flow,
     ocr_benchmark_flow,
 )
+from varagity.pipeline.graph_flow import graph_build_flow  # noqa: E402
 from varagity.pipeline.ingest_flow import ingest_flow  # noqa: E402
 from varagity.pipeline.query_flow import query_flow, query_stream_flow  # noqa: E402
 
 __all__ = [
     "chat_eval_flow",
     "eval_flow",
+    "graph_build_flow",
     "graph_eval_flow",
     "ingest_flow",
     "ocr_benchmark_flow",

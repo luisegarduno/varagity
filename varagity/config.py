@@ -282,10 +282,20 @@ class Settings(BaseSettings):
             binds (compose interpolation; the app never dials it).
         GRAFANA_PORT: Host port the compose ``grafana`` service binds
             (compose interpolation; the container serves 3000 internally).
+        GRAPH_ENABLED: Master kill switch for the graph subsystem (ADR-017's
+            degrade semantics). Off, the graph corpus routes answer a
+            structured ``403 graph_disabled`` and a graph-targeted chat turn
+            degrades to a chunk-RAG answer — never a silent no-op. Selection
+            and the toggle stay orthogonal, exactly as ``RERANK_ENABLED`` and
+            ``CONDENSE_ENABLED`` do.
         GRAPH_DOCS_PATH: Directory holding the GraphRAG message corpus
             (copied iMessage ``chat.db`` files; spec_graphrag §10.2, Q4) — a
             separate root from ``DOCS_PATH``, gitignored like it, never mixed
             into the chunk-RAG corpus.
+        GRAPH_UPLOAD_MAX_MB: Per-file size cap for graph corpus uploads
+            (``POST /api/graph/documents``). Far above ``UPLOAD_MAX_MB``
+            on purpose: that cap is document-sized, while a decade of
+            iMessage history is one multi-gigabyte SQLite file.
         GRAPH_STORAGE_PATH: Root for the graph engine's self-stored working
             directory (``<root>/<engine>/``; ADR-017 pinned file storage). In
             compose this is the ``graphdata`` named volume, mounted into the
@@ -414,11 +424,14 @@ class Settings(BaseSettings):
     PROMETHEUS_PORT: int = 9090
     GRAFANA_PORT: int = 3001
 
-    # Graph corpus (spec_graphrag §10) — the GraphRAG message corpus root, the
-    # engine and its storage root, and the owner/handle identity the iMessage
-    # parser consumes. The runtime query budgets land with their consumers in
-    # the later stage-2 phases (no dead config).
+    # Graph corpus (spec_graphrag §10) — the kill switch, the GraphRAG message
+    # corpus root and its upload cap, the engine and its storage root, and the
+    # owner/handle identity the iMessage parser consumes. The runtime query
+    # budgets land with their consumers in the later stage-2 phases (no dead
+    # config).
+    GRAPH_ENABLED: bool = True
     GRAPH_DOCS_PATH: str = "./graph-docs"
+    GRAPH_UPLOAD_MAX_MB: int = 4096
     GRAPH_STORAGE_PATH: str = "./graph-data"
     GRAPH_ENGINE: str = "lightrag"  # benchmark-decided default (ADR-017)
     GRAPH_OWNER_ALIASES: str = ""

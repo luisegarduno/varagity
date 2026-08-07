@@ -6,4 +6,6 @@
 
 ::: varagity.pipeline.query_flow
 
+::: varagity.pipeline.graph_flow
+
 ::: varagity.pipeline.eval_flow
