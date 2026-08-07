@@ -370,6 +370,40 @@ class FakeGraphStore:
         return SimpleNamespace(nodes=["n"] * self.nodes, edges=["e"] * self.edges)
 
 
+class FakeDocStatusStore:
+    """Stand-in for the pinned ``JsonDocStatusStorage``'s status surface.
+
+    Holds ``doc_id → status value`` rows and records what the adapter's
+    ``dup-*`` sweep deletes and flushes. Deliberately does **not** write to
+    ``FakeRag.calls`` — the pipeline-verb order assertions stay about the
+    pipeline.
+    """
+
+    def __init__(self, rows: dict[str, str] | None = None, *, fail: bool = False) -> None:
+        self.rows = dict(rows or {})
+        self.fail = fail
+        self.deleted: list[str] = []
+        self.flushes = 0
+
+    async def get_docs_by_statuses(self, statuses: list[Any]) -> dict[str, Any]:
+        if self.fail:
+            raise RuntimeError("doc-status store exploded")
+        values = {status.value for status in statuses}
+        return {
+            doc_id: SimpleNamespace(status=value)
+            for doc_id, value in self.rows.items()
+            if value in values
+        }
+
+    async def delete(self, doc_ids: list[str]) -> None:
+        for doc_id in doc_ids:
+            self.rows.pop(doc_id, None)
+            self.deleted.append(doc_id)
+
+    async def index_done_callback(self) -> None:
+        self.flushes += 1
+
+
 class FakeRag:
     """Stand-in for an initialized ``LightRAG`` instance.
 
@@ -394,6 +428,8 @@ class FakeRag:
         fail_delete: Sequence[str] = (),
         fail_export: bool = False,
         fail_statuses: bool = False,
+        doc_status_rows: dict[str, str] | None = None,
+        fail_doc_status: bool = False,
     ) -> None:
         self.answer = answer
         self.context = context
@@ -417,6 +453,7 @@ class FakeRag:
         self.data_queries: list[FakeQueryParam] = []
         self.finalized = False
         self.chunk_entity_relation_graph = FakeGraphStore()
+        self.doc_status = FakeDocStatusStore(doc_status_rows, fail=fail_doc_status)
 
     async def apipeline_enqueue_documents(
         self, texts: list[str], *, ids: list[str], file_paths: list[str]
@@ -633,6 +670,35 @@ class TestLightRAGSessionLoop:
         session.close()
         assert session._rag.finalized is True
 
+    def test_close_resets_the_engines_process_global_shared_storage(self, tmp_path: Path) -> None:
+        """★ The reingest guard: ghost statuses must not survive a close.
+
+        LightRAG parks doc statuses in module-global dicts that outlive
+        ``finalize_storages``; a close→wipe→reopen that skips the injected
+        reset re-attaches to those ghosts and the enqueue dedup silently
+        vetoes the entire rebuild (reproduced live: a 0.005 s "completed"
+        reingest over an empty graph).
+        """
+        resets: list[int] = []
+        session = lightrag_adapter._LightRAGSession(
+            FakeRag(),
+            FakeQueryParam,
+            workdir=tmp_path,
+            share_finalizer=lambda: resets.append(1),
+        )
+        session.close()
+        session.close()
+        assert resets == [1]  # after the loop is torn down, exactly once
+
+    def test_a_failing_shared_storage_reset_never_raises(self, tmp_path: Path) -> None:
+        def boom() -> None:
+            raise RuntimeError("shared state exploded")
+
+        session = lightrag_adapter._LightRAGSession(
+            FakeRag(), FakeQueryParam, workdir=tmp_path, share_finalizer=boom
+        )
+        session.close()  # teardown hygiene is logged, never raised
+
     def test_close_cancels_the_engines_lingering_loop_tasks(self, tmp_path: Path) -> None:
         """★ ``finalize_storages`` never reaps LightRAG's own worker tasks.
 
@@ -752,6 +818,46 @@ class TestLightRAGBuild:
         key = f"{THREAD}::2016-03-04"
         assert session._rag.calls == [f"delete:{key}", f"enqueue:{key}", "process"]
         assert session._rag.deleted == [key]
+
+    def test_process_sweeps_the_engines_dup_dedup_receipts(self, tmp_path: Path) -> None:
+        """★ Dedup receipts must not read as failures.
+
+        LightRAG records every deduped re-enqueue as a content-less ``dup-*``
+        FAILED row and preserves it forever; without the sweep the status
+        surface reads ``failed > 0`` on a healthy graph, growing each
+        resumed build.
+        """
+        rag = FakeRag(
+            doc_status_rows={
+                "dup-a1b2": "failed",
+                f"{THREAD}::2016-03-01": "failed",  # a REAL failure: retried, never swept
+                f"{THREAD}::2016-03-04": "processed",
+            }
+        )
+        session = lightrag_adapter._LightRAGSession(rag, FakeQueryParam, workdir=tmp_path)
+        report = session.build([batch(message("g1"))])
+        session.close()
+        assert rag.doc_status.deleted == ["dup-a1b2"]
+        assert f"{THREAD}::2016-03-01" in rag.doc_status.rows
+        # delete defers its disk flush, so the sweep must drive one itself.
+        assert rag.doc_status.flushes == 1
+        assert report.failures == []
+
+    def test_a_stubless_store_gets_no_delete_and_no_flush(self, tmp_path: Path) -> None:
+        rag = FakeRag(doc_status_rows={f"{THREAD}::2016-03-04": "processed"})
+        session = lightrag_adapter._LightRAGSession(rag, FakeQueryParam, workdir=tmp_path)
+        session.build([batch(message("g1"))])
+        session.close()
+        assert rag.doc_status.deleted == []
+        assert rag.doc_status.flushes == 0
+
+    def test_a_dup_sweep_failure_never_fails_the_build(self, tmp_path: Path) -> None:
+        rag = FakeRag(doc_status_rows={"dup-a1b2": "failed"}, fail_doc_status=True)
+        session = lightrag_adapter._LightRAGSession(rag, FakeQueryParam, workdir=tmp_path)
+        report = session.build([batch(message("g1"))])
+        session.close()
+        assert report.failures == []  # hygiene is not a build step
+        assert rag.processed == 1  # and the extraction pass still ran
 
     def test_a_source_that_vanished_is_deleted_on_a_full_corpus_build(self, tmp_path: Path) -> None:
         session = lightrag_session(tmp_path)

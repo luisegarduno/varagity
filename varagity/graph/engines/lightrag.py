@@ -72,6 +72,7 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from openai import AsyncOpenAI
@@ -159,6 +160,19 @@ _EMBEDDING_TIMEOUT_S = 600.0
 # chunking the enqueue turns a mid-run failure into a recorded partial rather
 # than a lost multi-hour index.
 _INSERT_BATCH = 20
+
+# LightRAG's enqueue stage drops a re-submitted doc_id in any status — the
+# behavior an upsert wants — but records each drop as a content-less FAILED
+# doc-status row under this id prefix ("File name already exists"), which its
+# process pass then preserves forever. See `_purge_dup_stubs`.
+_DUP_STUB_PREFIX = "dup-"
+
+# Duck-typed stand-in for ``lightrag.base.DocStatus.FAILED``. The pinned
+# JsonDocStatusStorage (see _ENV_PINS) reads only ``.value`` from status
+# filters, and the real enum cannot be imported here: even a lazy import
+# inside the sweep would pull the engine library into fake-driven unit runs
+# and trip the import-lightness guard (only `session()` touches the library).
+_DOC_STATUS_FAILED = SimpleNamespace(value="failed")
 
 # How long `close()` waits for the session's loop thread to wind down. The
 # loop is stopped, not cancelled, so the wait covers only callbacks already
@@ -471,7 +485,7 @@ class LightRAGEngine:
         # dependency of this project, only a transitive one.
         import numpy as np
         from lightrag import LightRAG, QueryParam
-        from lightrag.kg.shared_storage import initialize_pipeline_status
+        from lightrag.kg.shared_storage import finalize_share_data, initialize_pipeline_status
         from lightrag.utils import EmbeddingFunc
 
         workdir.mkdir(parents=True, exist_ok=True)
@@ -514,7 +528,9 @@ class LightRAGEngine:
                 supports_asymmetric=asymmetric,
             ),
         )
-        session = _LightRAGSession(rag, QueryParam, workdir=workdir)
+        session = _LightRAGSession(
+            rag, QueryParam, workdir=workdir, share_finalizer=finalize_share_data
+        )
         try:
             session.run(rag.initialize_storages())
             session.run(initialize_pipeline_status())
@@ -534,6 +550,7 @@ class _LightRAGSession:
         workdir: Path,
         mode: str = PRIMARY_MODE,
         llm: LLMClient | None = None,
+        share_finalizer: Callable[[], None] | None = None,
     ) -> None:
         """Wrap an initialized LightRAG instance and start its loop thread.
 
@@ -552,12 +569,21 @@ class _LightRAGSession:
             llm: Chat client for ``+synthesis`` answers; ``None`` builds one
                 on first use, so a session that only ever runs engine-composed
                 modes never opens the connection.
+            share_finalizer: LightRAG's ``finalize_share_data`` (injected by
+                :meth:`LightRAGEngine.session`, the only importer of the
+                library). The library parks doc statuses, pipeline state, and
+                update flags in **process-global** module dicts that survive
+                ``finalize_storages()`` — without this reset at close, a
+                close→wipe→reopen cycle (the reingest path) re-attaches to
+                ghost statuses and the enqueue dedup silently vetoes the
+                entire rebuild. ``None`` (tests) skips the reset.
         """
         self._rag = rag
         self._query_param = query_param
         self._workdir = workdir
         self._mode = mode
         self._llm = llm
+        self._share_finalizer = share_finalizer
         self._manifest = load_manifest(workdir)
         self._index: dict[str, list[str]] = self._manifest.guid_index()
         self._closed = False
@@ -822,10 +848,17 @@ class _LightRAGSession:
         return self._graph_stats()
 
     def close(self) -> None:
-        """Finalize LightRAG's storages and stop the session's loop thread.
+        """Finalize LightRAG's storages, stop the loop thread, reset shared state.
 
         Idempotent: a second call is a no-op, so a service teardown racing a
         context manager's ``finally`` cannot raise on the closed loop.
+
+        The shared-storage reset is the last act, once nothing can touch the
+        module globals: without it the library's process-global dicts (doc
+        statuses above all) outlive this session, and the next one in the
+        same process re-attaches to them instead of its own on-disk state —
+        which turns a reingest's close→wipe→reopen into a silently empty
+        build (every re-enqueue vetoed by ghost statuses).
         """
         if self._closed:
             return
@@ -844,6 +877,11 @@ class _LightRAGSession:
                 logger.warning("LightRAG loop thread did not stop within %ss", _LOOP_JOIN_TIMEOUT_S)
             else:
                 self._loop.close()
+            if self._share_finalizer is not None:
+                try:
+                    self._share_finalizer()
+                except Exception:  # teardown hygiene never raises
+                    logger.warning("LightRAG shared-storage reset failed", exc_info=True)
 
     def _drain_loop_tasks(self) -> None:
         """Cancel LightRAG's own background tasks before the loop goes away.
@@ -922,17 +960,57 @@ class _LightRAGSession:
     def _process(self) -> list[str]:
         """Run LightRAG's extraction pass over everything it has pending.
 
+        The ``dup-*`` sweep runs first, so dedup receipts born from this
+        build's enqueue (and any residue an earlier run left) are gone
+        before the pass — and before anything samples document statuses.
+
         Returns:
             A single-entry failure list if the pass raised, else empty. The
             pass is all-or-nothing from here; per-document failures live in
             the engine's doc-status store, where the next pass retries them.
         """
+        self._purge_dup_stubs()
         try:
             self.run(self._rag.apipeline_process_enqueue_documents())
         except Exception as exc:
             logger.warning("LightRAG document processing failed", exc_info=True)
             return [f"process: {exc!r}"]
         return []
+
+    def _purge_dup_stubs(self) -> None:
+        """Sweep LightRAG's ``dup-*`` dedup receipts out of the doc-status store.
+
+        The enqueue stage drops a re-submitted ``doc_id`` in any status —
+        exactly what the manifest-diffed upsert wants — but 1.5.4 records
+        each drop as a content-less ``dup-``-prefixed FAILED row, and its
+        process pass excludes those stubs from work without ever deleting
+        them ("preserved for manual review"). Left alone they accumulate
+        one per re-offered document per resumed build, and every status
+        surface reads ``failed > 0`` on a healthy graph. The manifest is
+        this adapter's dedup ledger, so the receipts carry nothing: purging
+        keeps :meth:`document_statuses` honest. Real failures keep their
+        rows — only the ``dup-`` prefix is swept, and hygiene never fails a
+        build (any error is logged and swallowed).
+        """
+
+        async def sweep() -> list[str]:
+            store = self._rag.doc_status
+            failed = await store.get_docs_by_statuses([_DOC_STATUS_FAILED])
+            stubs = [doc_id for doc_id in failed if doc_id.startswith(_DUP_STUB_PREFIX)]
+            if stubs:
+                await store.delete(stubs)
+                await store.index_done_callback()  # delete defers its disk flush
+            return stubs
+
+        try:
+            stubs = self.run(sweep())
+        except Exception:  # hygiene must never fail a build
+            logger.warning("could not purge the engine's dup-* doc-status stubs", exc_info=True)
+            return
+        if stubs:
+            logger.info(
+                "purged %d dup-* dedup receipt(s) from the engine's doc-status store", len(stubs)
+            )
 
     def _delete(self, doc_keys: Sequence[str]) -> dict[str, str]:
         """Delete documents from the graph one at a time.
