@@ -125,6 +125,22 @@ class WorkdirManifest(BaseModel):
         """
         return {key: list(doc.message_guids) for key, doc in self.docs.items()}
 
+    def thread_name_index(self) -> dict[str, str]:
+        """Project the manifest into the display-name map the adapters use.
+
+        A retrieved chunk-grain passage carries no transcript header, so its
+        excerpt would otherwise be labelled with the thread *id* while a
+        doc-grain hit of the same document shows the rendered display name —
+        two labels for one citation target. This index resolves both grains
+        to the name the document was indexed under.
+
+        Returns:
+            ``doc_key`` → the thread's human-facing label at index time.
+            Records without a name are omitted, so a miss falls through to
+            the caller's next resolution step instead of blanking the label.
+        """
+        return {key: doc.thread_name for key, doc in self.docs.items() if doc.thread_name}
+
     def message_guid_count(self) -> int:
         """Count the distinct messages the manifest accounts for.
 

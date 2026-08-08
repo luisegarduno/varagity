@@ -334,14 +334,15 @@ export function transcriptLabel(
  * Collapse duplicate transcript citations onto one entry per document.
  *
  * `mix` mode reaches the same transcript through more than one arm
- * (vector text-units and graph references), and the server keeps every
- * hit — so the same `docKey` can arrive twice, once labelled with the
- * rendered thread name (doc-grain) and once with the raw thread guid
+ * (vector text-units and graph references), and the server used to keep
+ * every hit — so the same `docKey` could arrive twice, once labelled with
+ * the rendered thread name (doc-grain) and once with the raw thread guid
  * (chunk-grain). One entry per document, best rank first; a
  * differently-labelled duplicate survives as `altLabel` so a citation
- * under either name still resolves. Persisted snapshots carry the
- * duplicates forever, which is why this lives in normalization rather
- * than upstream.
+ * under either name still resolves. The server now dedupes at evidence
+ * assembly (`retrieval_from_query_data`), but snapshots persisted before
+ * that fix carry the duplicates forever, which is why this stays in
+ * normalization as well.
  */
 function dedupeTranscripts(
   transcripts: GraphEvidenceTranscript[],

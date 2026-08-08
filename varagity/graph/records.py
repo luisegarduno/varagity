@@ -92,9 +92,11 @@ class TranscriptExcerpt(BaseModel):
     Attributes:
         doc_key: The :attr:`~varagity.graph.render.TranscriptDoc.doc_key`
             the passage came from — the join key back to the corpus.
-        thread_name: Human-facing thread label, for the answer's citation
-            (falls back to the thread id when the passage does not carry the
-            transcript header).
+        thread_name: Human-facing thread label, for the answer's citation —
+            resolved from the workdir manifest when it knows the key, so a
+            chunk-grain hit carries the same label as a doc-grain hit of the
+            same document (falls back to the passage's transcript header,
+            then to the thread id).
         span: The document's day span (``YYYY-MM-DD`` or ``first..last``),
             parsed from the key.
         text: The retrieved passage, verbatim.

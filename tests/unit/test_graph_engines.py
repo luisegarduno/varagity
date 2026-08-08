@@ -1177,6 +1177,18 @@ class TestLightRAGAdapter:
         assert session._rag.queries == []  # aquery is never touched
         assert llm.calls == []  # …and neither is an LLM
 
+    def test_retrieve_labels_chunk_grain_hits_from_the_built_manifest(self, tmp_path: Path) -> None:
+        """★ One citation label per document: the manifest names what headers cannot."""
+        headerless = {
+            "data": {
+                "chunks": [{"content": "[18:25] Me: nice", "file_path": f"{THREAD}::2016-03-04"}]
+            }
+        }
+        session = lightrag_session(tmp_path, query_data=headerless)
+        retrieval = session.retrieve("q")
+        session.close()
+        assert [e.thread_name for e in retrieval.excerpts] == ["Hardware Talk"]
+
     @pytest.mark.parametrize(
         ("mode", "expected"),
         [("mix", "mix"), ("mix+synthesis", "mix"), ("synthesis", PRIMARY), (None, PRIMARY)],
@@ -1351,6 +1363,79 @@ class TestLightRAGAdapter:
         _, (excerpt,) = lightrag_adapter.retrieval_from_query_data(payload, {})
         assert excerpt.thread_name == THREAD
         assert excerpt.span == "2016-03-04"
+
+    def test_the_manifest_display_name_labels_a_headerless_excerpt(self) -> None:
+        """★ Chunk-grain hits must resolve the label doc-grain hits render."""
+        payload = {
+            "data": {
+                "chunks": [{"content": "[18:25] Me: nice", "file_path": f"{THREAD}::2016-03-04"}]
+            }
+        }
+        _, (excerpt,) = lightrag_adapter.retrieval_from_query_data(
+            payload, {}, {f"{THREAD}::2016-03-04": "Hardware Talk"}
+        )
+        assert excerpt.thread_name == "Hardware Talk"
+
+    def test_duplicate_hits_of_one_document_collapse_onto_the_best_ranked(self) -> None:
+        """★ `mix` reaches a document through several arms; evidence wants it once."""
+        payload = {
+            "data": {
+                "chunks": [
+                    {
+                        "content": (
+                            "Thread: Hardware Talk (participants: Bob, Me)\n\n"
+                            "[2016-03-04 18:22] Bob: I built the PC"
+                        ),
+                        "file_path": f"{THREAD}::2016-03-04",
+                    },
+                    {"content": "[18:25] Me: nice", "file_path": f"{THREAD}::2016-03-04"},
+                    {"content": "[09:00] Ana: hey", "file_path": "other::2016-03-05"},
+                ]
+            }
+        }
+        _, excerpts = lightrag_adapter.retrieval_from_query_data(payload, {})
+        assert [e.doc_key for e in excerpts] == [f"{THREAD}::2016-03-04", "other::2016-03-05"]
+        assert "I built the PC" in excerpts[0].text  # the best-ranked hit kept its passage
+        assert excerpts[0].thread_name == "Hardware Talk"
+
+    def test_a_dropped_duplicate_upgrades_a_thread_id_label(self) -> None:
+        """On a manifest-less workdir the doc-grain duplicate still names the day."""
+        payload = {
+            "data": {
+                "chunks": [
+                    {"content": "[18:25] Me: nice", "file_path": f"{THREAD}::2016-03-04"},
+                    {
+                        "content": (
+                            "Thread: Hardware Talk (participants: Bob, Me)\n\n"
+                            "[2016-03-04 18:22] Bob: I built the PC"
+                        ),
+                        "file_path": f"{THREAD}::2016-03-04",
+                    },
+                ]
+            }
+        }
+        _, (excerpt,) = lightrag_adapter.retrieval_from_query_data(payload, {})
+        assert "Me: nice" in excerpt.text  # best rank kept its passage…
+        assert excerpt.thread_name == "Hardware Talk"  # …under the duplicate's name
+
+    def test_a_display_name_is_never_downgraded_by_a_duplicate(self) -> None:
+        """The kept hit's resolved label wins; a guid-labelled duplicate changes nothing."""
+        payload = {
+            "data": {
+                "chunks": [
+                    {
+                        "content": (
+                            "Thread: Hardware Talk (participants: Bob, Me)\n\n"
+                            "[2016-03-04 18:22] Bob: I built the PC"
+                        ),
+                        "file_path": f"{THREAD}::2016-03-04",
+                    },
+                    {"content": "[18:25] Me: nice", "file_path": f"{THREAD}::2016-03-04"},
+                ]
+            }
+        }
+        _, (excerpt,) = lightrag_adapter.retrieval_from_query_data(payload, {})
+        assert excerpt.thread_name == "Hardware Talk"
 
     def test_a_chunk_without_text_cannot_ground_anything(self) -> None:
         payload = {"data": {"chunks": [{"file_path": f"{THREAD}::2016-03-04"}]}}

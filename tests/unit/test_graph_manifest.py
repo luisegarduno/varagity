@@ -165,6 +165,18 @@ class TestProjections:
         manifest.guid_index()[doc().doc_key].append("intruder")
         assert manifest.guid_index()[doc().doc_key] == ["g1", "g2"]
 
+    def test_the_thread_name_index_labels_every_named_document(self) -> None:
+        manifest = WorkdirManifest().merged([doc("a::1"), doc("b::1")], prune=True)
+        assert manifest.thread_name_index() == {
+            "a::1": "Hardware Talk",
+            "b::1": "Hardware Talk",
+        }
+
+    def test_a_nameless_record_is_left_out_of_the_name_index(self) -> None:
+        """A miss must fall through to the header parse, never blank the label."""
+        manifest = WorkdirManifest(docs={"a::1": ManifestDoc(content_sha256="x")})
+        assert manifest.thread_name_index() == {}
+
     def test_messages_are_counted_distinctly_across_documents(self) -> None:
         manifest = WorkdirManifest().merged(
             [doc("a::1", guids=["g1", "g2"]), doc("b::1", guids=["g2", "g3"])], prune=True

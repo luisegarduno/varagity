@@ -73,7 +73,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -369,7 +369,9 @@ def evidence_from_context(context: Any, index: Mapping[str, Sequence[str]]) -> G
 
 
 def retrieval_from_query_data(
-    payload: Any, index: Mapping[str, Sequence[str]]
+    payload: Any,
+    index: Mapping[str, Sequence[str]],
+    names: Mapping[str, str] | None = None,
 ) -> tuple[GraphEvidence, list[TranscriptExcerpt]]:
     """Normalize an ``aquery_data`` payload into evidence plus transcript excerpts.
 
@@ -384,11 +386,16 @@ def retrieval_from_query_data(
     Args:
         payload: Whatever ``aquery_data`` returned (or ``None``).
         index: ``doc_key`` → message guids, for provenance recovery.
+        names: ``doc_key`` → display name, for labelling chunk-grain hits
+            with the same thread name doc-grain hits render (``None``
+            degrades to the header-parse fallback inside :func:`_excerpt`).
 
     Returns:
         The evidence (entities/relations; LightRAG has no community layer)
         and the retrieved transcript passages, in the engine's own relevance
-        order.
+        order — one per transcript document: ``mix`` mode reaches the same
+        document through more than one arm, and the best-ranked hit wins
+        (:func:`_dedupe_excerpts`).
     """
     raw = _as_mapping(payload)
     data = _data_section(raw)
@@ -405,11 +412,11 @@ def retrieval_from_query_data(
         message_guids=guids_in_payload(payload if raw is None else raw, index),
         raw=raw,
     )
-    excerpts = [
+    excerpts = _dedupe_excerpts(
         excerpt
         for item in _section(data, "chunks")
-        if (excerpt := _excerpt(item, index)) is not None
-    ]
+        if (excerpt := _excerpt(item, index, names or {})) is not None
+    )
     return evidence, excerpts
 
 
@@ -598,6 +605,7 @@ class _LightRAGSession:
         self._share_finalizer = share_finalizer
         self._manifest = load_manifest(workdir)
         self._index: dict[str, list[str]] = self._manifest.guid_index()
+        self._names: dict[str, str] = self._manifest.thread_name_index()
         self._closed = False
         # One event loop per session, **driven by its own daemon thread**:
         # LightRAG's async primitives bind to the running loop, and running it
@@ -813,7 +821,7 @@ class _LightRAGSession:
         """
         used = mode or self._mode
         evidence, excerpts = retrieval_from_query_data(
-            self._query_data(question, self._base_mode(used)), self._index
+            self._query_data(question, self._base_mode(used)), self._index, self._names
         )
         return GraphRetrieval(evidence=evidence, excerpts=excerpts, mode=used)
 
@@ -1078,13 +1086,14 @@ class _LightRAGSession:
         return failures
 
     def _remember(self, manifest: WorkdirManifest) -> None:
-        """Adopt a new manifest: persist it, re-derive the provenance index.
+        """Adopt a new manifest: persist it, re-derive the provenance indexes.
 
         Args:
             manifest: The manifest describing what the graph now holds.
         """
         self._manifest = manifest
         self._index = manifest.guid_index()
+        self._names = manifest.thread_name_index()
         save_manifest(self._workdir, manifest)
         self._refresh_summary()
 
@@ -1324,7 +1333,9 @@ def _relation(item: Mapping[str, Any]) -> GraphRelation | None:
 
 
 def _excerpt(
-    item: Mapping[str, Any], index: Mapping[str, Sequence[str]]
+    item: Mapping[str, Any],
+    index: Mapping[str, Sequence[str]],
+    names: Mapping[str, str],
 ) -> TranscriptExcerpt | None:
     """Map one retrieved chunk into a transcript excerpt.
 
@@ -1333,9 +1344,18 @@ def _excerpt(
     provenance resolves through the same tolerant walk the rest of the
     adapter uses (LightRAG joins multiple paths with its own separator).
 
+    The thread label resolves manifest-first: only a doc-grain hit carries
+    the transcript header in its text, so parsing alone would label a
+    chunk-grain hit of the *same document* with the raw thread id — two
+    names for one citation target. The manifest knows the display name for
+    both grains; the header parse and the id stay as fallbacks for a
+    workdir indexed before the manifest recorded names.
+
     Args:
         item: One ``chunks`` record.
         index: ``doc_key`` → message guids.
+        names: ``doc_key`` → display name
+            (:meth:`~varagity.graph.manifest.WorkdirManifest.thread_name_index`).
 
     Returns:
         The excerpt, or ``None`` when the chunk carries no text (a passage
@@ -1349,8 +1369,39 @@ def _excerpt(
     header = _THREAD_HEADER_RE.search(text)
     return TranscriptExcerpt(
         doc_key=doc_key,
-        thread_name=header.group(1) if header else thread_id,
+        thread_name=names.get(doc_key) or (header.group(1) if header else thread_id),
         span=span,
         text=text,
         message_guids=guids_in_payload(doc_key, index),
     )
+
+
+def _dedupe_excerpts(excerpts: Iterable[TranscriptExcerpt]) -> list[TranscriptExcerpt]:
+    """Collapse a retrieval onto one excerpt per transcript document.
+
+    ``mix`` mode reaches the same document through more than one arm
+    (vector chunks plus entity/relation text-units), and every consumer
+    downstream — the answer prompt, the SSE ``retrieval`` event, the
+    persisted ``message_sources`` rows — wants each document once, under
+    one label. Hits arrive best-first, so the first per ``doc_key`` wins;
+    a dropped duplicate contributes only its thread name, and only when
+    the kept hit could not resolve one past the thread id (a manifest-less
+    workdir, where a chunk-grain hit has no header to parse).
+
+    Args:
+        excerpts: Mapped excerpts, in the engine's relevance order.
+
+    Returns:
+        One excerpt per document, first-hit order.
+    """
+    kept: dict[str, TranscriptExcerpt] = {}
+    for excerpt in excerpts:
+        seen = kept.get(excerpt.doc_key)
+        if seen is None:
+            kept[excerpt.doc_key] = excerpt
+        elif (
+            seen.thread_name == seen.doc_key.partition("::")[0]
+            and excerpt.thread_name != seen.thread_name
+        ):
+            seen.thread_name = excerpt.thread_name
+    return list(kept.values())
