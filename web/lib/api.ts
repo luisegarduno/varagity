@@ -59,6 +59,11 @@ export type GraphStatus = Schemas["GraphStatusOut"];
 export type GraphBuildStatusEvent = Schemas["GraphBuildStatusEvent"];
 export type GraphBuildProgressEvent = Schemas["GraphBuildProgressEvent"];
 export type GraphBuildLogEvent = Schemas["GraphBuildLogEvent"];
+export type GraphExport = Schemas["GraphExportOut"];
+export type GraphExportNode = Schemas["GraphExportNodeOut"];
+export type GraphExportEdge = Schemas["GraphExportEdgeOut"];
+export type GraphEntityDetail = Schemas["GraphEntityDetailOut"];
+export type GraphTranscriptRef = Schemas["GraphTranscriptRefOut"];
 
 /** Which corpus a chat turn targets (`ChatRequest.corpus`, spec_graphrag §4.2). */
 export type TargetCorpus = NonNullable<ChatRequest["corpus"]>;
@@ -346,6 +351,42 @@ export function startGraphBuild(
     method: "POST",
     body: JSON.stringify({ reingest: false, ...body }),
   });
+}
+
+/**
+ * Read a drawable slice of the graph (spec_graphrag §4.4) — the graph
+ * view's whole data source.
+ *
+ * The default is the *whole* graph, degree-ordered so the cap keeps the
+ * most connected entities; `truncated` says when the cap bit, and the view
+ * surfaces that rather than implying it drew everything. An unbuilt graph
+ * answers an empty slice (not an error); the kill switch answers
+ * `403 graph_disabled`, and an unopenable engine `503 graph_unavailable` —
+ * three states the view must tell apart.
+ */
+export function graphExport(
+  options: { label?: string; maxDepth?: number; maxNodes?: number } = {},
+): Promise<GraphExport> {
+  const params = new URLSearchParams();
+  if (options.label !== undefined) params.set("label", options.label);
+  if (options.maxDepth !== undefined)
+    params.set("max_depth", String(options.maxDepth));
+  if (options.maxNodes !== undefined)
+    params.set("max_nodes", String(options.maxNodes));
+  const query = params.toString();
+  return request(`/api/graph/export${query === "" ? "" : `?${query}`}`);
+}
+
+/**
+ * Inspect one entity: its summary, its immediate relations, and the
+ * transcript days it was extracted from (the drill-down).
+ *
+ * `404 entity_not_found` for a name the graph does not hold — which
+ * includes every name while the graph is unbuilt.
+ */
+export function graphEntity(name: string): Promise<GraphEntityDetail> {
+  const encoded = name.split("/").map(encodeURIComponent).join("/");
+  return request(`/api/graph/entities/${encoded}`);
 }
 
 /**

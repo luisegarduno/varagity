@@ -71,6 +71,20 @@ const STATIC_COMMANDS: PaletteCommand[] = [
     keywords: ["graph", "messages", "imessage", "archive", "build", "corpus"],
   },
   {
+    id: "navigate:graph",
+    label: "Open graph view",
+    group: "Navigate",
+    keywords: [
+      "graph",
+      "entities",
+      "relations",
+      "network",
+      "messages",
+      "people",
+      "visualize",
+    ],
+  },
+  {
     id: "navigate:map",
     label: "Codebase Map",
     group: "Navigate",
@@ -214,6 +228,8 @@ export function CommandPalette() {
             router.push("/corpus");
           } else if (argument === "corpus-graph") {
             router.push("/corpus?tab=graph");
+          } else if (argument === "graph") {
+            router.push("/graph");
           } else if (argument === "map") {
             router.push("/map");
           } else if (argument === "settings") {

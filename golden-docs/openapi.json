@@ -958,6 +958,35 @@
         "title": "GraphDocumentOut",
         "type": "object"
       },
+      "GraphEntityDetailOut": {
+        "description": "Response of ``GET /api/graph/entities/{name}`` \u2014 the inspect panel.\n\nAttributes:\n    entity: The entity itself, with the summary the engine merged from\n        every mention.\n    relations: Every edge touching it in a depth-1 slice, i.e. its\n        immediate neighbourhood.\n    sources: The transcript days it was extracted from \u2014 the drill-down\n        from a name in the graph back to the conversations behind it.\n        Empty when the engine recorded no document provenance.",
+        "properties": {
+          "entity": {
+            "$ref": "#/components/schemas/GraphExportNodeOut"
+          },
+          "relations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GraphExportEdgeOut"
+            },
+            "title": "Relations",
+            "type": "array"
+          },
+          "sources": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GraphTranscriptRefOut"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "entity"
+        ],
+        "title": "GraphEntityDetailOut",
+        "type": "object"
+      },
       "GraphEntityOut": {
         "description": "One entity the graph retrieval surfaced (spec_graphrag \u00a710.2).\n\nAttributes:\n    name: The entity's canonical name, as the engine resolved it.\n    type: The engine's entity type/category (``None`` when untyped) \u2014\n        what the evidence chips and the graph view color by, LightRAG\n        having no community tier (ADR-017).\n    summary: The engine's description of the entity.",
         "properties": {
@@ -994,6 +1023,121 @@
           "name"
         ],
         "title": "GraphEntityOut",
+        "type": "object"
+      },
+      "GraphExportEdgeOut": {
+        "description": "One relation in the drawable graph slice (spec_graphrag \u00a74.4).\n\nAttributes:\n    id: Stable edge identity within the slice (``source-target``).\n    source: Name of the edge's source entity.\n    target: Name of the edge's target entity.\n    label: Short relation label/keywords (``None`` when unlabelled).\n    description: The engine's longer description of the relation.",
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "target"
+        ],
+        "title": "GraphExportEdgeOut",
+        "type": "object"
+      },
+      "GraphExportNodeOut": {
+        "description": "One entity in the drawable graph slice (spec_graphrag \u00a74.4).\n\nAttributes:\n    id: The entity's canonical name \u2014 also the node's identity in the\n        view and the key the entity-detail route takes.\n    entity_type: The engine's type/category. **This is what the view\n        colors and groups by**: LightRAG builds no community tier, so\n        type is the honest clustering rather than a faked one (ADR-017).\n        ``None`` for an untyped node.\n    description: The engine's merged description of the entity.\n    degree: How many of *this slice's* edges touch the node \u2014 the size\n        channel in the view. A subgraph degree, not a whole-graph one:\n        the export is capped, so the number describes the picture drawn.",
+        "properties": {
+          "degree": {
+            "default": 0,
+            "title": "Degree",
+            "type": "integer"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "entity_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Type"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "GraphExportNodeOut",
+        "type": "object"
+      },
+      "GraphExportOut": {
+        "description": "Response of ``GET /api/graph/export`` \u2014 what the graph view draws.\n\nAttributes:\n    nodes: The exported entities, engine order (degree-descending for a\n        whole-graph export, so the cap keeps the most connected).\n    edges: Every edge between exported nodes.\n    truncated: Whether the cap hid nodes the graph actually holds. The\n        view **must** surface this rather than implying it drew\n        everything \u2014 an honest partial picture, per \u00a74.4's scale ceiling.",
+        "properties": {
+          "edges": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GraphExportEdgeOut"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "nodes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GraphExportNodeOut"
+            },
+            "title": "Nodes",
+            "type": "array"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "title": "GraphExportOut",
         "type": "object"
       },
       "GraphParseSummary": {
@@ -1227,6 +1371,35 @@
           "excerpt"
         ],
         "title": "GraphTranscriptOut",
+        "type": "object"
+      },
+      "GraphTranscriptRefOut": {
+        "description": "One transcript day an entity was extracted from (the drill-down).\n\nThe evidence panel's :class:`GraphTranscriptOut` without the retrieved\ntext: this is a *pointer* into the corpus (\"Bob was talked about on\nthese days\"), not a retrieval hit, so there is no excerpt to show.\n\nAttributes:\n    doc_key: The transcript document key \u2014 the join back to the corpus.\n    thread_name: Human-facing thread label, resolved through the\n        workdir manifest (falling back to the key's own thread id).\n    span: The document's day span (``YYYY-MM-DD`` or ``first..last``).\n    message_count: Messages the manifest accounts for in that document\n        (``0`` when the manifest does not know the key \u2014 never a claim\n        that the day was empty).",
+        "properties": {
+          "doc_key": {
+            "title": "Doc Key",
+            "type": "string"
+          },
+          "message_count": {
+            "default": 0,
+            "title": "Message Count",
+            "type": "integer"
+          },
+          "span": {
+            "title": "Span",
+            "type": "string"
+          },
+          "thread_name": {
+            "title": "Thread Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "doc_key",
+          "thread_name",
+          "span"
+        ],
+        "title": "GraphTranscriptRefOut",
         "type": "object"
       },
       "GraphUploadResponse": {
@@ -3205,6 +3378,147 @@
           }
         },
         "summary": "Delete Graph Document",
+        "tags": [
+          "graph"
+        ]
+      }
+    },
+    "/api/graph/entities/{name}": {
+      "get": {
+        "description": "Inspect one entity: its summary, its neighbourhood, its source days.\n\nThe graph view's click-through (spec_graphrag \u00a74.4): a name in the\npicture resolves to what the engine merged about it, the relations\naround it, and \u2014 the drill-down that makes the graph answerable \u2014 the\ntranscript days it was extracted from.\n\nArgs:\n    name: The entity's name (path-encoded; extracted names may contain\n        slashes). Canonical spelling resolves directly; any other casing\n        resolves through a whole-graph lookup, because the engine's own\n        label match is exact.\n    service: The process-wide graph service.\n\nReturns:\n    The entity with its depth-1 relations and its source days.\n\nRaises:\n    HTTPException: ``403 graph_disabled`` when the kill switch is off;\n        ``404 entity_not_found`` when the graph holds no such entity\n        (which includes a graph that has not been built yet);\n        ``503 graph_unavailable`` when the engine will not open.",
+        "operationId": "graph_entity_api_graph_entities__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphEntityDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Graph Entity",
+        "tags": [
+          "graph"
+        ]
+      }
+    },
+    "/api/graph/export": {
+      "get": {
+        "description": "Read a drawable slice of the graph (spec_graphrag \u00a74.4).\n\nThe graph view's whole data source. The default is the *whole* graph,\ndegree-ordered so the cap keeps the most connected entities, and\n``truncated`` says when the cap bit \u2014 the view surfaces that rather than\nimplying it drew everything.\n\nArgs:\n    service: The process-wide graph service.\n    label: Entity name to centre the slice on; ``\"*\"`` (the default)\n        takes the whole graph.\n    max_depth: Hops to walk out from ``label`` (ignored for ``\"*\"``).\n    max_nodes: Node cap, ceiling :data:`MAX_EXPORT_NODES`. Above it the\n        request is a ``422`` rather than a silent clamp: a caller asking\n        for more than the view can render should hear so.\n\nReturns:\n    The slice; empty (not an error) when nothing has been indexed yet.\n\nRaises:\n    HTTPException: ``403 graph_disabled`` when the kill switch is off;\n        ``503 graph_unavailable`` when the engine will not open.",
+        "operationId": "export_graph_api_graph_export_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "label",
+            "required": false,
+            "schema": {
+              "default": "*",
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_depth",
+            "required": false,
+            "schema": {
+              "default": 3,
+              "maximum": 5,
+              "minimum": 1,
+              "title": "Max Depth",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_nodes",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "maximum": 2000,
+              "minimum": 1,
+              "title": "Max Nodes",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphExportOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Graph",
         "tags": [
           "graph"
         ]

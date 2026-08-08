@@ -849,6 +849,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/graph/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export Graph
+         * @description Read a drawable slice of the graph (spec_graphrag §4.4).
+         *
+         *     The graph view's whole data source. The default is the *whole* graph,
+         *     degree-ordered so the cap keeps the most connected entities, and
+         *     ``truncated`` says when the cap bit — the view surfaces that rather than
+         *     implying it drew everything.
+         *
+         *     Args:
+         *         service: The process-wide graph service.
+         *         label: Entity name to centre the slice on; ``"*"`` (the default)
+         *             takes the whole graph.
+         *         max_depth: Hops to walk out from ``label`` (ignored for ``"*"``).
+         *         max_nodes: Node cap, ceiling :data:`MAX_EXPORT_NODES`. Above it the
+         *             request is a ``422`` rather than a silent clamp: a caller asking
+         *             for more than the view can render should hear so.
+         *
+         *     Returns:
+         *         The slice; empty (not an error) when nothing has been indexed yet.
+         *
+         *     Raises:
+         *         HTTPException: ``403 graph_disabled`` when the kill switch is off;
+         *             ``503 graph_unavailable`` when the engine will not open.
+         */
+        get: operations["export_graph_api_graph_export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graph/entities/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Graph Entity
+         * @description Inspect one entity: its summary, its neighbourhood, its source days.
+         *
+         *     The graph view's click-through (spec_graphrag §4.4): a name in the
+         *     picture resolves to what the engine merged about it, the relations
+         *     around it, and — the drill-down that makes the graph answerable — the
+         *     transcript days it was extracted from.
+         *
+         *     Args:
+         *         name: The entity's canonical name (path-encoded; extracted names may
+         *             contain slashes).
+         *         service: The process-wide graph service.
+         *
+         *     Returns:
+         *         The entity with its depth-1 relations and its source days.
+         *
+         *     Raises:
+         *         HTTPException: ``403 graph_disabled`` when the kill switch is off;
+         *             ``404 entity_not_found`` when the graph holds no such entity
+         *             (which includes a graph that has not been built yet);
+         *             ``503 graph_unavailable`` when the engine will not open.
+         */
+        get: operations["graph_entity_api_graph_entities__name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/metrics": {
         parameters: {
             query?: never;
@@ -1381,6 +1461,113 @@ export interface components {
             parse?: components["schemas"]["GraphParseSummary"] | null;
         };
         /**
+         * GraphEntityDetailOut
+         * @description Response of ``GET /api/graph/entities/{name}`` — the inspect panel.
+         *
+         *     Attributes:
+         *         entity: The entity itself, with the summary the engine merged from
+         *             every mention.
+         *         relations: Every edge touching it in a depth-1 slice, i.e. its
+         *             immediate neighbourhood.
+         *         sources: The transcript days it was extracted from — the drill-down
+         *             from a name in the graph back to the conversations behind it.
+         *             Empty when the engine recorded no document provenance.
+         */
+        GraphEntityDetailOut: {
+            entity: components["schemas"]["GraphExportNodeOut"];
+            /**
+             * Relations
+             * @default []
+             */
+            relations: components["schemas"]["GraphExportEdgeOut"][];
+            /**
+             * Sources
+             * @default []
+             */
+            sources: components["schemas"]["GraphTranscriptRefOut"][];
+        };
+        /**
+         * GraphExportEdgeOut
+         * @description One relation in the drawable graph slice (spec_graphrag §4.4).
+         *
+         *     Attributes:
+         *         id: Stable edge identity within the slice (``source-target``).
+         *         source: Name of the edge's source entity.
+         *         target: Name of the edge's target entity.
+         *         label: Short relation label/keywords (``None`` when unlabelled).
+         *         description: The engine's longer description of the relation.
+         */
+        GraphExportEdgeOut: {
+            /** Id */
+            id: string;
+            /** Source */
+            source: string;
+            /** Target */
+            target: string;
+            /** Label */
+            label?: string | null;
+            /** Description */
+            description?: string | null;
+        };
+        /**
+         * GraphExportNodeOut
+         * @description One entity in the drawable graph slice (spec_graphrag §4.4).
+         *
+         *     Attributes:
+         *         id: The entity's canonical name — also the node's identity in the
+         *             view and the key the entity-detail route takes.
+         *         entity_type: The engine's type/category. **This is what the view
+         *             colors and groups by**: LightRAG builds no community tier, so
+         *             type is the honest clustering rather than a faked one (ADR-017).
+         *             ``None`` for an untyped node.
+         *         description: The engine's merged description of the entity.
+         *         degree: How many of *this slice's* edges touch the node — the size
+         *             channel in the view. A subgraph degree, not a whole-graph one:
+         *             the export is capped, so the number describes the picture drawn.
+         */
+        GraphExportNodeOut: {
+            /** Id */
+            id: string;
+            /** Entity Type */
+            entity_type?: string | null;
+            /** Description */
+            description?: string | null;
+            /**
+             * Degree
+             * @default 0
+             */
+            degree: number;
+        };
+        /**
+         * GraphExportOut
+         * @description Response of ``GET /api/graph/export`` — what the graph view draws.
+         *
+         *     Attributes:
+         *         nodes: The exported entities, engine order (degree-descending for a
+         *             whole-graph export, so the cap keeps the most connected).
+         *         edges: Every edge between exported nodes.
+         *         truncated: Whether the cap hid nodes the graph actually holds. The
+         *             view **must** surface this rather than implying it drew
+         *             everything — an honest partial picture, per §4.4's scale ceiling.
+         */
+        GraphExportOut: {
+            /**
+             * Nodes
+             * @default []
+             */
+            nodes: components["schemas"]["GraphExportNodeOut"][];
+            /**
+             * Edges
+             * @default []
+             */
+            edges: components["schemas"]["GraphExportEdgeOut"][];
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
+        /**
          * GraphParseSummary
          * @description What the last build's scan found inside one graph source file.
          *
@@ -1442,6 +1629,36 @@ export interface components {
             /** Message Guids */
             message_guids?: number | null;
             last_build?: components["schemas"]["GraphBuildRunOut"] | null;
+        };
+        /**
+         * GraphTranscriptRefOut
+         * @description One transcript day an entity was extracted from (the drill-down).
+         *
+         *     The evidence panel's :class:`GraphTranscriptOut` without the retrieved
+         *     text: this is a *pointer* into the corpus ("Bob was talked about on
+         *     these days"), not a retrieval hit, so there is no excerpt to show.
+         *
+         *     Attributes:
+         *         doc_key: The transcript document key — the join back to the corpus.
+         *         thread_name: Human-facing thread label, resolved through the
+         *             workdir manifest (falling back to the key's own thread id).
+         *         span: The document's day span (``YYYY-MM-DD`` or ``first..last``).
+         *         message_count: Messages the manifest accounts for in that document
+         *             (``0`` when the manifest does not know the key — never a claim
+         *             that the day was empty).
+         */
+        GraphTranscriptRefOut: {
+            /** Doc Key */
+            doc_key: string;
+            /** Thread Name */
+            thread_name: string;
+            /** Span */
+            span: string;
+            /**
+             * Message Count
+             * @default 0
+             */
+            message_count: number;
         };
         /**
          * GraphUploadResponse
@@ -3309,6 +3526,97 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GraphStatusOut"];
+                };
+            };
+        };
+    };
+    export_graph_api_graph_export_get: {
+        parameters: {
+            query?: {
+                label?: string;
+                max_depth?: number;
+                max_nodes?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphExportOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    graph_entity_api_graph_entities__name__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphEntityDetailOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -1130,3 +1130,101 @@ class GraphBuildLogEvent(BaseModel):
 
     level: str
     message: str
+
+
+class GraphExportNodeOut(BaseModel):
+    """One entity in the drawable graph slice (spec_graphrag §4.4).
+
+    Attributes:
+        id: The entity's canonical name — also the node's identity in the
+            view and the key the entity-detail route takes.
+        entity_type: The engine's type/category. **This is what the view
+            colors and groups by**: LightRAG builds no community tier, so
+            type is the honest clustering rather than a faked one (ADR-017).
+            ``None`` for an untyped node.
+        description: The engine's merged description of the entity.
+        degree: How many of *this slice's* edges touch the node — the size
+            channel in the view. A subgraph degree, not a whole-graph one:
+            the export is capped, so the number describes the picture drawn.
+    """
+
+    id: str
+    entity_type: str | None = None
+    description: str | None = None
+    degree: int = 0
+
+
+class GraphExportEdgeOut(BaseModel):
+    """One relation in the drawable graph slice (spec_graphrag §4.4).
+
+    Attributes:
+        id: Stable edge identity within the slice (``source-target``).
+        source: Name of the edge's source entity.
+        target: Name of the edge's target entity.
+        label: Short relation label/keywords (``None`` when unlabelled).
+        description: The engine's longer description of the relation.
+    """
+
+    id: str
+    source: str
+    target: str
+    label: str | None = None
+    description: str | None = None
+
+
+class GraphExportOut(BaseModel):
+    """Response of ``GET /api/graph/export`` — what the graph view draws.
+
+    Attributes:
+        nodes: The exported entities, engine order (degree-descending for a
+            whole-graph export, so the cap keeps the most connected).
+        edges: Every edge between exported nodes.
+        truncated: Whether the cap hid nodes the graph actually holds. The
+            view **must** surface this rather than implying it drew
+            everything — an honest partial picture, per §4.4's scale ceiling.
+    """
+
+    nodes: list[GraphExportNodeOut] = []
+    edges: list[GraphExportEdgeOut] = []
+    truncated: bool = False
+
+
+class GraphTranscriptRefOut(BaseModel):
+    """One transcript day an entity was extracted from (the drill-down).
+
+    The evidence panel's :class:`GraphTranscriptOut` without the retrieved
+    text: this is a *pointer* into the corpus ("Bob was talked about on
+    these days"), not a retrieval hit, so there is no excerpt to show.
+
+    Attributes:
+        doc_key: The transcript document key — the join back to the corpus.
+        thread_name: Human-facing thread label, resolved through the
+            workdir manifest (falling back to the key's own thread id).
+        span: The document's day span (``YYYY-MM-DD`` or ``first..last``).
+        message_count: Messages the manifest accounts for in that document
+            (``0`` when the manifest does not know the key — never a claim
+            that the day was empty).
+    """
+
+    doc_key: str
+    thread_name: str
+    span: str
+    message_count: int = 0
+
+
+class GraphEntityDetailOut(BaseModel):
+    """Response of ``GET /api/graph/entities/{name}`` — the inspect panel.
+
+    Attributes:
+        entity: The entity itself, with the summary the engine merged from
+            every mention.
+        relations: Every edge touching it in a depth-1 slice, i.e. its
+            immediate neighbourhood.
+        sources: The transcript days it was extracted from — the drill-down
+            from a name in the graph back to the conversations behind it.
+            Empty when the engine recorded no document provenance.
+    """
+
+    entity: GraphExportNodeOut
+    relations: list[GraphExportEdgeOut] = []
+    sources: list[GraphTranscriptRefOut] = []

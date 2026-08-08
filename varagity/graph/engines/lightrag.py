@@ -195,6 +195,17 @@ _LOOP_JOIN_TIMEOUT_S = 30.0
 # Whole-graph selector for `get_knowledge_graph` (degree-ordered, capped).
 _ALL_NODES_LABEL = "*"
 
+# LightRAG packs multi-valued node/edge attributes into one string joined by
+# this separator (`lightrag.constants.GRAPH_FIELD_SEP`) — `file_path` holds
+# every document an entity was extracted from. Hardcoded rather than
+# imported: the registry (and therefore this module) must stay free of the
+# engine library, which only `session()` may touch (stage-1 decision #8).
+_FIELD_SEP = "<SEP>"
+
+# LightRAG's placeholder for material indexed without a file path. Never a
+# document key, so the drill-down must not offer it as a source.
+_UNKNOWN_SOURCE = "unknown_source"
+
 # Read by LightRAG at import time, so they are pinned before the lazy import.
 # Storage classes are pinned to the file-based defaults so a stray environment
 # on the machine cannot silently redirect the bake-off at a real database.
@@ -425,10 +436,11 @@ def export_from_knowledge_graph(graph: Any) -> GraphExport:
 
     The engine's own shape keeps everything it knows in a free-form
     ``properties`` dict and reports no degree at all, so this projects the
-    two fields the view actually draws with (type, description) and counts
-    each node's edges **within the returned slice** — an export is capped and
-    degree-ordered, so a slice-local degree is the honest number for the
-    picture being drawn.
+    two fields the view actually draws with (type, description), unpacks the
+    ``file_path`` provenance the drill-down joins on
+    (:func:`_doc_keys`), and counts each node's edges **within the returned
+    slice** — an export is capped and degree-ordered, so a slice-local degree
+    is the honest number for the picture being drawn.
 
     Args:
         graph: Whatever ``get_knowledge_graph`` returned (or ``None``).
@@ -471,6 +483,7 @@ def export_from_knowledge_graph(graph: Any) -> GraphExport:
                 entity_type=_text(properties, "entity_type", "type", "category"),
                 description=_text(properties, "description", "summary", "content"),
                 degree=degrees.get(identifier, 0),
+                doc_keys=_doc_keys(properties),
             )
         )
     return GraphExport(
@@ -1275,20 +1288,60 @@ def _attr(item: Any, name: str) -> Any:
     return getattr(item, name, None)
 
 
+def _doc_keys(properties: Mapping[str, Any]) -> list[str]:
+    """Read the transcript documents one graph node was extracted from.
+
+    LightRAG merges an entity's provenance into a single ``file_path``
+    string joined by :data:`_FIELD_SEP`, and writes its own
+    ``"unknown_source"`` placeholder for material that arrived without one.
+    Both are normalized away here so the drill-down gets real document keys
+    or nothing — a placeholder rendered as a source day would be a fiction.
+
+    Reads the raw field rather than :func:`_text`, deliberately: this is the
+    one consumer for which the separator *is* the data, and `_text`
+    normalizes it away.
+
+    Args:
+        properties: The node's free-form property mapping.
+
+    Returns:
+        The distinct document keys, first-seen order.
+    """
+    packed = properties.get("file_path")
+    if not isinstance(packed, str) or not packed.strip():
+        return []
+    keys: list[str] = []
+    for candidate in packed.split(_FIELD_SEP):
+        key = candidate.strip()
+        if key and key != _UNKNOWN_SOURCE and key not in keys:
+            keys.append(key)
+    return keys
+
+
 def _text(item: Mapping[str, Any], *names: str) -> str | None:
     """Read the first present non-empty string field from a payload item.
+
+    The engine merges every re-extraction of an entity/relation into one
+    stored string joined by :data:`_FIELD_SEP` — an internal storage detail
+    that must not reach anything a person (or the synthesis prompt) reads,
+    so it is normalized to a single space here, at the one seam every
+    description passes through.
 
     Args:
         item: One entity/relation record.
         *names: Candidate field names, most likely first.
 
     Returns:
-        The trimmed value, or ``None`` when no candidate holds text.
+        The trimmed, separator-normalized value, or ``None`` when no
+        candidate holds text.
     """
     for name in names:
         value = item.get(name)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            text = value.strip()
+            if _FIELD_SEP in text:
+                text = " ".join(part.strip() for part in text.split(_FIELD_SEP) if part.strip())
+            return text
     return None
 
 

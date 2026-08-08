@@ -34,7 +34,12 @@ from varagity.api.graph_runner import (
     scan_graph_corpus,
 )
 from varagity.api.main import create_app
-from varagity.graph.records import BuildReport
+from varagity.graph.records import (
+    BuildReport,
+    GraphExport,
+    GraphExportEdge,
+    GraphExportNode,
+)
 from varagity.graph.service import GraphUnavailable, get_graph_service
 from varagity.graph.sources.base import MessageBatch, SourceMessage
 
@@ -55,19 +60,37 @@ class FakeService:
         gate: threading.Event | None = None,
         fail_with: Exception | None = None,
         statuses_raise: Exception | None = None,
+        graph: GraphExport | None = None,
+        export_raise: Exception | None = None,
     ) -> None:
         self._workdir = workdir
         self.statuses = statuses if statuses is not None else {}
         self.gate = gate
         self.fail_with = fail_with
         self.statuses_raise = statuses_raise
+        self.graph = graph if graph is not None else GraphExport()
+        self.export_raise = export_raise
         self.builds: list[tuple[int, bool]] = []
+        self.exports: list[tuple[str, int, int]] = []
         self.closes = 0
         self.opens = 0
 
     @property
     def workdir(self) -> Path:
         return self._workdir
+
+    def export(self, label: str = "*", *, max_depth: int = 3, max_nodes: int = 1000) -> GraphExport:
+        self.exports.append((label, max_depth, max_nodes))
+        if self.export_raise is not None:
+            raise self.export_raise
+        if label == "*":
+            return self.graph
+        # Label-faithful, like the real engine: the lookup is *exact*, and a
+        # miss is an empty slice — the behavior the entity route's canonical-
+        # spelling fallback exists for (a case-blind fake hid exactly that).
+        if any(node.id == label for node in self.graph.nodes):
+            return self.graph
+        return GraphExport()
 
     def build(
         self,
@@ -970,6 +993,232 @@ class TestStatusRoute:
         finally:
             gate.set()
         await wait_terminal(runner)
+
+
+# ── the graph view's read surface ──────────────────────────────────────
+
+
+def sample_graph(*, truncated: bool = False) -> GraphExport:
+    """A two-entity slice with the provenance the drill-down joins on."""
+    return GraphExport(
+        nodes=[
+            GraphExportNode(
+                id="Bob Nakamura",
+                entity_type="person",
+                description="Bob talks about keyboards.",
+                degree=2,
+                doc_keys=["fx-thread-hw::2024-08-09", "fx-thread-hw::2015-04-17"],
+            ),
+            GraphExportNode(id="Keyboard", entity_type="technology", degree=1),
+        ],
+        edges=[
+            GraphExportEdge(
+                id="Bob Nakamura-Keyboard",
+                source="Bob Nakamura",
+                target="Keyboard",
+                label="prefers",
+                description="Bob prefers mechanical keyboards.",
+            ),
+            GraphExportEdge(id="Jane-Keyboard", source="Jane", target="Keyboard"),
+        ],
+        truncated=truncated,
+    )
+
+
+def built_workdir(tmp_path: Path) -> Path:
+    """A workdir carrying a manifest, i.e. one a build has written."""
+    from varagity.graph.manifest import ManifestDoc, WorkdirManifest, save_manifest
+
+    workdir = tmp_path / "lightrag"
+    save_manifest(
+        workdir,
+        WorkdirManifest(
+            docs={
+                "fx-thread-hw::2024-08-09": ManifestDoc(
+                    content_sha256="a" * 64,
+                    message_guids=["m1", "m2", "m3"],
+                    thread_name="Bob Nakamura",
+                    span="2024-08-09",
+                )
+            }
+        ),
+    )
+    return workdir
+
+
+class TestExportRoute:
+    async def test_the_whole_graph_is_the_default_slice(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(make_app(service=service), "GET", "/api/graph/export")
+        assert response.status_code == 200
+        body = response.json()
+        assert [node["id"] for node in body["nodes"]] == ["Bob Nakamura", "Keyboard"]
+        assert body["nodes"][0]["entity_type"] == "person"
+        assert body["nodes"][0]["degree"] == 2
+        assert len(body["edges"]) == 2
+        assert body["truncated"] is False
+        assert service.exports == [("*", 3, 1000)]
+
+    async def test_provenance_keys_stay_off_the_export_wire(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        """★ Every node would carry dozens of keys for a picture drawing none."""
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(make_app(service=service), "GET", "/api/graph/export")
+        assert "doc_keys" not in response.json()["nodes"][0]
+
+    async def test_truncation_is_passed_through_not_hidden(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        """★ The view must say it drew a slice, never imply it drew everything."""
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph(truncated=True))
+        response = await request(make_app(service=service), "GET", "/api/graph/export")
+        assert response.json()["truncated"] is True
+
+    async def test_the_caps_are_forwarded_to_the_engine(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(
+            make_app(service=service),
+            "GET",
+            "/api/graph/export?label=Bob%20Nakamura&max_depth=2&max_nodes=50",
+        )
+        assert response.status_code == 200
+        assert service.exports == [("Bob Nakamura", 2, 50)]
+
+    async def test_asking_past_the_ceiling_is_a_422_not_a_silent_clamp(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        """★ A caller asking for more than the view renders should hear so."""
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(
+            make_app(service=service), "GET", "/api/graph/export?max_nodes=2001"
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "validation_error"
+        assert service.exports == []
+
+    async def test_an_unbuilt_graph_answers_empty_without_opening_the_engine(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        """★ A page load must not initialize a workdir to find it empty."""
+        service = FakeService(tmp_path / "absent", graph=sample_graph())
+        response = await request(make_app(service=service), "GET", "/api/graph/export")
+        assert response.status_code == 200
+        assert response.json() == {"nodes": [], "edges": [], "truncated": False}
+        assert service.exports == []
+
+    async def test_an_unopenable_engine_is_a_structured_503(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        """★ "Nothing built" and "engine broken" must not draw the same picture."""
+        service = FakeService(
+            built_workdir(tmp_path), export_raise=GraphUnavailable("storage is locked")
+        )
+        response = await request(make_app(service=service), "GET", "/api/graph/export")
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "graph_unavailable"
+
+    async def test_export_while_disabled_is_a_structured_403(
+        self, graph_root: Path, tmp_path: Path, settings_env: Callable[..., None]
+    ) -> None:
+        settings_env(GRAPH_ENABLED="false")
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(make_app(service=service), "GET", "/api/graph/export")
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "graph_disabled"
+        assert service.exports == []
+
+
+class TestEntityDetailRoute:
+    async def test_an_entity_carries_its_relations_and_source_days(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(
+            make_app(service=service), "GET", "/api/graph/entities/Bob%20Nakamura"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["entity"]["id"] == "Bob Nakamura"
+        assert body["entity"]["description"] == "Bob talks about keyboards."
+        # Only the edges that touch it — "Jane-Keyboard" is a neighbour's edge.
+        assert [edge["id"] for edge in body["relations"]] == ["Bob Nakamura-Keyboard"]
+        assert service.exports == [("Bob Nakamura", 1, 2000)]
+
+    async def test_source_days_resolve_through_the_manifest(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        """★ The manifest is what turns a doc_key into a readable day card."""
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(
+            make_app(service=service), "GET", "/api/graph/entities/Bob%20Nakamura"
+        )
+        known, unknown = response.json()["sources"]
+        assert known == {
+            "doc_key": "fx-thread-hw::2024-08-09",
+            "thread_name": "Bob Nakamura",
+            "span": "2024-08-09",
+            "message_count": 3,
+        }
+        # A key the manifest does not know still renders — the graph holds it.
+        assert unknown == {
+            "doc_key": "fx-thread-hw::2015-04-17",
+            "thread_name": "fx-thread-hw",
+            "span": "2015-04-17",
+            "message_count": 0,
+        }
+
+    async def test_an_entity_the_engine_normalized_still_resolves(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        """★ Names arrive from citations in their own spelling.
+
+        The engine's label lookup is exact, so the wrong casing must resolve
+        through the whole-graph fallback, not luck.
+        """
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(
+            make_app(service=service), "GET", "/api/graph/entities/bob%20nakamura"
+        )
+        assert response.status_code == 200
+        assert response.json()["entity"]["id"] == "Bob Nakamura"
+        # Exact slice (empty) → whole-graph lookup → canonical re-slice.
+        assert service.exports == [
+            ("bob nakamura", 1, 2000),
+            ("*", 1, 2000),
+            ("Bob Nakamura", 1, 2000),
+        ]
+
+    async def test_an_unknown_entity_is_a_structured_404(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(make_app(service=service), "GET", "/api/graph/entities/Nobody")
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "entity_not_found"
+
+    async def test_an_unbuilt_graph_has_no_entities(self, graph_root: Path, tmp_path: Path) -> None:
+        service = FakeService(tmp_path / "absent", graph=sample_graph())
+        response = await request(
+            make_app(service=service), "GET", "/api/graph/entities/Bob%20Nakamura"
+        )
+        assert response.status_code == 404
+        assert service.exports == []
+
+    async def test_detail_while_disabled_is_a_structured_403(
+        self, graph_root: Path, tmp_path: Path, settings_env: Callable[..., None]
+    ) -> None:
+        settings_env(GRAPH_ENABLED="false")
+        service = FakeService(built_workdir(tmp_path), graph=sample_graph())
+        response = await request(
+            make_app(service=service), "GET", "/api/graph/entities/Bob%20Nakamura"
+        )
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "graph_disabled"
 
 
 # ── the settings surface ───────────────────────────────────────────────

@@ -11,6 +11,7 @@ import {
   NetworkIcon,
   PlusIcon,
   Trash2Icon,
+  WaypointsIcon,
 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useSyncExternalStore, type DragEvent } from "react";
@@ -450,6 +451,21 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           >
             <DatabaseIcon aria-hidden />
             Corpus
+          </Button>
+          {/* The message graph is a product surface, not a developer one —
+              deliberately ungated, unlike the codebase Map beside it. */}
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              "justify-start",
+              pathname === "/graph" &&
+                "bg-sidebar-accent text-sidebar-accent-foreground",
+            )}
+            onClick={() => go("/graph")}
+          >
+            <WaypointsIcon aria-hidden />
+            Graph
           </Button>
           {devMode && (
             <Button

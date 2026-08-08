@@ -216,12 +216,21 @@ class GraphExportNode(BaseModel):
         degree: How many of **this export's** edges touch the node. It is a
             subgraph degree, not a whole-graph one: an export is capped and
             degree-ordered, so the number describes the picture being drawn.
+        doc_keys: The transcript documents the entity was extracted from —
+            the drill-down join back to the corpus (a name in the graph view
+            resolves to the days it was said on, resolved through
+            :mod:`varagity.graph.manifest`). Empty when the engine does not
+            record document provenance on its nodes. Deliberately *not* on
+            the export wire schema: a whole-graph export would carry tens of
+            keys per node for a picture that draws none of them, so only the
+            entity-detail route projects it.
     """
 
     id: str
     entity_type: str | None = None
     description: str | None = None
     degree: int = 0
+    doc_keys: list[str] = []
 
 
 class GraphExportEdge(BaseModel):

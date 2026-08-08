@@ -21,6 +21,8 @@ import {
   getConversation,
   getSettings,
   graphDocuments,
+  graphEntity,
+  graphExport,
   graphStatus,
   listConversations,
   listDocuments,
@@ -50,6 +52,10 @@ export const queryKeys = {
   graphStatus: ["graph", "status"] as const,
   /** The graph corpus directory listing. */
   graphDocuments: ["graph", "documents"] as const,
+  /** The drawable graph slice, keyed by its caps (each is its own picture). */
+  graphExport: (maxNodes: number) => ["graph", "export", maxNodes] as const,
+  /** One entity's detail + drill-down (keyed by name). */
+  graphEntity: (name: string) => ["graph", "entity", name] as const,
   /** One chunk's located page preview (keyed by chunk, not its text). */
   preview: (docId: string, chunkKey: string) =>
     ["preview", docId, chunkKey] as const,
@@ -128,6 +134,35 @@ export function graphDocumentsQuery() {
   return queryOptions({
     queryKey: queryKeys.graphDocuments,
     queryFn: () => graphDocuments(),
+  });
+}
+
+/**
+ * The drawable graph slice (spec_graphrag §4.4).
+ *
+ * Long `staleTime`: a slice costs a graph walk server-side and a layout
+ * client-side. Nothing invalidates it on a completed build and nothing
+ * needs to — a build runs for minutes at least, so the view is always
+ * stale by the time anyone navigates back to it, and the mount refetches.
+ * A `403`/`404`/`503` here is a *state the view renders* (disabled,
+ * unbuilt, broken), so retrying would only delay saying so.
+ */
+export function graphExportQuery(maxNodes: number) {
+  return queryOptions({
+    queryKey: queryKeys.graphExport(maxNodes),
+    queryFn: () => graphExport({ maxNodes }),
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+/** One entity's summary, relations, and source days (the inspect panel). */
+export function graphEntityQuery(name: string) {
+  return queryOptions({
+    queryKey: queryKeys.graphEntity(name),
+    queryFn: () => graphEntity(name),
+    staleTime: 60_000,
+    retry: false,
   });
 }
 

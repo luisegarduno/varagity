@@ -446,6 +446,25 @@
   }
 }
 
+/* --- Message graph (sigma canvas; components/graph/*) ------------------- */
+
+/* `@react-sigma/core` ships these two rules in a stylesheet that also pins a
+   white canvas background on `:root` — unusable on the dark theme, and
+   `div.react-sigma` outranks a utility class. They are the whole of what
+   `SigmaContainer` needs (this app renders no react-sigma controls), so the
+   two are restated here on the house tokens instead of importing it. Without
+   them the inner container measures 0px and sigma throws on construction. */
+div.react-sigma {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  background: transparent;
+}
+div.sigma-container {
+  height: 100%;
+  width: 100%;
+}
+
 /* --- Codebase map (foglamp-style surface; components/map/*) ------------- */
 
 /* The map card shadow: light theme leans on borders + a soft drop, dark

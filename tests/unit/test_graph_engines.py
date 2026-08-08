@@ -574,7 +574,11 @@ LIGHTRAG_KNOWLEDGE_GRAPH = SimpleNamespace(
         SimpleNamespace(
             id="Bob",
             labels=["Bob"],
-            properties={"entity_type": "person", "description": "a friend"},
+            properties={
+                "entity_type": "person",
+                "description": "a friend",
+                "file_path": f"{THREAD}::2016-03-04",
+            },
         ),
         SimpleNamespace(id="mechanical keyboard", labels=["mechanical keyboard"], properties={}),
         SimpleNamespace(id="", labels=[], properties={}),  # nameless: dropped
@@ -1037,15 +1041,68 @@ class TestLightRAGProductionSurface:
             ("Bob", "person", 1),
             ("mechanical keyboard", None, 1),
         ]  # the nameless node is dropped
+        assert export.nodes[0].doc_keys == [f"{THREAD}::2016-03-04"]
         (edge,) = export.edges  # the endpoint-less edge is dropped
         assert (edge.source, edge.target, edge.label) == ("Bob", "mechanical keyboard", "prefers")
         assert export.truncated is True
+
+    def test_export_unpacks_a_nodes_packed_document_provenance(self) -> None:
+        """★ The drill-down's join key: one `<SEP>`-joined string, many days."""
+        export = lightrag_adapter.export_from_knowledge_graph(
+            {
+                "nodes": [
+                    {
+                        "id": "Bob",
+                        "properties": {
+                            # Duplicates and the engine's own placeholder both
+                            # appear in real workdirs; neither is a source day.
+                            "file_path": (
+                                f"{THREAD}::2016-03-04<SEP>unknown_source"
+                                f"<SEP>{THREAD}::2016-03-04<SEP> {THREAD}::2018-01-09 "
+                            )
+                        },
+                    },
+                    {"id": "Ada", "properties": {}},
+                ],
+                "edges": [],
+            }
+        )
+        assert export.nodes[0].doc_keys == [
+            f"{THREAD}::2016-03-04",
+            f"{THREAD}::2018-01-09",
+        ]
+        assert export.nodes[1].doc_keys == []  # a node with no provenance
 
     def test_export_centres_on_a_named_entity(self, tmp_path: Path) -> None:
         session = new_session(tmp_path, knowledge_graph=LIGHTRAG_KNOWLEDGE_GRAPH)
         session.export("Bob", max_depth=1, max_nodes=10)
         session.close()
         assert session._rag.exports == [("Bob", 1, 10)]
+
+    def test_merged_descriptions_lose_the_engines_field_separator(self) -> None:
+        """★ `<SEP>` is storage plumbing; nothing a person reads may carry it."""
+        export = lightrag_adapter.export_from_knowledge_graph(
+            {
+                "nodes": [
+                    {
+                        "id": "Bob",
+                        "properties": {
+                            "description": ("Bob redeemed loyalty points.<SEP>Bob plays PC games.")
+                        },
+                    }
+                ],
+                "edges": [
+                    {
+                        "id": "e1",
+                        "source": "Bob",
+                        "target": "Ada",
+                        "properties": {"description": "friends<SEP> since 2016 "},
+                    }
+                ],
+            }
+        )
+        assert export.nodes[0].description == ("Bob redeemed loyalty points. Bob plays PC games.")
+        assert export.edges[0].description == "friends since 2016"
 
     @pytest.mark.parametrize("graph", [None, "prose", SimpleNamespace(nodes=None, edges=None)])
     def test_an_unusable_export_payload_draws_nothing_rather_than_raising(self, graph: Any) -> None:
