@@ -202,6 +202,111 @@ describe("annotateCitations with spaces in filenames", () => {
   });
 });
 
+describe("annotateCitations over graph day labels (spec_graphrag §4.3)", () => {
+  // A graph answer's sources are transcript *days*, labelled
+  // "{thread} ({span})" — no slash, no dot, and a closing bracket the
+  // generic punctuation strip would otherwise eat.
+  const dayRefs: CitationSourceRef[] = [
+    { source: "Bob & Alice (2024-05-04)", fileName: "Bob & Alice (2024-05-04)" },
+    { source: "Bob & Alice (2024-05-06)", fileName: "Bob & Alice (2024-05-06)" },
+    {
+      source: "Team lunch (2024-05-04..2024-05-06)",
+      fileName: "Team lunch (2024-05-04..2024-05-06)",
+    },
+  ];
+
+  it("chips a bracket-form day citation, bracket and all", () => {
+    const { markdown, citations } = annotateCitations(
+      "The confirmation arrived [SOURCE: Bob & Alice (2024-05-04)] that evening.",
+      dayRefs,
+    );
+    expect(citations).toHaveLength(1);
+    expect(citations[0]).toMatchObject({
+      path: "Bob & Alice (2024-05-04)",
+      label: "Bob & Alice (2024-05-04)",
+      chunkIndex: 0,
+    });
+    expect(markdown).toBe(
+      `The confirmation arrived [Bob & Alice (2024-05-04)](${CITATION_HREF_PREFIX}0) that evening.`,
+    );
+  });
+
+  it("chips the trailing form too, stretching over the label's spaces", () => {
+    // The capture stops at the first space ("Bob"); only the evidence can
+    // say where the label really ends.
+    const { markdown, citations } = annotateCitations(
+      "They confirmed it.\n\n[SOURCE]: Bob & Alice (2024-05-04)",
+      dayRefs,
+    );
+    expect(citations[0]).toMatchObject({
+      path: "Bob & Alice (2024-05-04)",
+      chunkIndex: 0,
+    });
+    // Line-initial markers are link-reference definitions in CommonMark —
+    // the rewrite is what keeps the citation visible at all.
+    expect(markdown).not.toContain("[SOURCE]");
+  });
+
+  it("picks the right day when a thread cites two of them", () => {
+    const { citations } = annotateCitations(
+      "First [SOURCE: Bob & Alice (2024-05-06)], then [SOURCE: Bob & Alice (2024-05-04)].",
+      dayRefs,
+    );
+    expect(citations.map((citation) => citation.chunkIndex)).toEqual([1, 0]);
+  });
+
+  it("resolves both labels of a deduped document to the same card", () => {
+    // A `mix` retrieval can cite one document under two names (doc-grain
+    // hits carry the thread name, chunk-grain hits the guid); after
+    // normalization the card's `source` holds one and `fileName` the
+    // other. A citation under either must land on that single card.
+    const dedupedRefs: CitationSourceRef[] = [
+      {
+        source: "fx-thread-bob (2015-04-17..2024-08-09)",
+        fileName: "Bob Nakamura (2015-04-17..2024-08-09)",
+      },
+    ];
+    const { citations } = annotateCitations(
+      "He said so [SOURCE: Bob Nakamura (2015-04-17..2024-08-09)] and again [SOURCE: fx-thread-bob (2015-04-17..2024-08-09)].",
+      dedupedRefs,
+    );
+    expect(citations.map((citation) => citation.chunkIndex)).toEqual([0, 0]);
+  });
+
+  it("keeps a multi-day span's dots out of the punctuation strip", () => {
+    const { citations } = annotateCitations(
+      "Over lunch [SOURCE: Team lunch (2024-05-04..2024-05-06)].",
+      dayRefs,
+    );
+    expect(citations[0]).toMatchObject({
+      path: "Team lunch (2024-05-04..2024-05-06)",
+      chunkIndex: 2,
+    });
+  });
+
+  it("re-emits sentence punctuation that follows the label", () => {
+    const { markdown } = annotateCitations(
+      "It arrived [SOURCE]: Bob & Alice (2024-05-04). Then nothing.",
+      dayRefs,
+    );
+    expect(markdown).toBe(
+      `It arrived [Bob & Alice (2024-05-04)](${CITATION_HREF_PREFIX}0). Then nothing.`,
+    );
+  });
+
+  it("still refuses a day-shaped token no evidence claims", () => {
+    // Nothing about "Carol (2024-05-04)" looks like a path, and no
+    // evidence row backs it — so the prose guard drops it rather than
+    // chipping a citation that means nothing.
+    const { markdown, citations } = annotateCitations(
+      "Maybe [SOURCE: Carol (2024-05-04)] said so.",
+      dayRefs,
+    );
+    expect(citations).toHaveLength(0);
+    expect(markdown).toContain("[SOURCE: Carol (2024-05-04)]");
+  });
+});
+
 describe("matchSource", () => {
   it("matches an exact source path", () => {
     expect(matchSource("/docs/marine/kelp_corridor.md", refs)).toBe(0);

@@ -66,6 +66,7 @@ const GROUP_TITLES: Record<string, string> = {
   retrieval: "Retrieval",
   generation: "Generation",
   ingestion: "Ingestion",
+  graph: "Graph",
 };
 
 // Numeric settings that take fractional values (everything else steps by 1).

@@ -71,6 +71,7 @@ function catalog(overrides?: Partial<SettingsResponse>): SettingsResponse {
       },
     ],
     corpus_stale: false,
+    graph_stale: false,
     ...overrides,
   };
 }

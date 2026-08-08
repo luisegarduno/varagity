@@ -44,6 +44,24 @@ export type IngestSummary = Schemas["IngestSummaryOut"];
 export type IngestStatusEvent = Schemas["IngestStatusEvent"];
 export type IngestProgressEvent = Schemas["IngestProgressEvent"];
 export type IngestLogEvent = Schemas["IngestLogEvent"];
+export type GraphRetrievalPayload = Schemas["GraphRetrievalPayload"];
+export type GraphEntity = Schemas["GraphEntityOut"];
+export type GraphRelation = Schemas["GraphRelationOut"];
+export type GraphTranscript = Schemas["GraphTranscriptOut"];
+export type GraphDocument = Schemas["GraphDocumentOut"];
+export type GraphParseSummary = Schemas["GraphParseSummary"];
+export type GraphUploadResponse = Schemas["GraphUploadResponse"];
+export type GraphDocumentDeleteResponse = Schemas["GraphDocumentDeleteResponse"];
+export type GraphBuildRequest = Schemas["GraphBuildRequest"];
+export type GraphBuildRun = Schemas["GraphBuildRunOut"];
+export type GraphBuildSummary = Schemas["GraphBuildSummaryOut"];
+export type GraphStatus = Schemas["GraphStatusOut"];
+export type GraphBuildStatusEvent = Schemas["GraphBuildStatusEvent"];
+export type GraphBuildProgressEvent = Schemas["GraphBuildProgressEvent"];
+export type GraphBuildLogEvent = Schemas["GraphBuildLogEvent"];
+
+/** Which corpus a chat turn targets (`ChatRequest.corpus`, spec_graphrag §4.2). */
+export type TargetCorpus = NonNullable<ChatRequest["corpus"]>;
 
 /** A JSON scalar a setting value can take on the wire (spec_v2 §4.7). */
 export type SettingValue = boolean | number | string;
@@ -263,6 +281,74 @@ export function startIngest(reingest: boolean): Promise<IngestRun> {
 }
 
 /**
+ * The graph's size, staleness, and build state (spec_graphrag §5.2) — the
+ * Graph RAG tab's poll surface. Answers `200` even with the subsystem off
+ * (`enabled: false`), so the tab can render honestly rather than error.
+ */
+export function graphStatus(): Promise<GraphStatus> {
+  return request("/api/graph/status");
+}
+
+/** List every file in the graph corpus directory (a directory scan). */
+export function graphDocuments(): Promise<GraphDocument[]> {
+  return request("/api/graph/documents");
+}
+
+/**
+ * Upload message-source file(s) into `GRAPH_DOCS_PATH` (no auto-build).
+ *
+ * Deliberately unlike {@link uploadDocuments}: no client-side extension
+ * gate (a copied `chat.db` is routinely renamed — the server sniffs the
+ * stored bytes and answers `unsupported_graph_source`), no relative paths
+ * (the graph corpus is flat), and no `modified` restamp (nothing reads a
+ * graph source's mtime as provenance — the messages carry their own).
+ * `403 graph_disabled` while the kill switch is off.
+ */
+export async function uploadGraphDocuments(
+  files: File[],
+): Promise<GraphUploadResponse> {
+  const form = new FormData();
+  for (const file of files) form.append("files", file, file.name);
+  const response = await fetch(`${API_URL}/api/graph/documents`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) throw await toApiError(response);
+  return (await response.json()) as GraphUploadResponse;
+}
+
+/**
+ * Remove one file from the graph corpus directory.
+ *
+ * The graph keeps that file's messages until a `reingest` rebuild, so the
+ * response reports the graph flagged stale. `relativePath` is encoded
+ * segment by segment: the route's `{name:path}` takes a path, so its
+ * separators must survive the encoding.
+ */
+export function deleteGraphDocument(
+  relativePath: string,
+): Promise<GraphDocumentDeleteResponse> {
+  const encoded = relativePath.split("/").map(encodeURIComponent).join("/");
+  return request(`/api/graph/documents/${encoded}`, { method: "DELETE" });
+}
+
+/**
+ * Trigger a background graph build and return its handle.
+ *
+ * Also how a killed build **resumes**: the engine keeps document statuses
+ * on disk, so pressing Build again finishes the work instead of repeating
+ * it. `409` while one is in flight, `403` while the kill switch is off.
+ */
+export function startGraphBuild(
+  body: Partial<GraphBuildRequest> = {},
+): Promise<GraphBuildRun> {
+  return request("/api/graph/build", {
+    method: "POST",
+    body: JSON.stringify({ reingest: false, ...body }),
+  });
+}
+
+/**
  * One parsed frame of the chat SSE protocol, discriminated on the event
  * name (spec_v2 §4.3): `retrieval` → `reasoning`/`token` deltas → `done`,
  * with `error` as the in-band mid-stream failure. Throttled `stats`
@@ -298,6 +384,19 @@ export type IngestEvent =
   | { type: "log"; data: IngestLogEvent };
 
 const INGEST_EVENT_NAMES = new Set(["status", "progress", "log"]);
+
+/**
+ * One parsed frame of the graph-build SSE protocol (spec_graphrag §5.2) —
+ * the ingest-status protocol's twin, with a graph build's two clocks:
+ * `scan`/`parse` walk the corpus in seconds, then `index`/`process` sample
+ * the engine's own document statuses for hours.
+ */
+export type GraphBuildEvent =
+  | { type: "status"; data: GraphBuildStatusEvent }
+  | { type: "progress"; data: GraphBuildProgressEvent }
+  | { type: "log"; data: GraphBuildLogEvent };
+
+const GRAPH_BUILD_EVENT_NAMES = new Set(["status", "progress", "log"]);
 
 /**
  * Parse a raw SSE byte stream into `{type, data}` events.
@@ -365,6 +464,32 @@ export async function* streamIngestStatus(
     void,
     undefined
   >;
+}
+
+/**
+ * Follow the current (or last) graph build over `GET /api/graph/build/status`.
+ *
+ * Same replay contract as {@link streamIngestStatus}: the stream replays
+ * the run from its first frame, so a browser opened six hours into a
+ * backfill renders the same picture one opened at the start did — which is
+ * what makes a multi-day build watchable from any tab at any time.
+ */
+export async function* streamGraphBuildStatus(
+  signal?: AbortSignal,
+): AsyncGenerator<GraphBuildEvent, void, undefined> {
+  const response = await fetch(`${API_URL}/api/graph/build/status`, { signal });
+  if (!response.ok) throw await toApiError(response);
+  if (!response.body) {
+    throw new ApiError(
+      response.status,
+      "empty_body",
+      "The graph build status response carried no stream.",
+    );
+  }
+  yield* parseNamedSSE(
+    response.body,
+    GRAPH_BUILD_EVENT_NAMES,
+  ) as AsyncGenerator<GraphBuildEvent, void, undefined>;
 }
 
 /**

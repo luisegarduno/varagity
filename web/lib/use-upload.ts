@@ -64,6 +64,9 @@ export const REJECTION_LABELS: Record<string, string> = {
   invalid_filename: "invalid file name",
   invalid_path: "invalid path",
   path_too_deep: "folder nesting too deep",
+  // The graph corpus decides format by sniffing the stored bytes (a copied
+  // chat.db is routinely renamed), so this is its own rejection reason.
+  unsupported_graph_source: "not a message archive this build can read",
 };
 
 function failureMessage(failure: unknown): string {

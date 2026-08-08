@@ -9,6 +9,8 @@ const retrieval: RetrievalEvent = {
   top_k: 10,
   reranked_to: 5,
   condensed_query: null,
+  corpus: "rag",
+  graph: null,
 };
 
 const done: DoneEvent = {

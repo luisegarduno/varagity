@@ -23,6 +23,14 @@
  * spaced path that matches no evidence stays truncated and surfaces as
  * the grounding warning below.
  *
+ * The **evidence also decides where a token ends and prose begins**, in
+ * both marker forms. A graph turn's sources are transcript *days*, cited
+ * as `Thread Name (2026-08-06)` (spec_graphrag §4.3): no slash, no dot,
+ * and a closing bracket the trailing-punctuation strip would otherwise
+ * eat. So a captured token that names an evidence row is taken whole,
+ * before any cleanup — and the "is this really a path?" guard against
+ * prose false-positives applies only to tokens no evidence claims.
+ *
  * A citation whose path matches no evidence row keeps `chunkIndex: null`
  * — the "cited but not in the retrieved evidence" grounding warning.
  */
@@ -91,12 +99,24 @@ interface CleanedPath {
   tail: string;
 }
 
-/** Strip wrapping quotes/backticks/brackets and trailing punctuation. */
-function cleanPath(raw: string): CleanedPath {
+/**
+ * Strip wrapping quotes/backticks/brackets and trailing punctuation.
+ *
+ * `refs` short-circuits the punctuation strip: a token that *starts with*
+ * a way one of the evidence rows can be cited is taken exactly that far,
+ * so a graph turn's `Thread Name (2026-08-06)` keeps its closing bracket
+ * while `/docs/kelp.txt.` still sheds its sentence period.
+ */
+function cleanPath(
+  raw: string,
+  refs: readonly CitationSourceRef[] = [],
+): CleanedPath {
   const token = raw.trim();
   const unwrapped = token.replace(/^[`"'(<[]+/, "");
   const dropped = token.slice(0, token.length - unwrapped.length);
-  const path = unwrapped.replace(/[`"'>).\],;:!?]+$/, "").trim();
+  const path =
+    longestCitedPrefix(unwrapped, refs) ??
+    unwrapped.replace(/[`"'>).\],;:!?]+$/, "").trim();
   let tail = unwrapped.slice(path.length).trimStart();
   // Closers pairing with dropped opening wrappers vanish with them; the
   // rest (e.g. a sentence-ending period) survives.
@@ -166,6 +186,45 @@ function candidatePaths(ref: CitationSourceRef): string[] {
   return candidates;
 }
 
+/**
+ * The longest way an evidence row can be cited that `text` starts with,
+ * or `null` when none does.
+ *
+ * The one place "how far does this citation reach into the text?" is
+ * answered, used twice: to stretch a space-truncated trailing capture over
+ * the rest of a line, and to end a captured token at exactly the label it
+ * names (so trailing brackets and periods land on the right side of the
+ * chip). Comparison is case-insensitive, and a candidate that would cut
+ * mid-word is rejected — `AI Governance.md` must not match inside
+ * `AI Governance.mdx`.
+ *
+ * @param text The text starting at the citation's first character.
+ * @param refs The answer's evidence rows.
+ * @param minLength Ignore candidates no longer than this (the already-
+ *   captured token, when stretching one).
+ * @returns The matched slice of `text`, or `null`.
+ */
+function longestCitedPrefix(
+  text: string,
+  refs: readonly CitationSourceRef[],
+  minLength = 0,
+): string | null {
+  const lower = text.toLowerCase();
+  let matched = "";
+  for (const ref of refs) {
+    for (const candidate of candidatePaths(ref)) {
+      if (candidate.length <= minLength || candidate.length <= matched.length) {
+        continue;
+      }
+      if (!lower.startsWith(candidate.toLowerCase())) continue;
+      const after = text[candidate.length];
+      if (after !== undefined && /[\w-]/.test(after)) continue;
+      matched = text.slice(0, candidate.length);
+    }
+  }
+  return matched || null;
+}
+
 /** A trailing-form capture stretched past its whitespace stop. */
 interface ExtendedCapture {
   /** The full raw token for {@link cleanPath} (wrappers included). */
@@ -197,21 +256,9 @@ function extendFromEvidence(
   const lineEnd = newline === -1 ? text.length : newline;
   const openers = /^[`"'(<[]+/.exec(token)?.[0] ?? "";
   const body = text.slice(start + openers.length, lineEnd);
-  const bodyLower = body.toLowerCase();
   const captured = token.length - openers.length;
-  let matched = "";
-  for (const ref of refs) {
-    for (const candidate of candidatePaths(ref)) {
-      if (candidate.length <= captured || candidate.length <= matched.length)
-        continue;
-      if (!bodyLower.startsWith(candidate.toLowerCase())) continue;
-      // Reject mid-word cuts (`AI Governance.md` inside `…Governance.mdx`).
-      const after = body[candidate.length];
-      if (after !== undefined && /[\w-]/.test(after)) continue;
-      matched = body.slice(0, candidate.length);
-    }
-  }
-  if (!matched) return null;
+  const matched = longestCitedPrefix(body, refs, captured);
+  if (matched === null) return null;
   let end = start + openers.length + matched.length;
   for (const opener of openers) {
     const closer = WRAPPER_PAIRS[opener];
@@ -227,10 +274,11 @@ function extendFromEvidence(
  * Trailing-form captures truncated by a space in the filename are first
  * extended against the evidence ({@link extendFromEvidence}), so
  * `[SOURCE]: /docs/AI Governance.md` chips the whole filename instead of
- * a dangling `/docs/AI`. Markers without a usable path (bare `[SOURCE]`,
- * or a token that isn't path-like) are left untouched. Fenced/inline code
- * is not special-cased — grounded answers don't cite from inside code
- * blocks.
+ * a dangling `/docs/AI`. Markers without a usable path are left untouched:
+ * a bare `[SOURCE]`, or a token that neither names an evidence row nor
+ * looks like a path at all (the `the [SOURCE] says …` false positive).
+ * Fenced/inline code is not special-cased — grounded answers don't cite
+ * from inside code blocks.
  */
 export function annotateCitations(
   text: string,
@@ -259,13 +307,16 @@ export function annotateCitations(
         end = extended.end;
       }
     }
-    const { path, tail } = cleanPath(raw);
-    if (!path || !isPathLike(path)) continue;
+    const { path, tail } = cleanPath(raw, refs);
+    const chunkIndex = path ? matchSource(path, refs) : null;
+    // The path-shape guard is only there to keep prose out; a token the
+    // evidence itself claims has already proven it is a citation.
+    if (!path || (chunkIndex === null && !isPathLike(path))) continue;
     const citation: Citation = {
       id: citations.length,
       path,
       label: chipLabel(path),
-      chunkIndex: matchSource(path, refs),
+      chunkIndex,
     };
     citations.push(citation);
     markdown += `${text.slice(cursor, m.index)}[${citation.label}](${CITATION_HREF_PREFIX}${citation.id})${tail}`;

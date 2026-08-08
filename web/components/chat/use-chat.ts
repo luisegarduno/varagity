@@ -11,6 +11,7 @@ import {
   type StreamingTurn,
 } from "@/lib/chat-reducer";
 import { notifyConversationsChanged } from "@/lib/conversations-bus";
+import { DEFAULT_CORPUS, type TargetCorpus } from "@/lib/corpus";
 import { assistantMessageFromTurn } from "@/lib/evidence";
 import { conversationQuery } from "@/lib/queries";
 import { recordSessionUsage } from "@/lib/session-usage";
@@ -25,7 +26,8 @@ export interface ChatState {
   isStreaming: boolean;
   /** Transcript-load failure (404 → surfaced as not-found). */
   loadError: ApiError | null;
-  send: (query: string) => void;
+  /** Ask a question, optionally against the graph corpus (spec_graphrag §4.2). */
+  send: (query: string, corpus?: TargetCorpus) => void;
   stop: () => void;
 }
 
@@ -77,7 +79,7 @@ export function useChat(conversationId: string): ChatState {
   useMountEffect(() => () => abortRef.current?.abort());
 
   const send = useCallback(
-    (query: string) => {
+    (query: string, corpus: TargetCorpus = DEFAULT_CORPUS) => {
       const trimmed = query.trim();
       if (!trimmed || abortRef.current) return;
 
@@ -90,7 +92,7 @@ export function useChat(conversationId: string): ChatState {
       void (async () => {
         try {
           const events = streamChat(
-            { query: trimmed, conversation_id: conversationId },
+            { query: trimmed, conversation_id: conversationId, corpus },
             controller.signal,
           );
           for await (const event of events) {
@@ -106,11 +108,13 @@ export function useChat(conversationId: string): ChatState {
             // the next reload.
             recordSessionUsage(done.message_id, done.usage);
             // Fold the turn into the cache as the server persisted it —
-            // evidence snapshot, reasoning, latency — so the just-answered
-            // turn renders exactly like a reload (the evidence panel
-            // included) without a round trip. Returning `undefined` from
-            // the updater is TanStack's bail-out, which is the right
-            // answer if the transcript somehow isn't cached.
+            // evidence snapshot, reasoning, latency, and the corpus it was
+            // aimed at (which is what the composer's selector derives from,
+            // so the fold has to carry it or the next turn would forget) —
+            // so the just-answered turn renders exactly like a reload (the
+            // evidence panel included) without a round trip. Returning
+            // `undefined` from the updater is TanStack's bail-out, which is
+            // the right answer if the transcript somehow isn't cached.
             queryClient.setQueryData(
               conversationQuery(conversationId).queryKey,
               (previous) =>
@@ -123,6 +127,7 @@ export function useChat(conversationId: string): ChatState {
                       done,
                       settled.retrieval,
                       settled.reasoning,
+                      corpus,
                     ),
                   ],
                 },

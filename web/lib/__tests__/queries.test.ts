@@ -6,6 +6,8 @@ import {
   conversationQuery,
   conversationsQuery,
   documentsQuery,
+  graphDocumentsQuery,
+  graphStatusQuery,
   groupsQuery,
   previewQuery,
   queryKeys,
@@ -22,6 +24,8 @@ describe("query keys", () => {
     expect(configQuery().queryKey).toEqual(queryKeys.config);
     expect(settingsQuery().queryKey).toEqual(queryKeys.settings);
     expect(documentsQuery().queryKey).toEqual(queryKeys.documents);
+    expect(graphStatusQuery().queryKey).toEqual(queryKeys.graphStatus);
+    expect(graphDocumentsQuery().queryKey).toEqual(queryKeys.graphDocuments);
     expect(previewQuery("d0", "d0::3", "text").queryKey).toEqual(
       queryKeys.preview("d0", "d0::3"),
     );
@@ -77,6 +81,28 @@ describe("query keys", () => {
 describe("configQuery", () => {
   it("never re-asks, since capabilities are fixed for the API's lifetime", () => {
     expect(configQuery().staleTime).toBe(Infinity);
+  });
+});
+
+describe("graph queries", () => {
+  it("keeps the graph's size and its corpus listing disjoint", () => {
+    // A build changes the graph but not the corpus directory; an upload
+    // the other way round. Invalidation is prefix-matched, so neither key
+    // may be a prefix of the other's.
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.graphStatus, {});
+    client.setQueryData(queryKeys.graphDocuments, []);
+
+    const matched = client
+      .getQueryCache()
+      .findAll({ queryKey: queryKeys.graphStatus })
+      .map((query) => query.queryKey);
+
+    expect(matched).toEqual([queryKeys.graphStatus]);
+  });
+
+  it("goes stale quickly — a running build grows the counts as you watch", () => {
+    expect(graphStatusQuery().staleTime).toBe(5_000);
   });
 });
 

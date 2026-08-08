@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useRef, useState } from "react";
 
+import { SourceToggle } from "@/components/chat/SourceToggle";
 import { QuickToggles } from "@/components/settings/QuickToggles";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,6 +23,7 @@ import {
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { useMountEffect } from "@/hooks/use-mount-effect";
+import type { TargetCorpus } from "@/lib/corpus";
 import { configQuery } from "@/lib/queries";
 import { onFocusComposer } from "@/lib/ui-bus";
 import { attachChipLabel, useComposerAttach } from "@/lib/use-upload";
@@ -39,19 +41,29 @@ import { cn } from "@/lib/utils";
  * The 📎 menu (spec_v3 §5.3) attaches files *or a folder* straight from
  * here: upload → auto-ingest (`reingest: false`), with progress as a
  * compact chip in this area — not a modal, so typing and sending continue
- * while it runs. `/corpus` remains the full management surface.
+ * while it runs. `/corpus` remains the full management surface. The 📎
+ * flow deliberately still targets the *document* corpus whatever the
+ * source selector says: message archives are a build, not an attachment.
  */
 export function Composer({
   onSend,
   onStop,
   isStreaming,
   lastUserQuery,
+  corpus,
+  onCorpusChange,
+  graphEnabled,
 }: {
   onSend: (query: string) => void;
   onStop: () => void;
   isStreaming: boolean;
   /** The most recent user question (`null` when none) — ↑ recalls it. */
   lastUserQuery: string | null;
+  /** Which corpus the next question targets (spec_graphrag §4.2). */
+  corpus: TargetCorpus;
+  onCorpusChange: (corpus: TargetCorpus) => void;
+  /** `GRAPH_ENABLED` — off, the graph option is disabled with a reason. */
+  graphEnabled: boolean;
 }) {
   const [draft, setDraft] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -106,6 +118,13 @@ export function Composer({
 
   return (
     <div className="border-t border-border bg-background p-4 pt-2">
+      <div className="mx-auto flex w-full max-w-3xl px-1 pt-1.5">
+        <SourceToggle
+          value={corpus}
+          onChange={onCorpusChange}
+          graphEnabled={graphEnabled}
+        />
+      </div>
       <QuickToggles />
       {chipLabel && (
         <div

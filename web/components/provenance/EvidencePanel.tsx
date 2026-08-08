@@ -4,6 +4,7 @@ import { PanelRightCloseIcon } from "lucide-react";
 import { useRef, type RefObject } from "react";
 
 import { ChunkCard } from "@/components/provenance/ChunkCard";
+import { GraphEvidenceCards } from "@/components/provenance/GraphEvidenceCards";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -107,14 +108,29 @@ function FooterStats({ evidence }: { evidence: Evidence }) {
           {line}
         </p>
       ))}
+      {evidence.graph && (
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {GRAPH_GRAIN_NOTE}
+        </p>
+      )}
     </>
   );
 }
 
-/** Whether {@link FooterStats} would render anything for this evidence. */
+// The honesty line a graph answer's footer carries (ADR-017): the engines
+// attribute a conversation-day, not a message, and the panel says so
+// rather than letting day-grain cards read as message-grain evidence.
+const GRAPH_GRAIN_NOTE =
+  "Graph evidence is day-grain: a cited card is the conversation that " +
+  "happened that day, not a single message.";
+
+/** Whether the footer would render anything for this evidence. */
 function hasFooterStats(evidence: Evidence | null): evidence is Evidence {
   return Boolean(
-    evidence && (evidence.latencyMs || (evidence.usage && usageLine(evidence.usage))),
+    evidence &&
+      (evidence.graph ||
+        evidence.latencyMs ||
+        (evidence.usage && usageLine(evidence.usage))),
   );
 }
 
@@ -123,10 +139,18 @@ function hasFooterStats(evidence: Evidence | null): evidence is Evidence {
  * when the chat engine rewrote the turn, the "Searched for: …" line
  * (spec_v3 §4.7). Same "how this answer was built" promise: if retrieval
  * ran on something other than what was typed, the reader gets to see it.
+ *
+ * A graph answer counts in its own units — transcript days, entities,
+ * relations — and skips `top_k`, which is a chunk-retrieval knob the wire
+ * reports unchanged on a graph turn precisely because it never applied.
+ * A *degraded* graph turn (corpus `"graph"`, no graph payload) reads as
+ * the chunk answer it really was, next to the corpus badge that says what
+ * was asked for.
  */
 function EvidenceMeta({ evidence }: { evidence: Evidence }) {
+  const graph = evidence.graph;
   const counts: string[] = [];
-  if (evidence.topK !== null) {
+  if (graph === null && evidence.topK !== null) {
     counts.push(
       evidence.rerankedTo !== null
         ? `top_k ${evidence.topK} → ${evidence.rerankedTo}`
@@ -134,11 +158,32 @@ function EvidenceMeta({ evidence }: { evidence: Evidence }) {
     );
   }
   counts.push(
-    `${evidence.chunks.length} chunk${evidence.chunks.length === 1 ? "" : "s"}`,
+    graph
+      ? `${evidence.chunks.length} day${evidence.chunks.length === 1 ? "" : "s"}`
+      : `${evidence.chunks.length} chunk${evidence.chunks.length === 1 ? "" : "s"}`,
   );
+  if (graph) {
+    counts.push(
+      `${graph.entities.length} entities`,
+      `${graph.relations.length} relations`,
+    );
+  }
   return (
     <>
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        {evidence.corpus === "graph" && (
+          <Badge
+            variant="outline"
+            className="font-mono"
+            title={
+              graph
+                ? "Answered from the message graph"
+                : "Asked of the message graph; answered from the document corpus (degraded)"
+            }
+          >
+            {graph ? "graph" : "graph → documents"}
+          </Badge>
+        )}
         {evidence.method && (
           <Badge variant="accent" className="font-mono">
             {evidence.method}
@@ -193,6 +238,13 @@ function EvidenceCardList({
         <p className="p-4 text-center text-sm text-muted-foreground">
           Evidence appears here as answers are built.
         </p>
+      ) : evidence.graph ? (
+        <GraphEvidenceCards
+          graph={evidence.graph}
+          chunks={evidence.chunks}
+          query={evidence.query}
+          live={live}
+        />
       ) : evidence.chunks.length === 0 ? (
         <p className="p-4 text-center text-sm text-muted-foreground">
           No chunks were retrieved for this answer.

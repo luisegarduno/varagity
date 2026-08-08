@@ -19,6 +19,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useMountEffect } from "@/hooks/use-mount-effect";
+import { resolveCorpus, type TargetCorpus } from "@/lib/corpus";
 import {
   evidenceRailOpen,
   evidenceRailOpenServer,
@@ -97,6 +98,11 @@ export function Conversation({ conversationId }: { conversationId: string }) {
   const [scrollTarget, setScrollTarget] =
     useState<EvidenceScrollTarget | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+  // null = nothing picked here yet, so the conversation's own history
+  // decides (stage-2 decision #20). Keeping the pick nullable is what lets
+  // this stay a derivation: the transcript can arrive — or grow by a turn —
+  // after mount with no state to sync and no effect to write.
+  const [chosenCorpus, setChosenCorpus] = useState<TargetCorpus | null>(null);
 
   const railOpen = useSyncExternalStore(
     subscribeDisplayPrefs,
@@ -123,6 +129,11 @@ export function Conversation({ conversationId }: { conversationId: string }) {
   const rerankActive =
     settingValue(catalog, "RETRIEVAL_METHOD") === "reranked" &&
     settingValue(catalog, "RERANK_ENABLED") === true;
+  // Optimistic while the catalog is in flight: the selector shouldn't
+  // flicker disabled on every page load, and a graph turn sent against a
+  // disabled subsystem degrades honestly rather than failing (ADR-017).
+  const graphEnabled = settingValue(catalog, "GRAPH_ENABLED") !== false;
+  const corpus = resolveCorpus(chosenCorpus, messages);
 
   // Each assistant message's evidence, keyed by message id; the closest
   // preceding user message is the query that drives term highlighting.
@@ -218,9 +229,9 @@ export function Conversation({ conversationId }: { conversationId: string }) {
     (query: string) => {
       setSelectedKey(null); // the panel follows the new turn
       setScrollTarget(null);
-      send(query);
+      send(query, corpus);
     },
-    [send],
+    [send, corpus],
   );
 
   // The error banner's way out; send() replaces the errored turn.
@@ -298,6 +309,9 @@ export function Conversation({ conversationId }: { conversationId: string }) {
           onStop={stop}
           isStreaming={isStreaming}
           lastUserQuery={lastUserQuery}
+          corpus={corpus}
+          onCorpusChange={setChosenCorpus}
+          graphEnabled={graphEnabled}
         />
         {isStreaming && <EscapeToStop onStop={stop} />}
         {isDesktop && !railOpen && (

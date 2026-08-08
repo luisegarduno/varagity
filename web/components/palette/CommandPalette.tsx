@@ -63,6 +63,14 @@ const STATIC_COMMANDS: PaletteCommand[] = [
     keywords: ["documents", "files", "upload", "ingest"],
   },
   {
+    // Deliberately not label-prefixed with "Corpus": typing "corpus" must
+    // keep ranking the plain Corpus command first (lib/palette.ts).
+    id: "navigate:corpus-graph",
+    label: "Open graph corpus",
+    group: "Navigate",
+    keywords: ["graph", "messages", "imessage", "archive", "build", "corpus"],
+  },
+  {
     id: "navigate:map",
     label: "Codebase Map",
     group: "Navigate",
@@ -204,6 +212,8 @@ export function CommandPalette() {
         case "navigate":
           if (argument === "corpus") {
             router.push("/corpus");
+          } else if (argument === "corpus-graph") {
+            router.push("/corpus?tab=graph");
           } else if (argument === "map") {
             router.push("/map");
           } else if (argument === "settings") {

@@ -637,6 +637,218 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/graph/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Graph Documents
+         * @description List every file in the graph corpus directory.
+         *
+         *     A directory scan, not a table read: the graph's own record of what it
+         *     indexed lives in the engine's workdir, and what this tab must show is
+         *     what has been dropped in — sidecars and contacts files included. Files
+         *     the last build parsed also carry their ``doc_id`` and a parse summary;
+         *     files no build has scanned carry ``None`` for both, because parsing a
+         *     multi-gigabyte database is a build's job.
+         *
+         *     Args:
+         *         runner: The process-wide graph build runner (holds the last scan).
+         *
+         *     Returns:
+         *         One entry per file, in path order.
+         */
+        get: operations["list_graph_documents_api_graph_documents_get"];
+        put?: never;
+        /**
+         * Upload Graph Documents
+         * @description Upload message-source file(s) into ``GRAPH_DOCS_PATH`` (no auto-build).
+         *
+         *     Each file is written independently and then **sniffed**: a file no
+         *     registered message source claims is deleted again and reported as
+         *     ``unsupported_graph_source``, so a mixed drop partially succeeds and the
+         *     corpus directory never fills with unreadable files. The chunk-RAG
+         *     ``ALLOWED_EXTENSIONS`` list does not apply — contents decide.
+         *
+         *     Copy the whole SQLite set — ``chat.db`` **and** its ``-wal``/``-shm``
+         *     sidecars: a live database keeps its most recent messages in the
+         *     write-ahead log, and uploading the ``.db`` alone silently loses them.
+         *     Sidecars are stored beside their database without being sniffed.
+         *
+         *     Args:
+         *         files: The multipart file parts.
+         *
+         *     Returns:
+         *         Per-file outcomes, in upload order.
+         *
+         *     Raises:
+         *         HTTPException: ``403 graph_disabled`` when the kill switch is off;
+         *             ``422 too_many_files`` when the batch busts ``UPLOAD_MAX_FILES``;
+         *             ``422 no_file_stored`` when every file was rejected on its own
+         *             merits; ``500 graph_docs_path_not_writable`` when nothing landed
+         *             because the server couldn't write ``GRAPH_DOCS_PATH`` (in
+         *             compose, the ``./graph-docs`` bind mount must be writable by the
+         *             api container's user).
+         */
+        post: operations["upload_graph_documents_api_graph_documents_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graph/documents/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Graph Document
+         * @description Remove one file from the graph corpus directory and flag the graph stale.
+         *
+         *     Deleting the *source* does not retract what the graph already extracted
+         *     from it — that costs a rebuild — so this sets the graph-stale flag and
+         *     the tab surfaces it, rather than letting the graph and its corpus
+         *     diverge silently (stage-2 decision #16).
+         *
+         *     Args:
+         *         name: The file's path relative to ``GRAPH_DOCS_PATH``.
+         *         store: The per-request app-settings store (the stale flag).
+         *
+         *     Returns:
+         *         What was removed and whether the graph is now flagged stale.
+         *
+         *     Raises:
+         *         HTTPException: ``404 graph_document_not_found`` when no such file
+         *             lives inside ``GRAPH_DOCS_PATH`` — which covers a path trying to
+         *             escape it, since an escaping path is not a file this route has.
+         */
+        delete: operations["delete_graph_document_api_graph_documents__name__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graph/build": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Graph Build
+         * @description Trigger a background graph build and return its handle.
+         *
+         *     **This is also how a killed build resumes.** The engine keeps document
+         *     statuses on disk and re-selects every in-flight or failed document, so
+         *     pressing Build again after a crash finishes the work instead of
+         *     repeating it — the run's summary reports what it inherited as
+         *     ``resumed``. That is why ``reingest`` is a separate, explicit flag: it
+         *     is the one path that throws the working directory away.
+         *
+         *     Args:
+         *         payload: ``reingest`` (wipe and re-index — the only thing that
+         *             clears the graph-stale flag), plus the ``message_limit`` /
+         *             ``since`` bounds that make a minutes-long spot check possible on
+         *             an archive whose full build runs for days.
+         *         runner: The process-wide graph build runner.
+         *         preflight: The awaitable reachability check (structured 503).
+         *
+         *     Returns:
+         *         The new run's snapshot (state ``running``).
+         *
+         *     Raises:
+         *         HTTPException: ``403 graph_disabled`` when the kill switch is off;
+         *             ``409 graph_build_running`` while a build is in flight; ``503
+         *             <service>_unreachable`` when a required model service is down.
+         */
+        post: operations["start_graph_build_api_graph_build_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graph/build/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Graph Build Status
+         * @description Stream the current (or last) graph build's progress as SSE.
+         *
+         *     Frames: ``status`` (snapshot; also terminal, with the summary),
+         *     ``progress`` (``scan`` → ``parse`` per file → ``bound``/``reset`` →
+         *     ``index`` → sampled ``process`` ticks), ``log`` (relayed
+         *     ``varagity.graph`` lines). The stream replays from the start, so a
+         *     browser opened six hours into a backfill renders the same picture one
+         *     opened at the start did.
+         *
+         *     Args:
+         *         runner: The process-wide graph build runner.
+         *
+         *     Yields:
+         *         The framed events, oldest first, then live until terminal.
+         */
+        get: operations["graph_build_status_api_graph_build_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graph/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Graph Status
+         * @description Report the graph's size, staleness, and build state (the tab's poll).
+         *
+         *     Reads the workdir's summary sidecar rather than the graph itself, so a
+         *     poll never walks a multi-megabyte graphml (stage-2 decision #18), and
+         *     skips the engine entirely when nothing has been built here — an
+         *     unbuilt graph must not make a status poll open a session and pay an
+         *     engine's startup.
+         *
+         *     Args:
+         *         runner: The process-wide graph build runner (build state).
+         *         service: The process-wide graph service (document statuses).
+         *         store: The per-request app-settings store (the stale flag).
+         *
+         *     Returns:
+         *         The status snapshot; every size field is ``None``/empty when
+         *         nothing has been indexed, never a zero that would read like an
+         *         empty graph.
+         */
+        get: operations["graph_status_api_graph_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/metrics": {
         parameters: {
             query?: never;
@@ -674,6 +886,11 @@ export interface components {
             /** Modified */
             modified?: string[] | null;
         };
+        /** Body_upload_graph_documents_api_graph_documents_post */
+        Body_upload_graph_documents_api_graph_documents_post: {
+            /** Files */
+            files: string[];
+        };
         /**
          * ChatOverrides
          * @description Per-request overrides of query-time settings (spec_v2 §4.2).
@@ -699,13 +916,18 @@ export interface components {
         };
         /**
          * ChatRequest
-         * @description Body of ``POST /api/chat`` (spec_v2 §4.2).
+         * @description Body of ``POST /api/chat`` (spec_v2 §4.2, spec_graphrag §4.2).
          *
          *     Attributes:
          *         query: The user's question.
          *         conversation_id: Existing conversation to append the turn to; a new
          *             conversation is created when omitted.
          *         overrides: Optional per-request setting overrides.
+         *         corpus: Which corpus to answer from — ``"rag"`` (the chunk corpus,
+         *             the default when omitted) or ``"graph"`` (the message archive).
+         *             The **router-fillable** field: automatic routing is out of scope
+         *             (spec_graphrag §6), so today the composer sets it and later a
+         *             router fills the same field, changing no contract.
          */
         ChatRequest: {
             /** Query */
@@ -713,6 +935,8 @@ export interface components {
             /** Conversation Id */
             conversation_id?: string | null;
             overrides?: components["schemas"]["ChatOverrides"] | null;
+            /** Corpus */
+            corpus?: ("rag" | "graph") | null;
         };
         /**
          * ConfigResponse
@@ -975,6 +1199,263 @@ export interface components {
             error: components["schemas"]["ErrorBody"];
         };
         /**
+         * GraphBuildRequest
+         * @description Body of ``POST /api/graph/build`` (spec_graphrag §5.2).
+         *
+         *     Attributes:
+         *         reingest: Wipe the engine's working directory and index from
+         *             scratch. The **only** thing that clears the graph-stale flag
+         *             (stage-2 decision #16) — and the only reason to pay a full
+         *             backfill twice.
+         *         message_limit: Index at most this many messages, newest first — the
+         *             bounded escape hatch that makes a minutes-long spot check
+         *             possible on an archive whose full build runs for days. A bounded
+         *             build never prunes: its render is partial by construction, so
+         *             documents it does not mention are kept, not deleted.
+         *         since: Ignore messages older than this date (the other half of the
+         *             bound; same no-prune rule).
+         */
+        GraphBuildRequest: {
+            /**
+             * Reingest
+             * @default false
+             */
+            reingest: boolean;
+            /** Message Limit */
+            message_limit?: number | null;
+            /** Since */
+            since?: string | null;
+        };
+        /**
+         * GraphBuildRunOut
+         * @description One graph build run's state (``POST /api/graph/build`` + its stream).
+         *
+         *     Attributes:
+         *         run_id: The run handle.
+         *         state: ``running`` | ``completed`` | ``failed``.
+         *         reingest: Whether the run wiped the working directory first.
+         *         bounded: Whether ``message_limit``/``since`` narrowed the render (a
+         *             bounded run deliberately skips the removal pass).
+         *         message_limit: The requested message cap, if any.
+         *         since: The requested date floor, if any.
+         *         started_at: When the run started.
+         *         finished_at: When it reached a terminal state (``None`` while
+         *             running).
+         *         summary: The final counters (terminal states only; a run that died
+         *             before the engine returned carries ``None``).
+         *         error: The run-level failure (``failed`` only; per-document failures
+         *             ride in ``summary.failures`` and the document statuses).
+         */
+        GraphBuildRunOut: {
+            /** Run Id */
+            run_id: string;
+            /** State */
+            state: string;
+            /** Reingest */
+            reingest: boolean;
+            /** Bounded */
+            bounded: boolean;
+            /** Message Limit */
+            message_limit?: number | null;
+            /** Since */
+            since?: string | null;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Finished At */
+            finished_at?: string | null;
+            summary?: components["schemas"]["GraphBuildSummaryOut"] | null;
+            /** Error */
+            error?: string | null;
+        };
+        /**
+         * GraphBuildSummaryOut
+         * @description The graph build's counters (terminal runs only).
+         *
+         *     Attributes:
+         *         files_scanned: Files found under ``GRAPH_DOCS_PATH``.
+         *         files_parsed: Of those, files a registered message source claimed.
+         *         files_failed: Files that raised while parsing (the run continued).
+         *         messages_parsed: Messages recovered from every parsed file.
+         *         messages_indexed: Messages handed to the engine after the bounds
+         *             were applied (equal to ``messages_parsed`` for an unbounded
+         *             build, before guid-merging collapses overlaps).
+         *         messages_seen: What the engine reported after guid-merging the
+         *             batches — the upsert grain.
+         *         wall_clock_s: Seconds the engine spent indexing.
+         *         resumed: Documents already in flight (or failed) when this run
+         *             started — the work a killed build left behind and this one
+         *             picked up.
+         *         documents: The engine's document counts by status when the run
+         *             finished.
+         *         failures: Per-step failures the build caught and continued past.
+         */
+        GraphBuildSummaryOut: {
+            /** Files Scanned */
+            files_scanned: number;
+            /** Files Parsed */
+            files_parsed: number;
+            /** Files Failed */
+            files_failed: number;
+            /** Messages Parsed */
+            messages_parsed: number;
+            /** Messages Indexed */
+            messages_indexed: number;
+            /** Messages Seen */
+            messages_seen: number;
+            /** Wall Clock S */
+            wall_clock_s: number;
+            /** Resumed */
+            resumed: number;
+            /**
+             * Documents
+             * @default {}
+             */
+            documents: {
+                [key: string]: number;
+            };
+            /**
+             * Failures
+             * @default []
+             */
+            failures: string[];
+        };
+        /**
+         * GraphDocumentDeleteResponse
+         * @description Response of ``DELETE /api/graph/documents/{name}``.
+         *
+         *     Attributes:
+         *         relative_path: The removed file's path under ``GRAPH_DOCS_PATH``.
+         *         graph_stale: Whether the graph is now flagged stale — it keeps the
+         *             deleted file's messages until the next rebuild, and saying so is
+         *             the honest alternative to silently diverging (stage-2 decision
+         *             #16). ``False`` only when the flag could not be persisted.
+         */
+        GraphDocumentDeleteResponse: {
+            /** Relative Path */
+            relative_path: string;
+            /** Graph Stale */
+            graph_stale: boolean;
+        };
+        /**
+         * GraphDocumentOut
+         * @description One file in the ``GET /api/graph/documents`` list (spec_graphrag §10.2).
+         *
+         *     Unlike the chunk-RAG corpus list — which reports the ``documents``
+         *     *table* — this is a directory listing: the graph's own record of what it
+         *     indexed lives in the engine's workdir, and the tab's job is to show what
+         *     has been dropped in. Non-source files (a contacts list, the ``-wal`` /
+         *     ``-shm`` sidecars a ``chat.db`` needs) are listed too, with a ``None``
+         *     ``doc_id``: they are on disk and the user put them there.
+         *
+         *     Attributes:
+         *         name: Base name of the file.
+         *         relative_path: Its POSIX path relative to ``GRAPH_DOCS_PATH`` (the
+         *             delete route's key).
+         *         size_bytes: Size on disk.
+         *         modified_at: The file's mtime.
+         *         doc_id: The stable id a build derives for it (path relative to
+         *             ``GRAPH_DOCS_PATH`` + byte hash), or ``None`` when no build has
+         *             scanned this file yet — or when no registered message source
+         *             claims it.
+         *         parse: What the last scan parsed out of it, or ``None`` when no
+         *             build has scanned it (parsing a multi-gigabyte database is a
+         *             build's job, not a list request's).
+         */
+        GraphDocumentOut: {
+            /** Name */
+            name: string;
+            /** Relative Path */
+            relative_path: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /**
+             * Modified At
+             * Format: date-time
+             */
+            modified_at: string;
+            /** Doc Id */
+            doc_id?: string | null;
+            parse?: components["schemas"]["GraphParseSummary"] | null;
+        };
+        /**
+         * GraphParseSummary
+         * @description What the last build's scan found inside one graph source file.
+         *
+         *     Attributes:
+         *         messages: Recoverable messages parsed from the file.
+         *         threads: Distinct conversations they belong to.
+         *         first: Oldest message timestamp (``None`` for an empty parse).
+         *         last: Newest message timestamp (``None`` for an empty parse).
+         */
+        GraphParseSummary: {
+            /** Messages */
+            messages: number;
+            /** Threads */
+            threads: number;
+            /** First */
+            first?: string | null;
+            /** Last */
+            last?: string | null;
+        };
+        /**
+         * GraphStatusOut
+         * @description Response of ``GET /api/graph/status`` — the graph tab's poll surface.
+         *
+         *     Every size field is optional because "nothing has been built here yet"
+         *     and "the engine would not say" are both real states, and reporting them
+         *     as ``0`` would read like an empty graph (the honesty rule
+         *     :class:`~varagity.graph.records.GraphStats` sets).
+         *
+         *     Attributes:
+         *         enabled: The ``GRAPH_ENABLED`` kill switch.
+         *         stale: Whether a source file was deleted since the last rebuild.
+         *         building: Whether a build is running in this API process.
+         *         documents: The engine's document counts by status (its own
+         *             vocabulary: ``pending``, ``processing``, ``processed``,
+         *             ``failed``, …); empty when nothing has been indexed.
+         *         entities: Entity count from the workdir's summary sidecar.
+         *         relations: Relation count from the same.
+         *         message_guids: Messages the workdir's manifest accounts for.
+         *         last_build: The current (or last) build run in this API process.
+         */
+        GraphStatusOut: {
+            /** Enabled */
+            enabled: boolean;
+            /** Stale */
+            stale: boolean;
+            /** Building */
+            building: boolean;
+            /**
+             * Documents
+             * @default {}
+             */
+            documents: {
+                [key: string]: number;
+            };
+            /** Entities */
+            entities?: number | null;
+            /** Relations */
+            relations?: number | null;
+            /** Message Guids */
+            message_guids?: number | null;
+            last_build?: components["schemas"]["GraphBuildRunOut"] | null;
+        };
+        /**
+         * GraphUploadResponse
+         * @description Response of ``POST /api/graph/documents``.
+         *
+         *     Attributes:
+         *         files: Per-file outcomes, in upload order (the corpus upload's
+         *             shape, plus its ``unsupported_graph_source`` rejection).
+         */
+        GraphUploadResponse: {
+            /** Files */
+            files: components["schemas"]["UploadedFileOut"][];
+        };
+        /**
          * GroupCreateRequest
          * @description Body of ``POST /api/groups``.
          *
@@ -1129,6 +1610,14 @@ export interface components {
          *             when the search used the user's words verbatim.
          *         chat_engine: Registry name of the chat engine that produced an
          *             assistant turn (``None`` for user turns and pre-v3 history).
+         *         target_corpus: The corpus the turn asked for (``"rag"`` |
+         *             ``"graph"``); ``None`` for user turns and pre-stage-2 history,
+         *             which clients read as chunk RAG. Recorded even when the graph
+         *             turn degraded — the request is part of the record (ADR-017).
+         *         graph_evidence: The graph retrieval's ``mode``/``entities``/
+         *             ``relations`` snapshot; ``None`` for chunk turns and for a
+         *             degraded graph turn, whose evidence is chunk-shaped in
+         *             ``sources``.
          *         sources: The turn's snapshotted evidence, rank order.
          */
         MessageOut: {
@@ -1155,6 +1644,12 @@ export interface components {
             condensed_query?: string | null;
             /** Chat Engine */
             chat_engine?: string | null;
+            /** Target Corpus */
+            target_corpus?: string | null;
+            /** Graph Evidence */
+            graph_evidence?: {
+                [key: string]: unknown;
+            } | null;
             /**
              * Sources
              * @default []
@@ -1167,9 +1662,12 @@ export interface components {
          *
          *     Attributes:
          *         rank: Final rank in the answer's evidence (1-based).
-         *         chunk_id: Soft reference to the producing chunk.
+         *         chunk_id: Soft reference to the producing chunk — or, on a graph
+         *             turn, the cited transcript day's ``doc_key``.
          *         trace: The spec_v2 §9.1 snapshot: score, content, context, source
-         *             provenance, and the serialized retrieval trace.
+         *             provenance, and the serialized retrieval trace. A graph turn's
+         *             rows carry the other shape (``kind="graph_transcript"`` plus
+         *             thread/span/excerpt/guids), so clients branch on ``kind``.
          */
         MessageSourceOut: {
             /** Rank */
@@ -1336,12 +1834,20 @@ export interface components {
          *         settings: The full overridable catalog with effective values.
          *         corpus_stale: Whether a reingest-affecting setting changed since the
          *             corpus was last (re)ingested — the "Re-ingest to apply" banner.
+         *         graph_stale: Whether the graph corpus changed since the graph was
+         *             last (re)built — the graph tab's "Re-build to apply" banner
+         *             (stage-2 decision #16).
          */
         SettingsResponse: {
             /** Settings */
             settings: components["schemas"]["SettingOut"][];
             /** Corpus Stale */
             corpus_stale: boolean;
+            /**
+             * Graph Stale
+             * @default false
+             */
+            graph_stale: boolean;
         };
         /**
          * UploadResponse
@@ -1371,6 +1877,9 @@ export interface components {
          *             ``invalid_filename`` | ``invalid_path`` | ``path_too_deep`` |
          *             ``write_failed`` — the last is a server-side problem, escalated
          *             to a structured ``500`` when no file in the batch landed).
+         *             Graph corpus uploads add ``unsupported_graph_source``: the file
+         *             landed, no registered message source claimed it, and it was
+         *             removed again (spec_graphrag §10.2).
          *         relative_path: The stored path relative to ``DOCS_PATH`` when the
          *             upload declared one (folder uploads, spec_v3 §5.2); ``None``
          *             for flat uploads and rejections.
@@ -1453,6 +1962,202 @@ export interface components {
             code: string;
             /** Message */
             message: string;
+        };
+        /**
+         * GraphBuildLogEvent
+         * @description Payload of the graph-build SSE ``log`` event.
+         *
+         *     Relayed ``varagity.graph`` log records (the parse summaries, the build
+         *     diff's new/changed/unchanged counts, per-document failures), so the
+         *     browser sees what the server log would show.
+         *
+         *     Attributes:
+         *         level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).
+         *         message: The formatted log message.
+         */
+        GraphBuildLogEvent: {
+            /** Level */
+            level: string;
+            /** Message */
+            message: string;
+        };
+        /**
+         * GraphBuildProgressEvent
+         * @description Payload of the graph-build SSE ``progress`` event.
+         *
+         *     Two phases, because a graph build has two very different clocks:
+         *     ``scan``/``parse`` walk the corpus directory in seconds, then
+         *     ``index``/``process`` hand the merged messages to the engine and sample
+         *     its own document statuses for hours (the extraction pass — ADR-017's
+         *     7.17 s/message).
+         *
+         *     Attributes:
+         *         stage: ``scan`` | ``parse`` | ``bound`` | ``reset`` | ``index`` |
+         *             ``process``.
+         *         file: The file being parsed (``None`` outside ``parse``).
+         *         current: Intra-stage progress (files parsed so far; messages kept by
+         *             ``bound``).
+         *         total: Stage denominator (files found, messages parsed).
+         *         docs_done: Documents the engine reports as processed (``process``).
+         *         docs_total: Documents the engine holds in any status (``process``).
+         */
+        GraphBuildProgressEvent: {
+            /** Stage */
+            stage: string;
+            /**
+             * File
+             * @default null
+             */
+            file: string | null;
+            /**
+             * Current
+             * @default null
+             */
+            current: number | null;
+            /**
+             * Total
+             * @default null
+             */
+            total: number | null;
+            /**
+             * Docs Done
+             * @default null
+             */
+            docs_done: number | null;
+            /**
+             * Docs Total
+             * @default null
+             */
+            docs_total: number | null;
+        };
+        /**
+         * GraphBuildStatusEvent
+         * @description Payload of the graph-build SSE ``status`` event.
+         *
+         *     The stream's first frame (a snapshot on connect) and its last (the
+         *     terminal state). ``run=None`` means no build has run in this API
+         *     process — the stream closes immediately after.
+         *
+         *     Attributes:
+         *         run: The current (or last) run, if any.
+         */
+        GraphBuildStatusEvent: {
+            /** @default null */
+            run: components["schemas"]["GraphBuildRunOut"] | null;
+        };
+        /**
+         * GraphEntityOut
+         * @description One entity the graph retrieval surfaced (spec_graphrag §10.2).
+         *
+         *     Attributes:
+         *         name: The entity's canonical name, as the engine resolved it.
+         *         type: The engine's entity type/category (``None`` when untyped) —
+         *             what the evidence chips and the graph view color by, LightRAG
+         *             having no community tier (ADR-017).
+         *         summary: The engine's description of the entity.
+         */
+        GraphEntityOut: {
+            /** Name */
+            name: string;
+            /**
+             * Type
+             * @default null
+             */
+            type: string | null;
+            /**
+             * Summary
+             * @default null
+             */
+            summary: string | null;
+        };
+        /**
+         * GraphRelationOut
+         * @description One relation the graph retrieval surfaced (spec_graphrag §10.2).
+         *
+         *     Attributes:
+         *         source: Name of the edge's source entity.
+         *         target: Name of the edge's target entity.
+         *         label: Short relation label/keywords (``None`` when unlabelled).
+         *         description: The engine's longer description — the *fact* the answer
+         *             grounds on.
+         */
+        GraphRelationOut: {
+            /** Source */
+            source: string;
+            /** Target */
+            target: string;
+            /**
+             * Label
+             * @default null
+             */
+            label: string | null;
+            /**
+             * Description
+             * @default null
+             */
+            description: string | null;
+        };
+        /**
+         * GraphRetrievalPayload
+         * @description The graph half of the SSE ``retrieval`` event (spec_graphrag §4.3).
+         *
+         *     Attributes:
+         *         mode: The engine query mode the turn retrieved with
+         *             (``GRAPH_QUERY_MODE``).
+         *         entities: Entities the retrieval surfaced.
+         *         relations: Relations the retrieval surfaced.
+         *         transcripts: The cited transcript days, best first — the cards a
+         *             citation chip resolves to, labelled ``"{thread} ({span})"``.
+         */
+        GraphRetrievalPayload: {
+            /** Mode */
+            mode: string;
+            /**
+             * Entities
+             * @default []
+             */
+            entities: components["schemas"]["GraphEntityOut"][];
+            /**
+             * Relations
+             * @default []
+             */
+            relations: components["schemas"]["GraphRelationOut"][];
+            /**
+             * Transcripts
+             * @default []
+             */
+            transcripts: components["schemas"]["GraphTranscriptOut"][];
+        };
+        /**
+         * GraphTranscriptOut
+         * @description One cited transcript day of a graph answer (spec_graphrag §4.3).
+         *
+         *     Evidence is **day-grain, not message-grain**: that is what the engines
+         *     can honestly attribute (ADR-017's priced regret), so this is the card
+         *     the evidence panel draws and the label the answer cites.
+         *
+         *     Attributes:
+         *         doc_key: The transcript document key — the join back to the corpus.
+         *         thread_name: Human-facing thread label.
+         *         span: The document's day span (``YYYY-MM-DD`` or ``first..last``).
+         *         excerpt: The retrieved passage, capped for the wire.
+         *         message_count: Messages the graph's manifest accounts for in that
+         *             document (``0`` when it cannot say — never a claim of empty).
+         */
+        GraphTranscriptOut: {
+            /** Doc Key */
+            doc_key: string;
+            /** Thread Name */
+            thread_name: string;
+            /** Span */
+            span: string;
+            /** Excerpt */
+            excerpt: string;
+            /**
+             * Message Count
+             * @default 0
+             */
+            message_count: number;
         };
         /**
          * IngestLogEvent
@@ -1548,14 +2253,23 @@ export interface components {
          * @description Payload of the SSE ``retrieval`` event — the provenance panel's data.
          *
          *     Emitted once retrieval (+rerank) completes, **before** any answer token
-         *     (spec_v2 §4.3): the browser gets the evidence before the prose.
+         *     (spec_v2 §4.3): the browser gets the evidence before the prose. One
+         *     event name covers both corpora (spec_graphrag §4.3): a graph turn fills
+         *     ``graph`` and leaves ``chunks`` empty, and a graph turn that *degraded*
+         *     to a chunk answer is visibly exactly that — ``corpus="graph"`` with
+         *     ``graph=null`` and chunks present (ADR-017's degrade semantics).
          *
          *     Attributes:
          *         chunks: The retrieved chunks, best first, each carrying its full
          *             metadata record and (when the method fills it) the
-         *             :class:`~varagity.stores.records.RetrievalTrace`.
-         *         method: The retrieval method that produced them.
-         *         top_k: Chunks requested from the retriever.
+         *             :class:`~varagity.stores.records.RetrievalTrace`. Empty for a
+         *             graph turn.
+         *         method: What actually retrieved, in the corpus's own vocabulary: the
+         *             retrieval-method registry name for a chunk turn, the engine
+         *             query mode for a graph one (also in ``graph.mode``).
+         *         top_k: Chunks requested from the retriever — a chunk-retrieval knob,
+         *             reported unchanged on a graph turn, which bounds its evidence
+         *             engine-side instead.
          *         reranked_to: ``RERANK_TOP_N`` when the ``reranked`` method narrowed
          *             the list; ``None`` otherwise.
          *         condensed_query: The standalone search query the chat engine
@@ -1563,7 +2277,11 @@ export interface components {
          *             like ``method``: it names what was actually searched.
          *             ``None`` whenever the search used the user's words verbatim
          *             (the ``simple`` engine, a first turn, the kill switch, or the
-         *             condense fallback).
+         *             condense fallback). Applies to both corpora: the condensed
+         *             words are what the graph engine searched too.
+         *         corpus: The corpus the turn asked for (``"rag"`` | ``"graph"``).
+         *         graph: The graph evidence, present only on a graph turn that the
+         *             engine actually answered.
          */
         RetrievalEvent: {
             /** Chunks */
@@ -1582,6 +2300,13 @@ export interface components {
              * @default null
              */
             condensed_query: string | null;
+            /**
+             * Corpus
+             * @default rag
+             */
+            corpus: string;
+            /** @default null */
+            graph: components["schemas"]["GraphRetrievalPayload"] | null;
         };
         /**
          * RetrievalTrace
@@ -2382,6 +3107,208 @@ export interface operations {
                 };
                 content: {
                     "text/event-stream": unknown;
+                };
+            };
+        };
+    };
+    list_graph_documents_api_graph_documents_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphDocumentOut"][];
+                };
+            };
+        };
+    };
+    upload_graph_documents_api_graph_documents_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_graph_documents_api_graph_documents_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphUploadResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_graph_document_api_graph_documents__name__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphDocumentDeleteResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_graph_build_api_graph_build_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GraphBuildRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphBuildRunOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    graph_build_status_api_graph_build_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": unknown;
+                };
+            };
+        };
+    };
+    graph_status_api_graph_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphStatusOut"];
                 };
             };
         };

@@ -20,6 +20,8 @@ import {
   getConfig,
   getConversation,
   getSettings,
+  graphDocuments,
+  graphStatus,
   listConversations,
   listDocuments,
   listGroups,
@@ -40,6 +42,14 @@ export const queryKeys = {
   config: ["config"] as const,
   settings: ["settings"] as const,
   documents: ["documents"] as const,
+  /**
+   * The graph's size + build state. Disjoint from `graphDocuments`: a
+   * build changes the graph but not the corpus directory, and an upload
+   * the other way round.
+   */
+  graphStatus: ["graph", "status"] as const,
+  /** The graph corpus directory listing. */
+  graphDocuments: ["graph", "documents"] as const,
   /** One chunk's located page preview (keyed by chunk, not its text). */
   preview: (docId: string, chunkKey: string) =>
     ["preview", docId, chunkKey] as const,
@@ -94,6 +104,30 @@ export function documentsQuery() {
   return queryOptions({
     queryKey: queryKeys.documents,
     queryFn: () => listDocuments(),
+  });
+}
+
+/**
+ * The graph's size, staleness, and build state (spec_graphrag §5.2).
+ *
+ * The Graph RAG tab's poll: a short `staleTime` because a running build
+ * grows the entity/relation counts continuously, and the tab is the one
+ * place watching them. Never `Infinity` — unlike the config, this dataset
+ * changes while the user looks at it.
+ */
+export function graphStatusQuery() {
+  return queryOptions({
+    queryKey: queryKeys.graphStatus,
+    queryFn: () => graphStatus(),
+    staleTime: 5_000,
+  });
+}
+
+/** The graph corpus directory listing (the Graph RAG tab's file table). */
+export function graphDocumentsQuery() {
+  return queryOptions({
+    queryKey: queryKeys.graphDocuments,
+    queryFn: () => graphDocuments(),
   });
 }
 
