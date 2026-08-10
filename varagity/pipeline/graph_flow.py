@@ -24,7 +24,9 @@ second implementation of any of them. Only the middle stage differs, because
 only the middle stage is actually different.
 
 Parameter validation is off (the service is a live handle, not a
-serializable payload) and there are no Prefect-level retries: an engine that
+serializable payload — and the batches ride in :class:`GraphBatches`, so the
+flow-run record stores a placeholder rather than megabytes of messages) and
+there are no Prefect-level retries: an engine that
 fails mid-backfill must surface, not silently re-run hours of extraction —
 and a re-called build resumes from the durable statuses anyway. The query
 path carries none for the query-path reason instead: it is interactive, and
@@ -50,10 +52,40 @@ from varagity.models.stream import Kind
 from varagity.pipeline.query_flow import condense_query_task, generate_answer_stream_task
 
 
+class GraphBatches:
+    """Opaque carrier keeping a parsed archive out of the flow-run record.
+
+    Prefect serializes every flow-call parameter into the flow run it
+    creates (``Flow.serialize_parameters``), and the server rejects records
+    over 512 KB — a decade-scale archive of parsed messages serializes to
+    megabytes, so passing the batches bare fails the build at flow-run
+    creation, before the engine sees a single document. This box is
+    deliberately *not* JSON-encodable (``__slots__``, no mapping or
+    iteration protocol), which lands it on the same ``"<GraphBatches>"``
+    placeholder path the live ``GraphService`` handle already rides; the
+    real objects still reach the flow in-process, untouched.
+
+    Attributes:
+        batches: The parsed source files, exactly as given.
+    """
+
+    __slots__ = ("batches",)
+
+    batches: Sequence[MessageBatch]
+
+    def __init__(self, batches: Sequence[MessageBatch]) -> None:
+        """Box the batches.
+
+        Args:
+            batches: Parsed source files bound for the build.
+        """
+        self.batches = batches
+
+
 @flow(name="graph-build", validate_parameters=False)
 def graph_build_flow(
     service: GraphService,
-    batches: Sequence[MessageBatch],
+    batches: GraphBatches,
     *,
     prune_removed: bool = True,
     verbose: int = 0,
@@ -63,8 +95,9 @@ def graph_build_flow(
     Args:
         service: The process's graph service (holds the session and the
             single-flight write lock).
-        batches: Parsed source files, guid-merged by the session before
-            rendering.
+        batches: The boxed parsed source files (bare sequences would
+            serialize into the flow-run record, which the server caps at
+            512 KB), guid-merged by the session before rendering.
         prune_removed: Whether ``batches`` render the whole corpus. A bounded
             build passes ``False`` — its render is partial on purpose, and
             pruning on its say-so would delete the rest of the archive.
@@ -74,12 +107,13 @@ def graph_build_flow(
         What the build did (messages seen, wall clock, caught failures).
     """
     logger = get_run_logger()
+    source_files = batches.batches
     logger.info(
         "graph build starting: %d source file(s), %s render",
-        len(batches),
+        len(source_files),
         "full-corpus" if prune_removed else "bounded",
     )
-    report = service.build(batches, verbose=verbose, prune_removed=prune_removed)
+    report = service.build(source_files, verbose=verbose, prune_removed=prune_removed)
     logger.info(
         "graph build finished: %d message(s) in %.1fs, %d failure(s)",
         report.messages_seen,

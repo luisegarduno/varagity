@@ -567,14 +567,54 @@ class TestGraphBuildFlow:
             return BuildReport(messages_seen=7, wall_clock_s=2.5, failures=["one doc refused"])
 
     def test_the_flow_forwards_to_the_service_and_is_a_tracked_run(self) -> None:
-        from varagity.pipeline import graph_build_flow
+        from varagity.pipeline import GraphBatches, graph_build_flow
 
         service = self.FakeService()
-        report = graph_build_flow(service, [object(), object()], prune_removed=False, verbose=2)
+        report = graph_build_flow(
+            service, GraphBatches([object(), object()]), prune_removed=False, verbose=2
+        )
 
         assert report.messages_seen == 7
         assert service.calls == [(2, False, 2)]
         assert graph_build_flow.name == "graph-build"
+
+    def test_an_archive_never_serializes_into_the_flow_run_record(self) -> None:
+        """★ Prefect's server caps flow-run parameters at 512 KB.
+
+        Bare batches 422 a real backfill at flow-run creation — after
+        ``reingest`` has already wiped the graph.
+        """
+        import json
+        from datetime import UTC, datetime, timedelta
+
+        from varagity.graph.sources.base import MessageBatch, SourceMessage
+        from varagity.pipeline import GraphBatches, graph_build_flow
+
+        first = datetime(2026, 1, 1, tzinfo=UTC)
+        messages = [
+            SourceMessage(
+                guid=f"guid-{index}",
+                thread_id="any;-;+15550000000",
+                thread_name="+15550000000",
+                sender_handle="+15550000000",
+                sender_name="Bob",
+                is_from_me=False,
+                timestamp=first + timedelta(minutes=index),
+                text="x" * 200,
+            )
+            for index in range(2000)
+        ]
+        boxed = GraphBatches(
+            [MessageBatch(doc_id="doc-sms", relative_path="sms.db", messages=messages)]
+        )
+        # The payload itself is comfortably over the server's cap …
+        assert len(boxed.batches[0].model_dump_json().encode()) > 524_288
+        serialized = graph_build_flow.serialize_parameters(
+            {"service": object(), "batches": boxed, "prune_removed": False, "verbose": 0}
+        )
+        # … but the recorded parameters carry only the opaque placeholder.
+        assert serialized["batches"] == "<GraphBatches>"
+        assert len(json.dumps(serialized).encode()) < 4_096
 
     def test_the_flow_carries_no_retries(self) -> None:
         """★ A failed backfill must surface, not silently re-run hours of extraction."""

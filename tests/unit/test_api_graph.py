@@ -42,6 +42,7 @@ from varagity.graph.records import (
 )
 from varagity.graph.service import GraphUnavailable, get_graph_service
 from varagity.graph.sources.base import MessageBatch, SourceMessage
+from varagity.pipeline.graph_flow import GraphBatches
 
 TICK = 0.02  # worker-thread scheduling slack for wait loops
 
@@ -168,7 +169,7 @@ def scripted_flow(
 
     def flow(
         service: Any,
-        batches: Sequence[MessageBatch],
+        batches: GraphBatches,
         *,
         prune_removed: bool = True,
         verbose: int = 0,
@@ -183,7 +184,7 @@ def scripted_flow(
             assert gate.wait(timeout=5)
         if fail_with is not None:
             raise fail_with
-        return service.build(batches, prune_removed=prune_removed, verbose=verbose)
+        return service.build(batches.batches, prune_removed=prune_removed, verbose=verbose)
 
     return flow
 

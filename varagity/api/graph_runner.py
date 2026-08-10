@@ -62,7 +62,7 @@ from varagity.graph.sources.base import (
     batch_for_path,
     find_message_source,
 )
-from varagity.pipeline.graph_flow import graph_build_flow
+from varagity.pipeline.graph_flow import GraphBatches, graph_build_flow
 from varagity.stores.app_settings_store import AppSettingsStore
 
 logger = logging.getLogger(__name__)
@@ -557,7 +557,11 @@ class GraphBuildRunner:
         )
         sampler.start()
         try:
-            return self._flow(self.service, bounded, prune_removed=not run.bounded, verbose=0)
+            # Boxed so the archive never serializes into the flow-run record
+            # (Prefect's server caps parameters at 512 KB).
+            return self._flow(
+                self.service, GraphBatches(bounded), prune_removed=not run.bounded, verbose=0
+            )
         finally:
             stop.set()
             sampler.join(timeout=_SAMPLE_INTERVAL_S * 2)
