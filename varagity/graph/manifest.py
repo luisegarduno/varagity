@@ -84,9 +84,12 @@ class ManifestDiff(BaseModel):
         unchanged: Keys whose content is byte-identical to what is indexed;
             re-inserting them would cost extraction for nothing.
         removed: Keys the workdir holds that this render does not mention.
-            Only meaningful for a **full-corpus** render — a bounded build
-            (``message_limit`` / ``since``) is deliberately partial, and
-            deleting on its say-so would erase the rest of the archive.
+            A **full-corpus** render may delete them all; a bounded build
+            (``message_limit`` / ``since``) is deliberately partial, so it
+            may delete only the re-span casualties
+            :meth:`WorkdirManifest.respanned` picks out — deleting the
+            genuinely out-of-window rest on a partial render's say-so would
+            erase the archive.
     """
 
     new: list[str] = []
@@ -175,6 +178,40 @@ class WorkdirManifest(BaseModel):
                 diff.changed.append(doc.doc_key)
         diff.removed = sorted(key for key in self.docs if key not in rendered)
         return diff
+
+    def respanned(self, removed: Sequence[str], docs: Sequence[TranscriptDoc]) -> list[str]:
+        """Pick out the removed keys that are re-span casualties of one render.
+
+        Day-span packing is greedy, which makes document keys
+        window-relative: growing a bounded window backward shifts a thread's
+        pack boundaries, re-keying downstream documents whose messages did
+        not change. Their old keys then read as ``removed`` on every later
+        build, and keeping them (the bounded default) piles duplicate
+        transcripts — and inflated entity mentions — into the graph at each
+        growth step.
+
+        Full guid coverage is the proof that deleting one loses nothing:
+        every message its record accounts for is in this render, being
+        (re-)indexed under the new keys. Partial or unknown coverage — a
+        record without guids proves nothing — reads as genuinely
+        out-of-window content and is kept, per the bounded-build contract.
+
+        Args:
+            removed: Removed keys from :meth:`diff`, in diff order.
+            docs: The same build's rendered transcripts.
+
+        Returns:
+            The removed keys a bounded build may safely prune, input order
+            preserved.
+        """
+        rendered = {guid for doc in docs for guid in doc.message_guids}
+        return [
+            key
+            for key in removed
+            if (known := self.docs.get(key)) is not None
+            and known.message_guids
+            and rendered.issuperset(known.message_guids)
+        ]
 
     def merged(
         self,

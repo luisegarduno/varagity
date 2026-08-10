@@ -279,16 +279,29 @@ flowchart TB
   thread-day hashes identically no matter how often its `chat.db` is
   re-uploaded and costs nothing. A **changed** day is deleted from the graph
   and re-inserted (the engine drops a re-submitted id in any status, so
-  without this the stale transcript would be permanent); a **removed** day is
-  retracted only on a full-corpus render — a bounded build's render is
-  partial by construction, and pruning on its say-so would erase the archive.
-  A delete the engine refuses keeps its *old* manifest record, so the next
-  build still sees it as stale.
+  without this the stale transcript would be permanent); a **removed** day
+  is retracted on a full-corpus render, while a bounded build — partial by
+  construction — retracts only its *re-span casualties* (below) and keeps
+  the rest: pruning out-of-window keys on a partial render's say-so would
+  erase the archive. A delete the engine refuses keeps its *old* manifest
+  record, so the next build still sees it as stale.
 - **Bounded builds are the escape hatch** (`message_limit`, `since`): a
   full backfill runs for hours (7.17 s/message measured — see the
   [runbook](runbook.md#graph-corpus-operations)), so a spot check on the
   newest N messages, or a dated slice, is how the corpus is smoke-tested
   before committing days of GPU time. Both imply `prune_removed=False`.
+- **Growing a bounded window re-keys documents, and the build cleans up
+  after it.** Day-span packing is greedy, so widening the window backward
+  shifts a thread's pack boundaries and downstream documents re-key: their
+  old keys turn up `removed` although nothing left the archive (observed on
+  a 5k→10k grow: 109 new, 48 unchanged, 38 removed). A bounded build
+  deletes such a key only on proof of **full guid coverage** — every
+  message its manifest record holds is re-indexed under new keys by this
+  very render — which is what separates a re-span casualty (a duplicate
+  transcript, safe to drop) from genuinely out-of-window content (kept, per
+  the rule above). Ghost keys left by grows that ran before this sweep
+  existed are caught the same way by the next bounded build that covers
+  their messages.
 - **No Prefect-level retries.** An engine that fails mid-backfill must
   surface rather than silently re-run hours of extraction — and a re-called
   build resumes from the durable statuses anyway.

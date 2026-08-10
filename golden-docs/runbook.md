@@ -432,10 +432,16 @@ curl -sX POST localhost:8000/api/graph/build \
   -H 'content-type: application/json' -d '{"since": "2024-01-01"}'
 ```
 
-Both **never prune**: a bounded render is partial by construction, so
-documents it does not mention are kept rather than deleted. Run an unbounded
-build afterwards to fill in the rest — the manifest diff means the bounded
-slice is already indexed and costs nothing the second time.
+Both keep what they cannot see: a bounded render is partial by
+construction, so out-of-window documents are kept rather than deleted. The
+one exception is a **re-span casualty** — growing the window backward
+shifts the greedy day-span packing and re-keys downstream documents, and a
+removed key whose every recorded message this render re-indexes under new
+keys is a duplicate transcript, not archive content. Those are deleted (the
+build log reads `pruning N re-spanned, keeping M`); anything short of full
+guid coverage is kept. Run an unbounded build afterwards to fill in the
+rest — the manifest diff means the bounded slice is already indexed and
+costs nothing the second time.
 
 **5 · Re-upload a grown `chat.db`.** Upload the newer copy over the old one
 and build again. Thread-days whose content is byte-identical are skipped;

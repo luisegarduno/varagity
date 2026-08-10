@@ -668,8 +668,14 @@ class _LightRAGSession:
           LightRAG's enqueue stage drops a re-submitted ``doc_id`` in any
           status and would otherwise keep the stale transcript forever;
         * **removed** documents (in the manifest, absent from this render)
-          are deleted only when ``prune_removed`` says the render covered the
-          whole corpus.
+          are deleted when ``prune_removed`` says the render covered the
+          whole corpus — and, on a bounded render, the **re-span
+          casualties** among them: greedy day-span packing re-keys
+          downstream documents when a bounded window grows backward, and a
+          removed key whose every recorded message this render re-indexes
+          under new keys is a duplicate transcript, not out-of-window
+          content (:meth:`~varagity.graph.manifest.WorkdirManifest.respanned`).
+          The genuinely out-of-window rest is kept.
 
         Enqueue and process are separate engine calls, and process re-selects
         every in-flight or failed document, so **a killed build resumes by
@@ -681,7 +687,9 @@ class _LightRAGSession:
             prune_removed: Whether this render is the whole corpus. A bounded
                 build (message cap, date floor) must pass ``False``: its
                 render is deliberately partial, and pruning on its say-so
-                would delete the rest of the archive.
+                would delete the rest of the archive — only its re-span
+                casualties (fully re-rendered removed keys) are pruned on
+                its behalf.
 
         Returns:
             The build report; a failed enqueue chunk or delete is recorded
@@ -690,14 +698,15 @@ class _LightRAGSession:
         messages = merge_batches(batches)
         docs = thread_transcripts(messages)
         diff = self._manifest.diff(docs)
-        stale = [*diff.changed, *(diff.removed if prune_removed else ())]
+        respanned = [] if prune_removed else self._manifest.respanned(diff.removed, docs)
+        stale = [*diff.changed, *(diff.removed if prune_removed else respanned)]
         logger.info(
             "graph build: %d new, %d changed, %d unchanged, %d removed (%s)",
             len(diff.new),
             len(diff.changed),
             len(diff.unchanged),
             len(diff.removed),
-            "pruning removed" if prune_removed else "bounded render — keeping removed",
+            _removed_note(prune_removed, removed=len(diff.removed), respanned=len(respanned)),
         )
         started = time.perf_counter()
         undeleted = self._delete(stale)
@@ -710,7 +719,13 @@ class _LightRAGSession:
         # store where the next pass retries them. A failed **delete** is the
         # exception — its old content is still in the graph, so `retain`
         # keeps its old record and the next build still sees it as stale.
-        self._remember(self._manifest.merged(docs, prune=prune_removed, retain=undeleted.keys()))
+        merged = self._manifest.merged(docs, prune=prune_removed, retain=undeleted.keys())
+        if respanned:
+            # A pruned casualty leaves the manifest with the graph; one whose
+            # delete failed keeps its record (it is still in the graph) and
+            # is re-spotted as removed-and-covered by the next build.
+            merged = merged.without([key for key in respanned if key not in undeleted])
+        self._remember(merged)
         return BuildReport(
             messages_seen=len(messages),
             wall_clock_s=time.perf_counter() - started,
@@ -1190,6 +1205,24 @@ class _LightRAGSession:
 def _pin_env() -> None:
     """Pin LightRAG's import-time environment knobs to single-slot values."""
     os.environ.update(_ENV_PINS)
+
+
+def _removed_note(prune_removed: bool, *, removed: int, respanned: int) -> str:
+    """Phrase the build log's removed-keys disposition.
+
+    Args:
+        prune_removed: Whether the render covered the whole corpus.
+        removed: How many manifest keys the render did not mention.
+        respanned: How many of them are re-span casualties (bounded runs).
+
+    Returns:
+        The parenthetical for the build-diff log line.
+    """
+    if prune_removed:
+        return "pruning removed"
+    if respanned:
+        return f"bounded render — pruning {respanned} re-spanned, keeping {removed - respanned}"
+    return "bounded render — keeping removed"
 
 
 def _split_mode(mode: str) -> tuple[str, bool]:

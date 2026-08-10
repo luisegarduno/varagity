@@ -577,3 +577,29 @@ record and the code agree:
 
 Everything else in Consequences stands as written, including the
 document-grain provenance regret and the revisit triggers.
+
+## Amendment (2026-08-10): bounded builds prune their re-span casualties
+
+The bounded-build contract ("a bounded render never prunes — its render is
+partial by construction") met a second, distinguishable cause of `removed`
+in production. Day-span packing is greedy, so document keys are
+window-relative: growing a bounded window backward (`message_limit`
+5k→10k on the live archive, 2026-08-10) shifted pack boundaries and
+re-keyed downstream documents — the build reported **109 new, 0 changed,
+48 unchanged, 38 removed** with nothing actually gone from the archive.
+Under the unrefined rule those 38 old-span documents stayed in the graph
+and manifest beside their wider replacements: duplicate transcript content
+near window boundaries, inflated entity mentions, and a pile growing at
+every growth step until an unbounded prune build.
+
+The refinement: on a bounded build, a removed key **is** deleted when its
+manifest record's guid set is fully covered by the incoming render — every
+message it accounts for is being re-indexed under new keys by this very
+build, so the deletion loses nothing. Anything short of full coverage
+(a boundary-straddling span, a record without guids) still reads as
+out-of-window content and is kept, so the original contract's protection
+stands untouched. No new persistence was needed — the manifest already
+records `doc_key → message_guids` as the durable provenance index — which
+also makes the sweep retroactive: ghosts left by grows that ran before the
+refinement are caught by the next bounded build that covers their
+messages.

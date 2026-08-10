@@ -78,7 +78,10 @@ class GraphSession(Protocol):
             prune_removed: Whether ``batches`` render the **whole** corpus,
                 making a document the graph holds but the render omits a
                 deleted source. A bounded build (message cap, date floor)
-                passes ``False``: its render is partial on purpose.
+                passes ``False``: its render is partial on purpose, so only
+                removed keys whose every recorded message the render
+                re-indexes under new spans (re-span casualties of the greedy
+                day-span packing) may be pruned on its behalf.
 
         Returns:
             What the build did: messages seen, wall clock, and any failures

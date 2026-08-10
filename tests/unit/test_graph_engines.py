@@ -883,6 +883,79 @@ class TestLightRAGBuild:
         assert session._rag.deleted == []
         assert set(load_manifest(tmp_path).docs) == {f"{THREAD}::2016-03-04", "other::2016-03-04"}
 
+    def test_a_bounded_build_prunes_a_removed_key_it_fully_rerenders(self, tmp_path: Path) -> None:
+        """★ Decision #9's refinement: a re-span casualty is safe to prune.
+
+        The window grew backward, greedy packing re-keyed the document, and
+        every message it held is re-indexed under the new key by this very
+        build — keeping it would duplicate the transcript and inflate
+        entity mentions at every growth step.
+        """
+        session = lightrag_session(tmp_path)
+        session._rag.calls.clear()
+        old = f"{THREAD}::2016-03-04"
+        grown = f"{THREAD}::2016-03-01..2016-03-04"
+        session.build(
+            [
+                batch(
+                    message("g0", when=START - timedelta(days=3)),
+                    message("g1"),
+                    message("g2", when=START + timedelta(minutes=1)),
+                )
+            ],
+            prune_removed=False,
+        )
+        session.close()
+        assert session._rag.calls == [f"delete:{old}", f"enqueue:{grown}", "process"]
+        assert set(load_manifest(tmp_path).docs) == {grown}
+
+    def test_a_respanned_key_whose_delete_failed_is_retried_next_bounded_build(
+        self, tmp_path: Path
+    ) -> None:
+        """Its record must survive — the old transcript is still in the graph."""
+        old = f"{THREAD}::2016-03-04"
+        grown_batch = batch(
+            message("g0", when=START - timedelta(days=3)),
+            message("g1"),
+            message("g2", when=START + timedelta(minutes=1)),
+        )
+        session = lightrag_session(tmp_path)
+        session._rag.fail_delete = {old}
+        report = session.build([grown_batch], prune_removed=False)
+        session.close()
+        assert report.failures and old in report.failures[0]
+        assert old in load_manifest(tmp_path).docs
+        retry = new_session(tmp_path)
+        retry.build([grown_batch], prune_removed=False)
+        retry.close()
+        assert retry._rag.deleted == [old]
+        assert old not in load_manifest(tmp_path).docs
+
+    def test_a_ghost_from_an_earlier_bounded_grow_is_pruned_once_covered(
+        self, tmp_path: Path
+    ) -> None:
+        """★ Retroactive sweep of ghosts left by pre-refinement grows.
+
+        Earlier bounded grows left re-span ghosts in the graph and manifest;
+        the next bounded build that fully re-renders their messages deletes
+        them — and only them.
+        """
+        lightrag_session(tmp_path).close()
+        manifest = load_manifest(tmp_path)
+        ghost = f"{THREAD}::2016-03-03..2016-03-04"
+        out_of_window = f"{THREAD}::2015-06-01"
+        manifest.docs[ghost] = ManifestDoc(content_sha256="stale", message_guids=["g1", "g2"])
+        manifest.docs[out_of_window] = ManifestDoc(content_sha256="old", message_guids=["g-old"])
+        save_manifest(tmp_path, manifest)
+        session = new_session(tmp_path)
+        session.build(
+            [batch(message("g1"), message("g2", when=START + timedelta(minutes=1)))],
+            prune_removed=False,
+        )
+        session.close()
+        assert session._rag.deleted == [ghost]
+        assert set(load_manifest(tmp_path).docs) == {f"{THREAD}::2016-03-04", out_of_window}
+
     def test_the_manifest_records_content_guids_and_span(self, tmp_path: Path) -> None:
         lightrag_session(tmp_path).close()
         (key, doc) = next(iter(load_manifest(tmp_path).docs.items()))

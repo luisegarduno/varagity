@@ -102,6 +102,48 @@ class TestDiff:
         )
 
 
+class TestRespanned:
+    """Which removed keys a bounded build may prune: only proven re-span casualties."""
+
+    def test_a_fully_covered_removed_key_is_a_respan_casualty(self) -> None:
+        """★ Growing a bounded window re-keys downstream docs.
+
+        Full guid coverage proves every message the old key held is being
+        re-indexed by this render, so deleting it loses nothing.
+        """
+        manifest = WorkdirManifest().merged([doc("t::1..2", guids=["g1", "g2"])], prune=True)
+        rerender = [doc("t::1", guids=["g0", "g1"]), doc("t::2", guids=["g2"])]
+        assert manifest.diff(rerender).removed == ["t::1..2"]
+        assert manifest.respanned(["t::1..2"], rerender) == ["t::1..2"]
+
+    def test_partial_coverage_reads_as_out_of_window_and_keeps_the_key(self) -> None:
+        """★ A boundary-straddling key still holds un-rendered messages.
+
+        Deleting it would lose them — the exact erasure decision #9 forbids.
+        """
+        manifest = WorkdirManifest().merged([doc("t::1..2", guids=["g1", "g2"])], prune=True)
+        assert manifest.respanned(["t::1..2"], [doc("t::2", guids=["g2"])]) == []
+
+    def test_zero_coverage_keeps_the_key(self) -> None:
+        manifest = WorkdirManifest().merged([doc("t::1", guids=["g1"])], prune=True)
+        assert manifest.respanned(["t::1"], [doc("u::1", guids=["g9"])]) == []
+
+    def test_a_record_without_guids_proves_nothing_and_is_kept(self) -> None:
+        """Conservative on unknowns: no recorded guids, no coverage proof."""
+        manifest = WorkdirManifest(docs={"t::1": ManifestDoc(content_sha256="x")})
+        assert manifest.respanned(["t::1"], [doc("t::2", guids=["g1"])]) == []
+
+    def test_keys_the_manifest_never_recorded_are_ignored(self) -> None:
+        assert WorkdirManifest().respanned(["ghost::1"], [doc("t::1")]) == []
+
+    def test_input_order_is_preserved(self) -> None:
+        manifest = WorkdirManifest().merged(
+            [doc("b::1", guids=["g1"]), doc("a::1", guids=["g2"])], prune=True
+        )
+        rerender = [doc("c::1", guids=["g1", "g2"])]
+        assert manifest.respanned(["b::1", "a::1"], rerender) == ["b::1", "a::1"]
+
+
 class TestMerge:
     def test_a_full_render_replaces_the_manifest_wholesale(self) -> None:
         manifest = WorkdirManifest().merged([doc("a::1"), doc("b::1")], prune=True)
