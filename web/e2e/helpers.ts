@@ -1,4 +1,9 @@
-import { expect, type Page, type TestInfo } from "@playwright/test";
+import {
+  expect,
+  type APIRequestContext,
+  type Page,
+  type TestInfo,
+} from "@playwright/test";
 
 /** The two themes the a11y criterion covers. */
 export type ThemeName = "light" | "dark";
@@ -85,6 +90,57 @@ export async function gotoFreshConversation(page: Page): Promise<void> {
     { timeout: 15_000 },
   );
   await expect(page.getByLabel("Question")).toBeVisible();
+}
+
+/** The live API the web app talks to (override for a non-default stack). */
+export const API_URL = process.env.PLAYWRIGHT_API_URL ?? "http://localhost:8000";
+
+/**
+ * Why the graph specs cannot run here, or `null` when they can.
+ *
+ * The graph corpus is the one thing in this repo a test may not create: a
+ * real backfill runs for hours against the owner's archive. So the graph
+ * specs read the live stack's state and skip cleanly when there is nothing
+ * extracted — a fresh clone, a `docker volume rm varagity_graphdata`, or
+ * `GRAPH_ENABLED=false` are all legitimate, and none of them is a failure
+ * of the code under test.
+ *
+ * Specs that spend LLM time pass `requireIdle` — a running build owns the
+ * single llama.cpp slot, so a graph turn queues behind extraction calls
+ * with no latency bound (the runbook's query-during-build contention).
+ * Read-only specs (tabs, view/export) stay runnable mid-build.
+ *
+ * @returns The skip reason, or `null` when a built graph is available.
+ */
+export async function graphSkipReason(
+  request: APIRequestContext,
+  opts: { requireIdle?: boolean } = {},
+): Promise<string | null> {
+  let status: {
+    enabled?: boolean;
+    building?: boolean;
+    entities?: number | null;
+    documents?: Record<string, number>;
+  };
+  try {
+    const response = await request.get(`${API_URL}/api/graph/status`);
+    if (!response.ok()) return `GET /api/graph/status → ${response.status()}`;
+    status = await response.json();
+  } catch {
+    return `the API at ${API_URL} is unreachable — is the stack up?`;
+  }
+  if (status.enabled === false) {
+    return "GRAPH_ENABLED is false on this stack";
+  }
+  if (opts.requireIdle && status.building === true) {
+    return "a graph build is running — turn latency is unbounded behind the single llama.cpp slot; re-run when it finishes";
+  }
+  const built =
+    (status.entities ?? 0) > 0 ||
+    Object.values(status.documents ?? {}).some((count) => count > 0);
+  return built
+    ? null
+    : "the live graph is empty — upload a message archive and run a build first";
 }
 
 /** Assert the html element reflects the forced theme (next-themes class strategy). */

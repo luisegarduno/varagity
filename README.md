@@ -13,6 +13,13 @@ evidence panel: per-chunk semantic/BM25/fusion/re-rank provenance, the
 situating blurb, and inline `[SOURCE]` citation chips that link into it.
 Every pipeline stage is a tracked Prefect task.
 
+Alongside the document corpus there is a second one: drop an **iMessage
+archive** in and Varagity extracts a knowledge graph from it, then answers
+"who, with whom, and when" questions from that graph — same streaming, same
+citations, evidence rendered as the conversation days it read. The whole
+extracted graph is browsable at `/graph`. See
+[the message graph](golden-docs/architecture.md#the-message-graph-graphrag).
+
 -----------------------------
 
 | Elegant Frontend | Codebase Map |
@@ -92,13 +99,22 @@ Every pipeline stage is a tracked Prefect task.
    full text; inline `[SOURCE]` chips scroll to the matching card.
    Conversations persist across restarts.
 
-4. Watch it work: Grafana at **[http://localhost:3001](http://localhost:3001)**
+4. Optional — the message graph: copy an iMessage `chat.db` **and its
+   `-wal`/`-shm` sidecars** onto the Corpus page's *Message graph* tab and
+   press Build. Extraction is a background job that streams progress, is
+   safe to kill, and **resumes by pressing Build again** (budget ~7 s per
+   message — a 10k-message archive is about a day). Then flip the composer's
+   source selector to *Messages* and ask; `/graph` draws what was extracted.
+   Details in the
+   [runbook](golden-docs/runbook.md#graph-corpus-operations).
+
+5. Watch it work: Grafana at **[http://localhost:3001](http://localhost:3001)**
    renders the provisioned Query / Ingestion / Infra dashboards, no login
    needed (Prometheus itself: [http://localhost:9090](http://localhost:9090)).
    Metrics populate from API/GUI activity — CLI runs record into their own
    process, which is never scraped.
 
-5. Prefer the terminal? The `app` container ingests on start; for an
+6. Prefer the terminal? The `app` container ingests on start; for an
    interactive session:
     ```bash
     docker compose run --rm app uv run main.py chat
@@ -118,7 +134,12 @@ uv run main.py ingest --reingest   # re-process after pipeline-setting changes
 uv run main.py chat                # ingest, then Q&A loop (the default command)
 uv run --group eval main.py eval       # retrieval-quality matrix (5 configs × k) + chunker sweep
 uv run --group eval main.py eval ocr   # OCR engine benchmark (CER/WER, pages/s)
+uv run main.py eval graph              # GraphRAG regression harness (ADR-017)
 ```
+
+Graph **builds** have no CLI command on purpose: the engine's storage is
+single-writer and the API process owns it (`POST /api/graph/build`, or the
+GUI's Build button).
 
 Run on the host against the containerized services with localhost overrides —
 see [host-vs-container `.env` usage](golden-docs/runbook.md#host-vs-container-env-usage).
@@ -133,7 +154,11 @@ evidence before prose: `retrieval` (the provenance payload) → `reasoning`
 `done` (ids, usage, per-stage latency). Conversations are exposed as REST
 (`GET/POST/DELETE /api/conversations…`); `GET /api/health` reports per-service
 reachability and `GET /api/config` lists the registered chunkers/retrievers/
-OCR engines the UI builds its controls from.
+OCR engines the UI builds its controls from. `POST /api/chat` with
+`corpus: "graph"` answers from the message graph instead — same event order,
+graph-shaped evidence — and `/api/graph/…` covers its corpus, its resumable
+build (a second SSE protocol), its status, and the export the `/graph` view
+draws.
 
 The full as-built contract — corpus/settings routes included, plus both SSE
 protocols and the error envelope — lives in

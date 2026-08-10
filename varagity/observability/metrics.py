@@ -287,10 +287,12 @@ def catalog() -> dict[str, tuple[str, ...]]:
 
     Returns:
         Metric name → declared label names, covering the module-level
-        catalog and the store-derived corpus gauges
-        (:mod:`varagity.observability.corpus`).
+        catalog, the store-derived corpus gauges
+        (:mod:`varagity.observability.corpus`), and the workdir-derived
+        graph gauges (:mod:`varagity.observability.graph`).
     """
     from varagity.observability.corpus import CORPUS_GAUGES
+    from varagity.observability.graph import GRAPH_GAUGES
 
     declared: dict[str, tuple[str, ...]] = {}
     for metric in _CATALOG:
@@ -298,4 +300,4 @@ def catalog() -> dict[str, tuple[str, ...]]:
         # restating every name and label here, which is exactly the drift
         # this function exists to catch.
         declared[metric._name] = tuple(metric._labelnames)
-    return declared | CORPUS_GAUGES
+    return declared | CORPUS_GAUGES | GRAPH_GAUGES

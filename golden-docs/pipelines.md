@@ -240,12 +240,117 @@ Both flows share the staging — condense → embed → retrieve → generate, w
 - Measured overhead of flow tracking: ≈0.06 s against a ~7.5 s question —
   LLM generation dominates.
 
+## The graph flows (`graph-build` / `graph-query-stream`)
+
+The [message graph](architecture.md#the-message-graph-graphrag) is a peer
+corpus, so it gets peer flows (`varagity/pipeline/graph_flow.py`) — one that
+extracts it and one that answers from it. Both are **API-only**: the engine's
+storages are single-writer per working directory and the API process owns
+them, so there is deliberately no CLI graph build.
+
+```mermaid
+flowchart TB
+    start(["graph_build_flow(service, batches)"]) --> scan["scan + parse<br/>message sources sniff the corpus dir"]
+    scan --> render["render thread-day transcripts<br/>pure — identical days render identical text"]
+    render --> diff["manifest diff<br/>new · changed · unchanged · removed"]
+    diff --> del["delete changed + removed<br/>(the engine's enqueue dedup can't update)"]
+    del --> enqueue["enqueue pending<br/>durable PENDING doc-status rows"]
+    enqueue --> process["process<br/>LLM extraction, batched, status-flushed"]
+    process --> sidecars["rewrite manifest + summary"]
+
+    classDef durable stroke-width:3px;
+    class enqueue,process durable;
+```
+
+- **One flow run per build attempt, not per document.** The engine enqueues
+  into its own durable status store and processes in batches inside a single
+  call; per-document task runs would mean reaching inside its pipeline.
+  Per-document progress is reported instead by the runner's status sampler,
+  which reads the engine's own document counts — the same
+  tracking-and-streaming composition the ingest runner uses.
+- **Resume is the same call.** Every in-flight or failed document
+  (`pending`, `parsing`, `analyzing`, `processing`, `failed`) is re-selected
+  at the top of every batch, and statuses flush to disk at each stage
+  boundary. A backfill killed 14 hours in resumes by pressing **Build**
+  again — nothing is re-extracted, and the run reports what it inherited as
+  `resumed`. That is why `reingest` is a separate, explicit flag: it is the
+  one path that throws the working directory away.
+- **The manifest diff is the upsert.** Rendering is pure, so an unchanged
+  thread-day hashes identically no matter how often its `chat.db` is
+  re-uploaded and costs nothing. A **changed** day is deleted from the graph
+  and re-inserted (the engine drops a re-submitted id in any status, so
+  without this the stale transcript would be permanent); a **removed** day is
+  retracted only on a full-corpus render — a bounded build's render is
+  partial by construction, and pruning on its say-so would erase the archive.
+  A delete the engine refuses keeps its *old* manifest record, so the next
+  build still sees it as stale.
+- **Bounded builds are the escape hatch** (`message_limit`, `since`): a
+  full backfill runs for hours (7.17 s/message measured — see the
+  [runbook](runbook.md#graph-corpus-operations)), so a spot check on the
+  newest N messages, or a dated slice, is how the corpus is smoke-tested
+  before committing days of GPU time. Both imply `prune_removed=False`.
+- **No Prefect-level retries.** An engine that fails mid-backfill must
+  surface rather than silently re-run hours of extraction — and a re-called
+  build resumes from the durable statuses anyway.
+
+The query path is `query_stream_flow` with exactly one stage swapped:
+
+```mermaid
+flowchart LR
+    q(["graph_query_stream_flow(query, service)"]) --> condense["condense_query<br/>the SAME task — spec_v3 §4.2"]
+    condense --> gret["graph_retrieve<br/>entities · relations · transcript days"]
+    gret -.->|on_retrieved| sse["SSE retrieval event<br/>(evidence before prose)"]
+    gret --> gen["generate_answer_stream<br/>the SAME task, graph-shaped context"]
+    gen --> state(["StreamedGraphState"])
+
+    classDef sidecar stroke-dasharray:4 3;
+    class sse sidecar;
+```
+
+- **Condense and generate are the same tasks the chunk path runs**, so a
+  graph turn inherits the search/answer query split (the user's verbatim
+  words always reach the answer prompt), the `[SOURCE]` citation contract,
+  `<think>` splitting, client-abort handling, and token accounting — with no
+  second implementation of any of them. Only the middle stage differs,
+  because only the middle stage is different.
+- **Embed + retrieve collapse into one task.** The engine owns its own
+  keyword extraction, embedding, and fusion inside a single call
+  (`GRAPH_QUERY_MODE`, default `mix`); splitting the wrapper would invent
+  task boundaries the engine does not have.
+- **Reads never wait for a build.** `graph_retrieve` takes no write lock, so
+  a question is answered *during* a backfill — it queues only behind the
+  in-flight extraction call for the single llama.cpp slot.
+- **The answer is ours, not the engine's** ([ADR-017](adr/ADR-017-graphrag-engine.md)):
+  the retrieval-only decision means the engine returns evidence and
+  `varagity/graph/answer.py` renders the grounding context (budgeted against
+  `LLM_CONTEXT_TOKENS`) that the ordinary streaming generate task writes from.
+
+### API-triggered graph builds
+
+`POST /api/graph/build` is the ingest runner's shape, one corpus over:
+a daemon thread inside the API process, an immediate `202` handle, and
+`GET /api/graph/build/status` streaming the run as SSE with **full backlog
+replay** — a browser opened six hours into a backfill renders the same
+picture one opened at the start did. `progress` frames walk
+`scan → parse (per file) → bound/reset → index → sampled process ticks`;
+`log` frames relay the `varagity.graph` logger.
+
+- **One build at a time**: a second `POST` is a structured `409
+  graph_build_running`; a preflight rejects with `503` when a model service
+  is down. `GRAPH_ENABLED=false` refuses with `403 graph_disabled`.
+- **Killing the process is safe**: the durable statuses are the run's
+  memory, and both sidecars are written atomically.
+- **The graph-stale flag** is cleared only by a *completed* API-driven
+  `reingest=true` run — deleting a source file sets it, and the tab says so
+  until a rebuild retracts those messages.
+
 ## Evaluation flows
 
-Thin flows (`eval-matrix`, `eval-ocr`, `eval-chat`) over the spec §16
-harness (`varagity/eval/`); each eval ingest is a tracked **subflow** with
-per-stage task runs. All need Docker (ephemeral testcontainers stores) and
-the live GPU services.
+Thin flows (`eval-matrix`, `eval-ocr`, `eval-chat`, `eval-graph`) over the
+spec §16 harness (`varagity/eval/`); each eval ingest is a tracked
+**subflow** with per-stage task runs. All need the live GPU services; all
+but `eval-graph` also need Docker (ephemeral testcontainers stores — the
+graph harness stores nothing in pg or ES).
 
 - **`eval-matrix`** (`main.py eval`): recall@k / pass@k (k ∈ {5, 10, 20})
   across the seven-configuration ladder — (1) semantic non-contextual,
@@ -280,6 +385,16 @@ the live GPU services.
   decisively (recall@1 1.000 vs 0.600 under `reranked`) and never drags a
   topic shift, but costs a mean 8.6 s pre-retrieval LLM call on follow-ups
   — **the default stays `simple`**, a measured "no".
+- **`eval-graph`** (`main.py eval graph` — [ADR-017](adr/ADR-017-graphrag-engine.md)):
+  the harness that decided the graph engine and now guards it. It builds a
+  synthetic (or real) message corpus into each registered engine's own
+  working directory under `data/eval/graph/` and scores the answers against
+  a golden QA set — **production's `GRAPH_STORAGE_PATH` is never touched**,
+  and neither store container is needed. `--skip-build` re-scores an
+  already-built graph in seconds, which is what makes a retrieval-side change
+  (query mode, the e5 query prefix, a rerank experiment) one run from a
+  number. Details and profiles in the
+  [runbook](runbook.md#the-graphrag-bake-off-eval-graph).
 
 How `eval-matrix` covers all seven configs with only two ingests into the
 throwaway stores — and where the chunker sweep rides:
@@ -341,9 +456,12 @@ chunk id to its acceptable fact-carrying set.
 | `uv run --group eval main.py eval` | `eval-matrix` (+ ingest subflows) | 7-config retrieval matrix + the chunker sweep, on ephemeral stores |
 | `uv run --group eval main.py eval ocr` | `eval-ocr` (+ ingest subflows) | OCR engine benchmark (CER/WER, pages/s, recall) |
 | `uv run --group eval main.py eval chat` | `eval-chat` (+ ingest subflow) | Multi-turn chat-engine eval over the conversation fixtures ([above](#evaluation-flows)) |
+| `uv run main.py eval graph` | `eval-graph` | GraphRAG regression harness over its own throwaway workdirs (no `--group eval`, no stores — [runbook](runbook.md#the-graphrag-bake-off-eval-graph)) |
 
 The HTTP API is a **peer front-end over the same flows** (spec_v2 §4.9):
-`POST /api/chat` runs `query-stream` (in a threadpool under the async edge —
-ADR-005), and `POST /api/ingest` runs `ingest` on a daemon thread
-([above](#api-triggered-ingest)). Runs from either front-end land at the
-same Prefect UI.
+`POST /api/chat` runs `query-stream` — or `graph-query-stream` when the turn
+targets the graph — in a threadpool under the async edge (ADR-005), and
+`POST /api/ingest` / `POST /api/graph/build` run `ingest` / `graph-build` on
+a daemon thread ([above](#api-triggered-ingest)). Runs from either front-end
+land at the same Prefect UI. **The graph build is the one flow the CLI
+cannot start**: single-writer storage means the API process owns it.

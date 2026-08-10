@@ -190,6 +190,12 @@ class TestMetricsEndpoint:
         ``prometheus_client`` canonically strips the ``_total`` suffix from
         counter *family* names (their samples keep it), so the counters are
         asserted via their TYPE lines.
+
+        The two store-derived gauge families are asserted here too, because
+        this is the only place their **registration** by ``create_app()`` is
+        observable — their own suites build collectors by hand. Their
+        families are declared even with no store reachable and nothing
+        indexed, which is exactly why the TYPE line is the honest check.
         """
         response = await get(create_app(), "/metrics")
         assert response.status_code == 200
@@ -205,6 +211,11 @@ class TestMetricsEndpoint:
             "# TYPE varagity_contextualize_latency_seconds histogram",
             "# TYPE varagity_llm_tokens_total counter",
             "# TYPE varagity_dependency_up gauge",
+            "# TYPE varagity_corpus_documents gauge",
+            "# TYPE varagity_graph_documents gauge",
+            "# TYPE varagity_graph_entities gauge",
+            "# TYPE varagity_graph_relations gauge",
+            "# TYPE varagity_graph_messages gauge",
         ):
             assert header in text, f"missing catalog entry: {header}"
 

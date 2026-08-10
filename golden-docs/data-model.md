@@ -237,9 +237,11 @@ Current migrations: `001_conversations.sql` and `002_app_settings.sql` (the
 next two sections), v3's `003_condensed_query.sql` and
 `004_message_engine.sql` — two nullable `ALTER TABLE messages ADD COLUMN`s
 for the chat engine's provenance snapshot
-([below](#conversation-persistence)) — and `005_conversation_groups.sql`,
-the sidebar's conversation folders (also
-[below](#conversation-persistence)). `schema.sql` deliberately needed no
+([below](#conversation-persistence)) — `005_conversation_groups.sql`, the
+sidebar's conversation folders (also
+[below](#conversation-persistence)), and `006_graph_turns.sql`, the
+graph-targeted turn's two nullable columns
+([below](#graph-targeted-turns)). `schema.sql` deliberately needed no
 edit for any of them: it holds only the v1 chunk-side tables — `messages`
 exists solely in `001`, so both install paths (fresh volume and existing
 `pgdata`) converge through the runner alone.
@@ -274,6 +276,11 @@ CREATE TABLE IF NOT EXISTS messages (
 -- nullable, both assistant-only (ADR-011):
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS condensed_query TEXT;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS chat_engine     TEXT;
+
+-- 006: the graph-targeted turn (ADR-017) — which corpus was ASKED for, and
+-- what the graph retrieval found. Both nullable, both assistant-only:
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS target_corpus  TEXT;   -- 'rag' | 'graph' | NULL
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS graph_evidence JSONB;  -- entities/relations/mode
 
 CREATE TABLE IF NOT EXISTS message_sources (
     message_id       TEXT NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
@@ -330,12 +337,14 @@ erDiagram
         text reasoning "captured think stream"
         text condensed_query "v3 · the search rewrite, if any"
         text chat_engine "v3 · engine that produced the turn"
+        text target_corpus "006 · corpus asked for — rag / graph"
+        jsonb graph_evidence "006 · entities + relations + mode"
     }
     message_sources {
         text message_id PK "composite with rank"
         int rank PK "final evidence rank"
-        text chunk_id "soft reference"
-        jsonb trace "score + texts + provenance + RetrievalTrace"
+        text chunk_id "soft reference — or a graph doc_key"
+        jsonb trace "score + texts + provenance + RetrievalTrace, or a graph_transcript"
     }
 ```
 
@@ -382,6 +391,87 @@ Notes:
   conversation (`PATCH /api/conversations/{id}`) deliberately does **not**
   bump `updated_at`, so filing a chat never re-orders the recency-sorted
   list.
+
+### Graph-targeted turns
+
+Migration `006_graph_turns.sql` records what a
+[message-graph](architecture.md#the-message-graph-graphrag) turn asked for
+and what the graph gave back, in the same snapshot discipline as everything
+else on the turn:
+
+- **`target_corpus` is the *request*, not the outcome** — `'rag'` or
+  `'graph'`, `NULL` for user turns and all pre-stage-2 history (read as
+  chunk RAG). A graph turn that degraded to a document answer (kill switch
+  off, engine unreachable) still persists `'graph'`: the ask is part of the
+  record, and the GUI's source selector stays where the user left it instead
+  of silently flipping back.
+- **`graph_evidence` is the retrieval, minus the transcripts** — the
+  entities, the relations, and the engine query mode that found them
+  (`{"entities": [...], "relations": [...], "mode": "mix"}`, the same shape
+  the live SSE `retrieval` event carries). It is `NULL` on a **degraded**
+  turn, which is precisely the honest record: the graph produced nothing.
+  Together the two columns distinguish all three states — chunk turn
+  (`NULL`/`NULL`), graph turn (`'graph'`/payload), degraded graph turn
+  (`'graph'`/`NULL`).
+- **The cited days ride in `message_sources`**, not a second evidence table.
+  A graph row stores the transcript day's `doc_key` in `chunk_id` and a
+  `trace` carrying `{"kind": "graph_transcript", "thread_name", "span",
+  "excerpt", "message_guids"}`. The `kind` discriminator is what readers
+  branch on; the v2 chunk snapshots have no `kind` and were never migrated.
+  The soft-reference rationale carries over verbatim — a graph **rebuild**
+  changes `doc_key`s exactly as a reingest changes `chunk_id`s, and the
+  snapshot is what keeps the old answer explicable.
+
+### The graph workdir
+
+The graph itself is **not** in Postgres. It lives in files, in the
+`graphdata` volume (`GRAPH_STORAGE_PATH/<engine>`, `/app/graph-data/lightrag`
+in compose), because the engine's storages are single-writer per directory
+and the API is that writer ([ADR-017](adr/ADR-017-graphrag-engine.md)):
+
+| File(s) | Owner | What it holds |
+|---|---|---|
+| `graph_chunk_entity_relation.graphml` | engine | The entity/relation graph itself |
+| `vdb_entities.json`, `vdb_relationships.json`, `vdb_chunks.json` | engine | The embedding indexes retrieval searches |
+| `kv_store_full_docs.json`, `kv_store_text_chunks.json`, `kv_store_full_entities.json`, `kv_store_full_relations.json`, `kv_store_entity_chunks.json`, `kv_store_relation_chunks.json` | engine | The extracted text and its derived records |
+| `kv_store_doc_status.json` | engine | Per-document processing status — **the resume ledger**, and what the `varagity_graph_documents{status}` gauge counts |
+| `kv_store_llm_response_cache.json` | engine | Extraction responses, reused by a delete-then-reinsert |
+| `varagity_manifest.json` | **ours** | `doc_key → {content_sha256, message_guids, thread_name, span}` |
+| `varagity_graph_summary.json` | **ours** | Last known `{entities, relations, message_guids, docs, refreshed_at}` |
+
+The two sidecars are ours and earn their keep three times over
+(`varagity/graph/manifest.py`):
+
+1. **They are the upsert diff the engine refuses to do.** A re-submitted
+   document id is dropped by the engine's enqueue stage in *any* status, so a
+   re-exported `chat.db` whose newest thread-day gained messages would keep
+   the stale transcript forever. Comparing rendered content hashes against
+   the manifest is what turns that into an explicit delete-then-reinsert.
+   Never hand-edit the manifest: an entry whose hash does not match the
+   graph's content makes the stale transcript permanent.
+2. **They are the durable provenance index.** `doc_key → message_guids`
+   survives a restart, so a citation still resolves to messages on a graph
+   nothing has rebuilt in this process.
+3. **They are the size cache.** `GET /api/graph/status` and the Prometheus
+   gauges read the summary rather than walking a multi-megabyte graphml.
+
+Both are written atomically (temp file + `os.replace`), and both degrade to
+"absent" when unreadable or written by a different schema version: every
+rendered document then looks new, which the engine's own dedup absorbs,
+where trusting a mis-shaped file would corrupt the graph. Neither is
+authoritative over the engine — they are caches of what the last write did.
+
+`doc_key` is the graph's identity thread, the counterpart of
+[`(doc_id, original_index)`](#identity-derivation) on the chunk side:
+
+```
+doc_key = f"{thread_id}::{span}"      # span is YYYY-MM-DD or first..last
+```
+
+It is what the engine attributes a chunk to (`file_path`), what
+`message_sources.chunk_id` stores on a graph turn, what the manifest keys on,
+and what the graph view's entity drill-down resolves into source days. It is
+**day-grain by construction** — which is why the evidence panel says so.
 
 ## Runtime settings overrides
 

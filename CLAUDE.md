@@ -23,12 +23,19 @@ answer prompt), composer 📎 uploads of files *and folders* with auto-ingest + 
 honest Infra empty-states, the prefect-exporter `OFFSET_MINUTES` fix), and pnpm→bun as
 package manager only (ADR-014). Page previews shipped between v2 and v3 (ADR-010).
 
+Post-v3 features ship on their own specs: the codebase map (ADR-015), HyDE retrieval
+(ADR-016), and **GraphRAG** (ADR-017, complete) — a **peer message-graph corpus** beside
+chunk RAG. An iMessage `chat.db` is extracted into a knowledge graph (LightRAG,
+retrieval-only; the repo writes the answers) by a resumable, API-only build; a chat turn
+targets it via `ChatRequest.corpus`, and `/graph` draws the whole thing.
+
 Where things live:
 - `spec.md` / `spec_v2.md` / `spec_v3.md` — the v1/v2/v3 designs (§ references in
   docstrings point at them), untracked under `thoughts/shared/tasks/<feature-or-version>/`
-  (`tasks/v1/`…`tasks/v3/`; feature specs like `spec_codebase_map.md` sit beside them).
+  (`tasks/v1/`…`tasks/v3/`; feature specs like `spec_codebase_map.md` and
+  `graphrag/spec_graphrag.md` sit beside them).
 - `golden-docs/` — **as-built** documentation, rendered by MkDocs (`uv run mkdocs serve`):
-  architecture, data model, pipelines, runbook, ADRs 001–014, Python API reference;
+  architecture, data model, pipelines, runbook, ADRs 001–017, Python API reference;
   `golden-docs/api.md` is the HTTP contract + SSE protocols, rendered from the
   `golden-docs/openapi.json` snapshot (regenerate via `scripts/export_openapi.py` —
   a unit test fails on drift).
@@ -60,7 +67,10 @@ over the same Prefect flows:
 5. **prefect** (`:4200`) — flow/task tracking UI; SQLite backing store.
 6. **api** (`:8000`) — FastAPI (`varagity/api/`, built from `Dockerfile.api`): SSE chat
    streaming, conversation CRUD, corpus upload/ingest + runtime settings routes,
-   health/config, `/metrics`; invokes the flows in-process.
+   the graph corpus/build/status/export routes, health/config, `/metrics`; invokes the
+   flows in-process. Also the **single writer** of the graph: mounts `./graph-docs`
+   (bind, the message archives) and the `graphdata` volume (`/app/graph-data`, the
+   extracted graph) — the eleventh storage surface, api-only.
 7. **web** (`:3000`) — the Next.js GUI (`web/`); the only browser-facing surface, talks
    only to `api`.
 8. **prometheus** (`:9090`) — scrapes `api:8000/metrics` every 15 s; optional extra
@@ -77,6 +87,13 @@ keep `RERANK_TOP_N`) rather than forking fusion. Each `RetrievedChunk` carries a
 `RetrievalTrace` (per-arm ranks, fused score, rerank delta); the CLI matches table, the web
 evidence panel, and the `message_sources.trace` snapshots all render that same data.
 
+The **graph is a peer corpus, not a sixth retriever** (ADR-017): its own storage
+(`graphdata`), its own flows (`graph-build`, `graph-query-stream`), its own identity key
+(`doc_key = {thread_id}::{day-span}`, day-grain by construction) — but the *same* condense
+and generate tasks, SSE protocol, citation contract, and evidence panel. Its extracted
+state is files, never Postgres; `varagity/graph/service.py` owns the process's one session
+(single-flight writes, unlocked reads, so chat works during a multi-day backfill).
+
 ## Commands
 
 ```bash
@@ -91,6 +108,9 @@ uv run --group eval main.py eval       # 7-config retrieval matrix + chunker swe
 uv run --group eval main.py eval ocr   # OCR engine benchmark
 uv run --group eval main.py eval chat  # multi-turn chat-engine eval (the ADR-011 decision harness)
 uv run main.py eval graph              # graph-engine eval (the ADR-017 harness; live GPUs + Prefect, no stores)
+                                       # note: no --group (the engine is a main dep since ADR-017)
+# graph BUILDS have no CLI command by design (single-writer storage — the API owns it):
+curl -sX POST localhost:8000/api/graph/build -H 'content-type: application/json' -d '{}'
 
 uv run pytest                      # unit suite incl. async API tests (coverage floor 90%)
 uv run pytest -m integration       # real Postgres/ES via testcontainers (needs Docker)
@@ -112,18 +132,26 @@ bun run gen:types                  # regenerate lib/types.ts from the API's Open
 Host-mode runs against the compose services need localhost env overrides
 (`BASE_MODEL_API_URL`, `POSTGRES_HOST`, `ELASTICSEARCH_URL`, `PREFECT_API_URL`, and
 `EMBEDDING_API_URL`/`RERANK_API_URL` via `docker compose port infinity-embeddings 8081`) —
-the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md`.
+the checked-in `.env` holds the in-container values. Graph work additionally needs
+`GRAPH_DOCS_PATH=./graph-docs` and `GRAPH_STORAGE_PATH=./graph-data` (or a scratch dir —
+never point a host process at the live graph while the api container is up). See
+`golden-docs/runbook.md`.
 
 ## Conventions (enforced, not aspirational)
 
 - **Registries for pluggable families** (spec §5.1): parsers (`pdf`, `text`, `office`,
   `web`, `image`), chunking strategies (`recursive_character`, `token_based`, `markdown_aware`,
   `semantic`, `docling_hybrid`), retrievers (`semantic`, `bm25`, `hybrid`, `reranked`, `hyde`),
-  and chat engines (`simple`, `condense_context`) self-register via `@register("name")`
-  in their package; adding an implementation = one new file + its import line in the
-  package `__init__`, zero caller edits. OCR engines use the same shape as a factory in
-  `parsers/pdf.py`. Registry vocabularies are **hardcoded again** in their `config.py`
-  validators (circular import), each with a tuple↔registry regression test.
+  chat engines (`simple`, `condense_context`), and graph engines (`lightrag`) self-register
+  via `@register("name")` in their package; adding an implementation = one new file + its
+  import line in the package `__init__`, zero caller edits. OCR engines use the same shape
+  as a factory in `parsers/pdf.py`; **message sources** (`imessage`) are a registry chosen
+  by *structural dispatch* (the parser shape — `matches()` sniffs the bytes), so they have
+  no `config.py` vocabulary at all. Registry vocabularies are **hardcoded again** in their
+  `config.py` validators (circular import), each with a tuple↔registry regression test.
+  `varagity/graph/engines/` additionally must stay **import-light**: the adapter imports
+  `lightrag` inside `session()`, guarded by a unit test, so warming the registry never
+  loads the engine library.
 - **Configuration**: modules read the `Settings` object from `varagity/config.py`
   (`get_settings()`, cached) — never `os.getenv`. `.env` is consumed by both compose
   (lowercase interpolation vars) and pydantic-settings.
@@ -218,8 +246,10 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
   hashes — unchanged files are skipped until `ingest --reingest`.
 - Metrics are **per-process**: CLI ingests record into the CLI's own (never-scraped)
   registry and never reach Grafana — run ingests through the API/GUI to populate the
-  Ingestion dashboard. (The `varagity_corpus_*` gauges are the exception: they read
-  pgvector at scrape time, so they see CLI ingests too — ADR-013.)
+  Ingestion dashboard. (The store-derived gauges are the exception: `varagity_corpus_*`
+  reads pgvector at scrape time, so it sees CLI ingests too — ADR-013 — and
+  `varagity_graph_*` reads the graph workdir's sidecar + doc-status files, never the
+  engine. Both emit **no samples** rather than zeros when there is nothing yet.)
 - `increase()`/`rate()` over the ingest counters returns **0 over any window**: a
   labelled counter's child series is born at its full value, so Prometheus never sees the
   rise. Corpus size is a gauge question (`varagity_corpus_*`); counters only answer
@@ -230,7 +260,31 @@ the checked-in `.env` holds the in-container values. See `golden-docs/runbook.md
   `/health` and `SystemExit`s, so a wrong URL is a crash-loop, not an empty panel.
 - The stale-corpus flag is cleared only by a **completed API-driven** `reingest=true` run —
   not by CLI `ingest --reingest`, not by patching the setting back, and not by a composer
-  📎 upload (those auto-ingest with `reingest=false`, deliberately).
+  📎 upload (those auto-ingest with `reingest=false`, deliberately). The **graph**-stale
+  flag (`_graph_stale`) is the same shape: set by deleting a graph source file, cleared
+  only by a completed API-driven graph rebuild (`reingest=true`).
+- **The API process is the graph's single writer.** The engine's storages are
+  single-writer per workdir, so builds are API-only (there is deliberately no CLI graph
+  build), and nothing else may write `graphdata` — including a host-mode API pointed at
+  the same `GRAPH_STORAGE_PATH`. Reads take no lock, which is why chat and `/graph` work
+  during a backfill. `GraphService.close()` also **resets LightRAG's process-global shared
+  dicts** — skipping that makes the next build silently empty.
+- **The graph build is a diffing upsert, and the manifest is what makes it one.** The
+  engine drops a re-submitted `doc_id` in *any* status, so a re-exported `chat.db` whose
+  newest thread-day grew would keep the stale transcript forever; `varagity_manifest.json`
+  (content hash per `doc_key`) is what turns that into delete-then-reinsert. Never
+  hand-write it — a hash that does not match the graph makes the stale content permanent.
+  `varagity_graph_summary.json` beside it is the size cache the status route and the
+  `varagity_graph_*` gauges read (never walk the graphml at request/scrape time).
+- `ChatRequest.corpus`/`messages.target_corpus` **NULL means `rag`** — pre-stage-2 history
+  and user turns both read as chunk RAG. `target_corpus` records what was *asked for*, so
+  a degraded graph turn still persists `'graph'` with `graph_evidence` NULL (the ADR-011
+  `chat_engine`/`condensed_query` shape). `GRAPH_ENABLED=false` is a kill switch, not an
+  engine: uploads/builds/graph reads answer `403 graph_disabled` and graph turns degrade
+  to a document answer, labelled `graph → documents`.
+- Graph citations must be **bracket-form only** (`[SOURCE: <doc_key>]`): `web/lib/citations.ts`
+  captures a line-initial form too, which breaks on graph labels — mind it when touching
+  the graph answer prompt.
 - Preview endpoints degrade per-document (`available:false` + `reason`; the page GET turns
   the reason into a 404 code), never 500 — host-mode runs without LibreOffice lose only
   PPTX previews (`conversion_unavailable`). `PREVIEW_*` settings are env-only (not in the

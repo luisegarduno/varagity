@@ -369,7 +369,7 @@ not chosen on paper:
 |---|---|---|
 | `GRAPH_ENGINE` | `lightrag` | this ADR |
 | `GRAPH_ENABLED` | `true` | kill switch, above |
-| Query mode | `hybrid` | the measured primary; `local` / `global` / `naive` remain reachable via a `GRAPH_QUERY_MODE` setting |
+| Query mode | ~~`hybrid`~~ → **`mix`** | the directive's `hybrid` was **superseded by the acceptance gate** (amendment below): `mix` scored 0.4216 vs `hybrid`'s 0.265. `local` / `global` / `naive` remain reachable via `GRAPH_QUERY_MODE` |
 | Answer generation | repo's grounded generation over `only_need_context=True` | decision 1, gated by decision 2 |
 | Transcript cap | 8,000 chars, day-split, key `{thread_id}::{day-span}` | upsert identity; also sizes every extraction prompt |
 | `MAX_ASYNC_LLM` / `MAX_PARALLEL_INSERT` | `1` / `1` | llama.cpp serves one slot (`--parallel 1`) |
@@ -541,3 +541,39 @@ cross-encoder already serving `/v1/rerank`) was considered and left
 unmeasured: it changes retrieval against the measured bake-off and
 deserves its own pass. It is the first lever to try if `mix`'s relation
 recall needs to move.
+
+## Amendment (2026-08-07): as-built at stage-2 completion
+
+Stage 2 shipped every directive above. Four reconciliations, so this
+record and the code agree:
+
+- **There is no CLI graph build at all.** The storage consequence asked
+  that a CLI build "must not run against a live API's volume"; the
+  as-built answer is stronger — the build has no CLI entry point, the API
+  process owns the one session behind a single-flight write lock, and the
+  runbook states the single-writer rule as
+  [ADR-013](ADR-013-corpus-gauges-vs-counters.md) states its per-process
+  caveat ([Graph corpus operations](../runbook.md#graph-corpus-operations)).
+  Reads deliberately take no lock, so a chat turn is answered during a
+  backfill.
+- **The query-mode default is `mix`, not `hybrid`** — the gate's number,
+  now marked in the defaults table above so the directive cannot be read
+  in isolation. `GRAPH_QUERY_PREFIX=true` ships with it.
+- **`eval graph` is a single-engine harness now.** The losing adapters
+  were deleted at stage-2 start as directed, so the regression-guard
+  consequence's "all three engines, ~4 h 51 m" describes the bake-off, not
+  a run anyone can reproduce today: `--profile smoke` runs `lightrag`
+  alone, and `--skip-build` re-scores the built graph in minutes. Re-seating
+  a candidate is one file plus its dependency, from git history.
+- **Two workdir sidecars were added beyond the directive**
+  (`varagity_manifest.json`, `varagity_graph_summary.json`): the engine's
+  enqueue stage drops a re-submitted document id in *any* status, so
+  without a content-hash diff a re-exported `chat.db` would keep a stale
+  transcript forever. The manifest is that diff, the durable provenance
+  index the `--skip-build` caveat above laments, and the size cache the
+  status route and the `varagity_graph_*` gauges read instead of walking
+  the graphml. Neither file is authoritative over the engine
+  ([data model](../data-model.md#the-graph-workdir)).
+
+Everything else in Consequences stands as written, including the
+document-grain provenance regret and the revisit triggers.

@@ -48,6 +48,29 @@ from varagity.graph.sources.base import MessageBatch
 logger = logging.getLogger(__name__)
 
 
+def graph_workdir(engine_name: str | None = None) -> Path:
+    """Locate the working directory an engine stores this graph in.
+
+    The one derivation of "where the graph lives", shared by the service
+    and by anything that must read the workdir *without* going through the
+    engine — the Prometheus gauges, which resolve a path at scrape time and
+    must not depend on the engine registry being warm
+    (:mod:`varagity.observability.graph`).
+
+    Args:
+        engine_name: Registry name of the engine; ``None`` reads
+            ``GRAPH_ENGINE``.
+
+    Returns:
+        The absolute directory (relative workdirs have bitten this repo
+        before — an engine consumes the path verbatim, from whatever cwd it
+        happens to run in). It may not exist yet: nothing is created here.
+    """
+    settings = get_settings()
+    name = engine_name if engine_name is not None else settings.GRAPH_ENGINE
+    return (Path(settings.GRAPH_STORAGE_PATH) / name).resolve()
+
+
 class GraphBuildInProgress(RuntimeError):
     """Raised when a build is requested while one is already running."""
 
@@ -70,21 +93,15 @@ class GraphService:
             engine_name: Registry name of the engine; ``None`` reads
                 ``GRAPH_ENGINE``.
             workdir: The engine's working directory; ``None`` derives
-                ``GRAPH_STORAGE_PATH/<engine>``, resolved absolute (relative
-                workdirs have bitten this repo before — an engine consumes
-                the path verbatim, from whatever cwd it happens to run in).
+                :func:`graph_workdir` (``GRAPH_STORAGE_PATH/<engine>``,
+                resolved absolute).
 
         Raises:
             KeyError: If ``engine_name`` names no registered engine.
         """
-        settings = get_settings()
-        self._engine_name = engine_name if engine_name is not None else settings.GRAPH_ENGINE
+        self._engine_name = engine_name if engine_name is not None else get_settings().GRAPH_ENGINE
         self._engine = get_graph_engine(self._engine_name)
-        self._workdir = (
-            workdir
-            if workdir is not None
-            else (Path(settings.GRAPH_STORAGE_PATH) / self._engine_name).resolve()
-        )
+        self._workdir = workdir if workdir is not None else graph_workdir(self._engine_name)
         self._stack: ExitStack | None = None
         self._session: GraphSession | None = None
         self._open_lock = threading.Lock()

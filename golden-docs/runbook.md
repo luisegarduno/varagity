@@ -152,7 +152,9 @@ uv run main.py eval graph              # GraphRAG regression harness (ADR-017) �
 live per-stage/per-chunk progress (`POST /api/ingest` — the same tracked
 flow on a background thread), and ask. Prefer it for ingests you want on the
 Grafana Ingestion dashboard ([per-process
-metrics](#observability-operations)).
+metrics](#observability-operations)). The **Message graph** tab beside it is
+the second corpus — message archives in, a resumable extraction build out
+([below](#graph-corpus-operations)); it has no CLI equivalent by design.
 
 Since v3 the chat composer's **📎 attach** is the one-click door
 ([ADR-012](adr/ADR-012-relative-path-uploads.md)): files *and folders*
@@ -169,6 +171,7 @@ Every UI in one place:
 | Surface | URL |
 |---|---|
 | Web GUI (chat · evidence · corpus · settings) | `http://localhost:3000` |
+| Graph corpus tab · the graph view | `http://localhost:3000/corpus?tab=graph` · `/graph` |
 | HTTP API (OpenAPI at `/openapi.json`) | `http://localhost:8000` |
 | Prefect UI (flow/task runs) | `http://localhost:4200` |
 | Prometheus | `http://localhost:9090` |
@@ -330,8 +333,9 @@ previous package manager
 
 ## The opt-in e2e harness
 
-`web/e2e/` holds Playwright specs (smoke, keyboard, chat flow, axe
-accessibility) that exercise the **real stack** — deliberately no
+`web/e2e/` holds Playwright specs (smoke, keyboard, chat flow, groups, page
+previews, the codebase map, the corpus tabs, graph chat, the graph view, and
+axe accessibility) that exercise the **real stack** — deliberately no
 `webServer` block in `playwright.config.ts`, so nothing is started for you:
 
 ```bash
@@ -349,13 +353,139 @@ bun --cwd web run e2e         # or: cd web && bun run e2e
   is single-user — one conversation store, one GPU — so parallel specs would
   race each other's state. Generation on the local GPUs runs 30–90 s per
   answer; the per-test timeout is 120 s.
-- **Read-only toward the corpus**: the specs chat and drive the UI; they
-  never upload, delete, or reingest, so a developer corpus survives a run.
+- **Read-only toward both corpora**: the specs chat and drive the UI; they
+  never upload, delete, or reingest, and the graph specs never press
+  **Build** — starting a multi-day extraction is not a test's business.
+- **The graph specs skip cleanly on an empty graph** (`corpus-tabs`,
+  `graph-chat`, `graph-view`): they read `GET /api/graph/status` first and
+  skip with a reason when the subsystem is off or nothing has been
+  extracted, so a fresh stack reports skips rather than failures.
 - Testing a **dev build**: the dev server must own `:3000` (stop the compose
   `web` first) — `API_CORS_ORIGINS` allows only that origin, so any other
   port fails CORS before it fails a test.
 - Each spec runs twice: desktop chromium (1280×800) and mobile chromium
   (390×844, touch).
+
+## Graph corpus operations
+
+The [message graph](architecture.md#the-message-graph-graphrag) is the second
+corpus: message archives in, a resumable extraction build, and a graph the
+chat composer can target. Everything below happens in the GUI at
+`http://localhost:3000/corpus?tab=graph` (or against the API directly) —
+there is no CLI path, deliberately.
+
+!!! warning "The API process is the graph's single writer"
+    The engine's storages are **single-writer per working directory** and
+    the `api` container is that writer: builds, queries, exports, and status
+    polls all go through its one in-process session. Nothing else may write
+    the `graphdata` volume — no second API process, no host-mode API against
+    the same directory, no CLI build (there is deliberately no such
+    command), no hand-editing of the workdir files. Two writers do not
+    conflict loudly; they corrupt the graph quietly.
+    Reads are safe *from* that same process, which is why a chat question is
+    answered while a multi-day backfill is still extracting.
+
+**1 · Upload the archive.** Drop the file(s) on the Message graph tab
+(`POST /api/graph/documents`, per-file cap `GRAPH_UPLOAD_MAX_MB`, default
+4 GB — a decade of iMessage is one enormous file). Uploads are **sniffed,
+not extension-filtered**: the server decides what a file is by reading its
+bytes, so a renamed `chat.db` is fine and an unreadable file is deleted
+again and reported as `unsupported_graph_source`.
+
+!!! danger "Copy the WAL sidecars too"
+    A live iMessage database keeps its most recent messages in
+    `chat.db-wal`. Copying **`chat.db` alone silently loses them** — the
+    build succeeds, the graph is just missing the newest conversations.
+    Copy all three (`chat.db`, `chat.db-wal`, `chat.db-shm`) and upload them
+    together; sidecars are stored beside their database and never sniffed on
+    their own. `GRAPH_HANDLE_NAMES_FILE` (a contacts export) may live in the
+    same directory — it is read as configuration, not as a source.
+
+**2 · Build.** Press **Build**. The run streams progress
+(`scan → parse → index → per-status ticks`) and the stream **replays from
+frame one**, so opening the tab six hours in shows the same picture. Budget
+for it:
+
+| Corpus | Wall-clock (this host, one llama.cpp slot) |
+|---|---|
+| per message | **7.17 s** measured |
+| 10,000 messages | ≈ 20 h |
+| +10 new messages into an existing graph | ≈ 140 s |
+
+**3 · Kill and resume.** A build is safe to kill (`docker compose restart
+api`, a reboot, a crash): document statuses are flushed to disk at every
+stage boundary, and every in-flight or failed document is re-selected on the
+next pass. **Press Build again to resume** — nothing already extracted is
+re-done, and the run reports what it inherited as `resumed`. There is no
+separate resume button because there is no separate operation.
+
+**4 · Bounded backfills** — the escape hatch for spot-checking an archive
+whose full build runs for a day:
+
+```bash
+# newest 500 messages only (the GUI's "limit" field does this)
+curl -sX POST localhost:8000/api/graph/build \
+  -H 'content-type: application/json' -d '{"message_limit": 500}'
+
+# only messages from 2024 onward (API-only — no GUI field)
+curl -sX POST localhost:8000/api/graph/build \
+  -H 'content-type: application/json' -d '{"since": "2024-01-01"}'
+```
+
+Both **never prune**: a bounded render is partial by construction, so
+documents it does not mention are kept rather than deleted. Run an unbounded
+build afterwards to fill in the rest — the manifest diff means the bounded
+slice is already indexed and costs nothing the second time.
+
+**5 · Re-upload a grown `chat.db`.** Upload the newer copy over the old one
+and build again. Thread-days whose content is byte-identical are skipped;
+**changed** days are deleted from the graph and re-extracted (the engine's
+own dedup would otherwise keep the stale transcript forever); genuinely new
+days are extracted. Only the difference costs GPU time. `reingest=true` is
+the sledgehammer — it wipes the working directory and re-indexes everything
+— and it is the **only** thing that clears the graph-stale flag that a
+deleted source file sets.
+
+**6 · Reset the graph** (keeping the source archives, which are a host
+bind):
+
+```bash
+docker compose down
+docker volume rm varagity_graphdata     # the extracted graph only
+docker compose up -d --wait             # next build starts from zero
+```
+
+`docker compose down -v` now wipes the graph too, along with everything
+else. `./graph-docs` survives both — delete files there (or from the tab) to
+retire a source.
+
+**Host-mode runs** need the two graph paths overridden alongside the usual
+endpoints ([above](#host-vs-container-env-usage)) — the checked-in values
+are container paths:
+
+| Setting | Container (`.env`) | Host override |
+|---|---|---|
+| `GRAPH_DOCS_PATH` | `/app/graph-docs` | `./graph-docs` |
+| `GRAPH_STORAGE_PATH` | `/app/graph-data` | `./graph-data` |
+
+Point a host API at a **scratch** `GRAPH_STORAGE_PATH` unless you mean to
+take over the real graph — the single-writer rule is not enforced by a lock
+file across processes.
+
+**Turning it off.** `GRAPH_ENABLED=false` is a kill switch in the shape
+`RERANK_ENABLED` established: uploads, builds, and the graph view answer a
+structured `403 graph_disabled`, and a graph-targeted question **degrades to
+a document answer**, labelled `graph → documents` on the turn. Listing,
+deleting, and the status poll keep working, because a disabled graph still
+has a corpus directory to manage. Nothing already extracted is touched.
+
+**When the graph answers badly**, the two levers are `GRAPH_QUERY_MODE`
+(`mix` default; `local`/`global`/`hybrid`/`naive` are the engine's own
+vocabulary) and `GRAPH_QUERY_PREFIX` (whether queries get e5's `Instruct:`
+wrapper — passages are never prefixed). Both are env-only and both are
+re-measurable in minutes with `eval graph --skip-build`
+([below](#the-graphrag-bake-off-eval-graph)) — change them against a number,
+not a hunch.
 
 ## The GraphRAG bake-off (`eval graph`)
 
@@ -450,8 +580,11 @@ floor.
 | `prefect` | the Prefect server's SQLite backing store | run history lost |
 | `prometheus_data` | scraped time-series history | metric history lost — dashboards start empty |
 | `grafana_data` | Grafana's internal state (sessions, preferences) | harmless — the datasource + dashboards re-provision at boot |
+| `graphdata` | the extracted message graph (graphml + vector indexes + document statuses + our two sidecars), api-only | the graph is gone — a full rebuild from `./graph-docs` costs [hours](#graph-corpus-operations) |
 
-`docker compose down -v` drops all of them — the full factory reset.
+`docker compose down -v` drops all of them — the full factory reset, and
+since stage 2 that **includes the message graph**. The two host binds
+(`./docs`, `./graph-docs`) are not volumes and always survive.
 
 ### Schema migrations run on API startup
 
@@ -715,6 +848,18 @@ App metrics flow api → Prometheus → Grafana; everything is provisioned —
   never reaches the scrape** — run ingests through the GUI/API
   (`POST /api/ingest`) to populate the Ingestion dashboard. Same for
   queries: CLI chat is invisible to Grafana; API chat is charted.
+- **The store-derived gauges are the exception**, and the Ingestion
+  dashboard's size panels read them ([ADR-013](adr/ADR-013-corpus-gauges-vs-counters.md)):
+  `varagity_corpus_*` queries pgvector at scrape time (so it sees CLI
+  ingests too), and the **Graph corpus** row's `varagity_graph_*` reads the
+  graph workdir's summary sidecar and document-status file — never the
+  engine, never the graphml. Both cache for 10 s, serve the last good
+  snapshot through an outage rather than 500-ing `/metrics`, and emit **no
+  samples at all** when there is nothing yet: an empty panel means "nothing
+  extracted", which is deliberately not the same claim as `0`. Graph builds
+  are API-only, so unlike the corpus gauges these can never miss a writer.
+  Cross-check them against `GET /api/graph/status` — same source, same
+  numbers.
 - **dcgm-exporter consumer-card caveat**: several DCGM fields (profiling
   metrics especially) come back empty on GeForce parts — this host's
   2080 Ti / RTX 5060 included. Blank panels there are the cards, not broken
@@ -809,6 +954,12 @@ context):
 | Evidence panel says "preview unavailable — showing text" | Reason-dependent degrade — `file_changed`: file edited since ingest, reingest to clear; `conversion_unavailable`: host-mode API without LibreOffice, pptx-only and expected ([above](#page-previews-evidence-panel)) |
 | First PPTX preview slow after an `api` restart | The conversion cache is container-ephemeral — one `soffice` run per deck re-pays it ([above](#page-previews-evidence-panel)) |
 | PPTX preview renders □□ glyph boxes | CJK fonts deliberately omitted from the api image ([above](#page-previews-evidence-panel)) |
+| Graph build finished but the newest messages are missing | The `-wal` sidecar wasn't copied — re-copy all three files, re-upload, rebuild ([above](#graph-corpus-operations)) |
+| Re-uploaded a grown `chat.db`, the graph still shows the old conversation | The workdir manifest was edited or lost its record — never hand-edit it; `reingest=true` rebuilds from scratch ([above](#graph-corpus-operations)) |
+| `POST /api/graph/build` answers 409 / 403 | One build at a time (`409 graph_build_running`), or `GRAPH_ENABLED=false` (`403 graph_disabled`) |
+| A graph question answered from documents (`graph → documents` badge) | The graph degraded — kill switch off, or the session wouldn't open; check the `api` logs for `GraphUnavailable` |
+| `/graph` says "Nothing extracted yet" after a build | The build ran bounded, or against a different `GRAPH_STORAGE_PATH` (host-mode overrides — [above](#graph-corpus-operations)) |
+| Grafana's Graph corpus row is empty | Nothing extracted yet (no samples ≠ 0), or the api is reading another workdir — compare with `GET /api/graph/status` |
 | Flow runs missing from the Prefect UI (host run) | `PREFECT_API_URL` not set for the process — pass the localhost override |
 | Prefect flow-run panels read 0 with the exporter up | The exporter only reports runs started within `OFFSET_MINUTES` (compose sets 1440; the image default of 3 reads 0 between runs) — check the container's env ([above](#the-optional-exporter-profiles)) |
 | Exporter gone after a plain `docker compose up -d`/`down` | Profiles are not sticky — set `COMPOSE_PROFILES` in `.env` ([above](#the-optional-exporter-profiles)) |

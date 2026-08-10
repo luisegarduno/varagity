@@ -11,6 +11,7 @@ which question:
 | | Source | Survives an API restart? | Sees CLI ingests? |
 |---|---|---|---|
 | `varagity_corpus_*` gauges | pgvector, at scrape time | yes | yes |
+| `varagity_graph_*` gauges | the graph workdir's files, at scrape time | yes | n/a — [graph builds are API-only](../architecture.md#the-message-graph-graphrag) |
 | counters / histograms | this process | no | no ([ADR-007](../adr/ADR-007-observability-stack.md)) |
 
 Ingestion is rare and bursty, so `increase()`/`rate()` over an ingest
@@ -21,8 +22,16 @@ size is therefore a gauge question, not a counter question (spec_v3 §6.1;
 `tests/unit/test_dashboards.py` fails the build if a panel regresses to the
 counter form.
 
+Both gauge families emit **no samples at all** rather than zeros when
+their store has never answered — an unbuilt graph is not a graph with zero
+entities — and serve the last good snapshot through an outage, because a
+scrape that raises takes `/metrics` down including the metrics that are
+fine.
+
 ::: varagity.observability
 
 ::: varagity.observability.metrics
 
 ::: varagity.observability.corpus
+
+::: varagity.observability.graph

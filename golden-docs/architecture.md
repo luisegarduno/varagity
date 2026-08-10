@@ -8,9 +8,10 @@ web GUI — that ingest a corpus and answer questions with grounded, cited
 answers.
 
 This page describes the system **as built**. The forward-looking designs —
-`spec.md` (v1), `spec_v2.md` (v2), and `spec_v3.md` (v3), the documents the
-`§` references in docstrings point at — are untracked working papers under
-`thoughts/shared/specs/`.
+`spec.md` (v1), `spec_v2.md` (v2), `spec_v3.md` (v3), and the per-feature
+specs (`spec_graphrag.md` among them), the documents the `§` references in
+docstrings point at — are untracked working papers under
+`thoughts/shared/tasks/<feature-or-version>/`.
 
 ## Service topology
 
@@ -72,7 +73,7 @@ flowchart TB
 | `postgres` | `pgvector/pgvector:pg16` | Dense vectors + the canonical chunk metadata, plus the v2 conversation and settings tables (see [Data model](data-model.md)) | `5432` | — |
 | `elasticsearch` | `docker.elastic.co/elasticsearch/elasticsearch:9.2.0` | Contextual BM25 index (single-node, `yellow` by design) | `9200` (+ `9300`) | — |
 | `prefect` | `prefecthq/prefect:3-latest` | Flow/task run tracking; UI at `:4200`; SQLite backing store (ADR-003) | `4200` | — |
-| `api` | local `Dockerfile.api` (uv, single uvicorn worker) | FastAPI (`varagity/api/`): SSE chat streaming, conversation CRUD, corpus + settings routes, `/metrics`; invokes the Prefect flows in-process | `8000` | — |
+| `api` | local `Dockerfile.api` (uv, single uvicorn worker) | FastAPI (`varagity/api/`): SSE chat streaming, conversation CRUD, corpus + settings routes, the graph corpus/build/export routes, `/metrics`; invokes the Prefect flows in-process. Mounts `./graph-docs` (bind) and the `graphdata` volume — it is the graph's [single writer](#the-message-graph-graphrag) | `8000` | — |
 | `web` | local `web/Dockerfile` (`NEXT_PUBLIC_API_URL` baked at **build** time) | The Next.js GUI — the only browser-facing app surface; talks only to `api` | `3000` | — |
 | `prometheus` | `prom/prometheus:v3.13.1` | Scrapes `api:/metrics` every 15 s, plus the optional exporters | `${PROMETHEUS_PORT:-9090}` | — |
 | `grafana` | `grafana/grafana:12.3.8` | Dashboards-as-code: provisioned Prometheus datasource + Query/Ingestion/Infra dashboards; anonymous read-only viewing (dev posture) | `${GRAFANA_PORT:-3001}` → `3000` | — |
@@ -264,6 +265,8 @@ caller edits:
 | Chunking strategies | `varagity/chunking/base.py` | `CHUNKING_STRATEGY` | `recursive_character` (default — [ADR-008](adr/ADR-008-chunking-default.md)), `token_based`, `markdown_aware`, `semantic`, `docling_hybrid` |
 | Retrievers | `varagity/retrieval/base.py` | `RETRIEVAL_METHOD` | `semantic`, `bm25`, `hybrid` (default), `reranked`, `hyde` ([ADR-016](adr/ADR-016-hyde-retrieval.md)) |
 | Chat engines | `varagity/chat/base.py` | `CHAT_ENGINE` | `simple` (default — [ADR-011](adr/ADR-011-chat-engine-condense.md)), `condense_context` |
+| Message sources | `varagity/graph/sources/base.py` | structural dispatch (the parser shape — no config vocabulary) | `imessage` (a sniffed SQLite `chat.db`) |
+| Graph engines | `varagity/graph/base.py` | `GRAPH_ENGINE` | `lightrag` (default — [ADR-017](adr/ADR-017-graphrag-engine.md)) |
 | OCR engines | `varagity/ingest/parsers/pdf.py` (a factory, deliberately not a registry) | `OCR_ENGINE` | `easyocr` (default, ADR-004), `tesseract` |
 | Model clients | `varagity/models/registry.py` | `model_type` argument | `embedding`, `rerank`, `default` (+ `reasoning`/`tool` aliases) |
 
@@ -349,6 +352,80 @@ retrieval and logs it — and every generation failure degrades identically
 at `WARNING`. Matrix configs 6–7 (`hyde_contextual`,
 `hyde_rerank_contextual`) measure both forms.
 
+## The message graph (GraphRAG)
+
+The graph is a **peer corpus, not a sixth retriever**
+([ADR-017](adr/ADR-017-graphrag-engine.md); spec_graphrag). Chunk RAG answers
+"what do my documents say"; the graph answers "who, with whom, and when"
+over a structured message archive — an iMessage `chat.db` in v1 — where the
+unit of meaning is a conversation, not a page. Every chat turn carries which
+corpus it asked for (`ChatRequest.corpus`, the composer's source selector
+today and a query router's output later), and the two corpora share the
+transport, the evidence contract, and the answer prompt while sharing no
+storage at all.
+
+```mermaid
+flowchart LR
+    db[("graph-docs/<br/>chat.db + -wal/-shm")]
+
+    subgraph build["Graph build (resumable, API-only)"]
+        direction LR
+        scan["scan + parse<br/>(message sources)"] --> render["render<br/>thread-day transcripts"] --> diff["manifest diff<br/>new / changed / removed"] --> extract["enqueue → process<br/>(LLM entity extraction)"]
+    end
+
+    db --> scan
+    extract --> wd[("graphdata volume<br/>graphml + vectors +<br/>doc statuses + sidecars")]
+
+    subgraph gquery["Graph turn (corpus = graph)"]
+        direction LR
+        retrieve["retrieve<br/>entities · relations · transcript days"] --> answer["generate<br/>our prompt, our stream"]
+    end
+
+    question(["question"]) --> retrieve
+    wd --> retrieve
+    answer --> cited(["cited answer<br/>day-grain evidence"])
+```
+
+Four properties are the design:
+
+- **Retrieval-only engine, our answer.** The engine returns structured
+  evidence (entities, relations, cited transcript excerpts); the grounded,
+  capped, `<think>`-stripped answer is written by `varagity/graph/answer.py`
+  over the repo's own prompt — so a graph turn cites, streams, and degrades
+  like every other turn (ADR-017 decision 1). The evidence panel renders the
+  same "how this answer was built" contract, in the graph's units.
+- **One process is the single writer.** The engine's storages are
+  single-writer per working directory, so the API owns them:
+  `varagity/graph/service.py` holds the process's one session behind a
+  single-flight write lock, and **reads take no lock at all** — the session
+  runs its event loop on its own thread, so chat queries and the graph view
+  are answered *while a multi-day backfill is still extracting*. This is why
+  builds are API-only and there is deliberately **no CLI graph build**.
+- **Builds are resumable and diffing.** The engine's document statuses live
+  on disk, so a killed backfill resumes by pressing Build again. A workdir
+  sidecar manifest (`doc_key → {content hash, message guids, thread, span}`)
+  turns re-uploading a grown `chat.db` into an upsert — the engine's own
+  enqueue dedup would otherwise keep a stale transcript forever — and doubles
+  as the durable provenance index behind a citation.
+- **Evidence is day-grain, and says so.** The engine attributes a
+  conversation-day, not a single message; the panel's footer states that
+  rather than letting day cards read as message-grain proof.
+
+The eleventh storage surface is a compose volume: `graphdata`
+(`/app/graph-data`, api-only) holds the engine's graph, vectors, document
+statuses, and the two sidecars; `./graph-docs` is a **host bind** holding the
+uploaded archives, so a `docker volume rm varagity_graphdata` throws the
+graph away and keeps its sources. Operations — upload, build, kill, resume,
+bounded backfills, reset — are in the
+[runbook](runbook.md#graph-corpus-operations); the flows are in
+[Pipelines](pipelines.md#the-graph-flows-graph-build-graph-query-stream); the
+on-disk shapes are in the [data model](data-model.md#the-graph-workdir).
+
+`GRAPH_ENABLED=false` is the subsystem's kill switch in the shape
+`RERANK_ENABLED` established: uploading, building, and reading the graph
+become a structured `403 graph_disabled`, and a graph-targeted turn degrades
+to a document answer — reported on the turn, never silently.
+
 ## The codebase map
 
 This page explains Varagity in prose and Mermaid fragments; the web GUI also
@@ -405,18 +482,29 @@ varagity/
 ├── retrieval/            # semantic.py, bm25.py (+ hydrate), hybrid.py, reranked.py, hyde.py
 ├── chat/                 # chat-engine registry (ADR-011): base.py (PreparedQuery, Turn),
 │                         #   simple.py, condense.py + prompts.py
+├── graph/                # the peer message-graph corpus (ADR-017)
+│   ├── sources/          #   message-source registry — imessage.py (sniffed chat.db)
+│   ├── render.py         #   messages → thread-day transcripts (pure; the diff rests on it)
+│   ├── base.py, records.py  # engine seam + engine-independent records
+│   ├── engines/lightrag.py  # the adapter (imports the library inside session())
+│   ├── manifest.py       #   workdir sidecars: build diff + durable provenance + size cache
+│   ├── service.py        #   the process's one session; single-flight writes, unlocked reads
+│   └── answer.py         #   our grounded answer over the engine's evidence
 ├── preview/              # evidence-panel page previews (ADR-010): normalize, locate
 │                         #   (pdfium, one global lock), render, source gate, pptx→pdf
 ├── generation/           # answer.py — context prompt + grounded generation + QueryState
 ├── pipeline/             # Prefect flows: ingest, query, query-stream, eval (thin @task adapters)
 ├── observability/        # metrics.py (the Prometheus collector catalog, spec_v2 §6.2)
 │                         #   + corpus.py (store-derived corpus gauges — ADR-013)
+│                         #   + graph.py (workdir-derived graph gauges, same shape)
 ├── api/                  # the FastAPI front-end (spec_v2 §4)
 │   ├── main.py           # app factory + lifespan (migrations, override replay)
-│   ├── routes/           # system, conversations, chat, settings, documents, ingest, metrics
+│   ├── routes/           # system, conversations, groups, chat, settings, documents,
+│   │                     #   ingest, graph, metrics
 │   ├── schemas.py        # the wire contract (REST + SSE payloads → generated TS types)
 │   ├── streaming.py      # EventBridge — sync flow callbacks → SSE frames
 │   ├── ingest_runner.py  # one-at-a-time background ingest + status stream replay
+│   ├── graph_runner.py   # the same shape for graph builds (resumable, killable)
 │   └── runtime_settings.py, deps.py
 ├── eval/                 # golden set, 7-config matrix, chunker sweep, OCR benchmark, testcontainers
 ├── cli/                  # argparse subcommands: ingest / chat / eval [ocr]

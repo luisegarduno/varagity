@@ -7,8 +7,11 @@ iMessage `chat.db` in v1) become a knowledge graph with per-message
 provenance.
 
 Stage 1 shipped the engine-independent foundations plus the bake-off
-harness that decided the engine; stage 2 productionizes the winner. The
-API routes, query path, and web surfaces are the remaining phases.
+harness that decided the engine; **stage 2 productionized the winner** —
+the resumable build behind [API routes](api.md), the
+[graph query path](pipeline.md), the web surfaces (Corpus tab, source
+selector, evidence, and the `/graph` view), and the workdir-derived
+[gauges](observability.md).
 
 - **Message sources** are a registry family chosen by **structural
   dispatch** — a file goes to the first source whose `matches()` accepts

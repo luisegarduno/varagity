@@ -97,9 +97,20 @@ pass "/api/health reports all dependencies reachable"
 curl -fsS "http://localhost:${API_PORT:-8000}/openapi.json" >/dev/null \
     || fail "api /openapi.json not OK"
 pass "/openapi.json served"
-curl -fsS "http://localhost:${API_PORT:-8000}/metrics" | grep -q '^varagity_' \
+metrics_text=$(curl -fsS "http://localhost:${API_PORT:-8000}/metrics") \
+    || fail "api /metrics not reachable"
+echo "$metrics_text" | grep -q '^varagity_' \
     || fail "api /metrics missing varagity_* families (METRICS_ENABLED=false?)"
 pass "/metrics exposes the varagity_* catalog"
+# The store-derived gauges are collectors, not counters: they are registered
+# only when METRICS_ENABLED, and their families are declared even when there
+# is nothing to sample — so the TYPE line is the honest check on a stack
+# whose graph has not been built yet.
+echo "$metrics_text" | grep -q '^# TYPE varagity_corpus_' \
+    || fail "/metrics missing the varagity_corpus_* gauges (collector not registered?)"
+echo "$metrics_text" | grep -q '^# TYPE varagity_graph_' \
+    || fail "/metrics missing the varagity_graph_* gauges (collector not registered?)"
+pass "/metrics exposes the store-derived corpus + graph gauges"
 
 echo "[8/11] graph corpus"
 # The graph subsystem answers even with nothing built: `enabled` reports the

@@ -58,6 +58,7 @@ from varagity.api.schemas import (
 from varagity.config import get_settings
 from varagity.logging_setup import setup_logging
 from varagity.observability.corpus import register_corpus_collector
+from varagity.observability.graph import register_graph_collector
 from varagity.stores.app_settings_store import AppSettingsStore
 from varagity.stores.migrate import run_migrations
 from varagity.stores.vector_store import default_conninfo
@@ -385,9 +386,11 @@ def create_app() -> FastAPI:
     app.include_router(ingest.router)
     app.include_router(graph.router)
     if settings.METRICS_ENABLED:
-        # The corpus gauges are collected at scrape time, so they only need
-        # to exist when something can scrape them (spec_v3 §6.1a).
+        # The corpus and graph gauges are collected at scrape time, so they
+        # only need to exist when something can scrape them (spec_v3 §6.1a;
+        # spec_graphrag §6). Neither touches its store on registration.
         register_corpus_collector()
+        register_graph_collector()
         app.include_router(metrics.router)
     _install_sse_event_schemas(app)
     return app
