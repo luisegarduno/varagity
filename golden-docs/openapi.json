@@ -3448,7 +3448,7 @@
     },
     "/api/graph/export": {
       "get": {
-        "description": "Read a drawable slice of the graph (spec_graphrag \u00a74.4).\n\nThe graph view's whole data source. The default is the *whole* graph,\ndegree-ordered so the cap keeps the most connected entities, and\n``truncated`` says when the cap bit \u2014 the view surfaces that rather than\nimplying it drew everything.\n\nArgs:\n    service: The process-wide graph service.\n    label: Entity name to centre the slice on; ``\"*\"`` (the default)\n        takes the whole graph.\n    max_depth: Hops to walk out from ``label`` (ignored for ``\"*\"``).\n    max_nodes: Node cap, ceiling :data:`MAX_EXPORT_NODES`. Above it the\n        request is a ``422`` rather than a silent clamp: a caller asking\n        for more than the view can render should hear so.\n\nReturns:\n    The slice; empty (not an error) when nothing has been indexed yet.\n\nRaises:\n    HTTPException: ``403 graph_disabled`` when the kill switch is off;\n        ``503 graph_unavailable`` when the engine will not open.",
+        "description": "Read a drawable slice of the graph (spec_graphrag \u00a74.4).\n\nThe graph view's whole data source. The default is the *whole* graph,\ndegree-ordered so the cap keeps the most connected entities, and\n``truncated`` says when the cap bit \u2014 the view surfaces that rather than\nimplying it drew everything.\n\nArgs:\n    service: The process-wide graph service.\n    label: Entity name to centre the slice on; ``\"*\"`` (the default)\n        takes the whole graph.\n    max_depth: Hops to walk out from ``label`` (ignored for ``\"*\"``).\n    max_nodes: Node cap, defaulting to its own ceiling\n        :data:`MAX_EXPORT_NODES` (the view draws the fullest slice the\n        contract allows). Above it the request is a ``422`` rather than\n        a silent clamp: a caller asking for more than the view can\n        render should hear so.\n\nReturns:\n    The slice; empty (not an error) when nothing has been indexed yet.\n\nRaises:\n    HTTPException: ``403 graph_disabled`` when the kill switch is off;\n        ``503 graph_unavailable`` when the engine will not open.",
         "operationId": "export_graph_api_graph_export_get",
         "parameters": [
           {
@@ -3478,8 +3478,8 @@
             "name": "max_nodes",
             "required": false,
             "schema": {
-              "default": 1000,
-              "maximum": 2000,
+              "default": 5000,
+              "maximum": 5000,
               "minimum": 1,
               "title": "Max Nodes",
               "type": "integer"

@@ -870,9 +870,11 @@ export interface paths {
          *         label: Entity name to centre the slice on; ``"*"`` (the default)
          *             takes the whole graph.
          *         max_depth: Hops to walk out from ``label`` (ignored for ``"*"``).
-         *         max_nodes: Node cap, ceiling :data:`MAX_EXPORT_NODES`. Above it the
-         *             request is a ``422`` rather than a silent clamp: a caller asking
-         *             for more than the view can render should hear so.
+         *         max_nodes: Node cap, defaulting to its own ceiling
+         *             :data:`MAX_EXPORT_NODES` (the view draws the fullest slice the
+         *             contract allows). Above it the request is a ``422`` rather than
+         *             a silent clamp: a caller asking for more than the view can
+         *             render should hear so.
          *
          *     Returns:
          *         The slice; empty (not an error) when nothing has been indexed yet.
@@ -907,8 +909,10 @@ export interface paths {
          *     transcript days it was extracted from.
          *
          *     Args:
-         *         name: The entity's canonical name (path-encoded; extracted names may
-         *             contain slashes).
+         *         name: The entity's name (path-encoded; extracted names may contain
+         *             slashes). Canonical spelling resolves directly; any other casing
+         *             resolves through a whole-graph lookup, because the engine's own
+         *             label match is exact.
          *         service: The process-wide graph service.
          *
          *     Returns:

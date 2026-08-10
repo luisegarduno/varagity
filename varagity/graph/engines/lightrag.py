@@ -219,6 +219,12 @@ _ENV_PINS: dict[str, str] = {
     "LIGHTRAG_VECTOR_STORAGE": "NanoVectorDBStorage",
     "LIGHTRAG_GRAPH_STORAGE": "NetworkXStorage",
     "LIGHTRAG_DOC_STATUS_STORAGE": "JsonDocStatusStorage",
+    # The engine clamps every `get_knowledge_graph` slice to MAX_GRAPH_NODES,
+    # read once at import into a dataclass field default. Its own 1000 would
+    # silently re-truncate the API's raised export ceiling
+    # (`varagity.api.routes.graph.MAX_EXPORT_NODES`, 5000 — a regression
+    # test pins the two together).
+    "MAX_GRAPH_NODES": "5000",
 }
 
 
@@ -798,7 +804,7 @@ class _LightRAGSession:
         label: str = _ALL_NODES_LABEL,
         *,
         max_depth: int = 3,
-        max_nodes: int = 1000,
+        max_nodes: int = 5000,
     ) -> GraphExport:
         """Read a renderable slice of the graph out of the engine.
 

@@ -167,7 +167,7 @@ class GraphSession(Protocol):
         label: str = "*",
         *,
         max_depth: int = 3,
-        max_nodes: int = 1000,
+        max_nodes: int = 5000,
     ) -> GraphExport:
         """Read a renderable slice of the graph.
 

@@ -80,7 +80,7 @@ class FakeService:
     def workdir(self) -> Path:
         return self._workdir
 
-    def export(self, label: str = "*", *, max_depth: int = 3, max_nodes: int = 1000) -> GraphExport:
+    def export(self, label: str = "*", *, max_depth: int = 3, max_nodes: int = 5000) -> GraphExport:
         self.exports.append((label, max_depth, max_nodes))
         if self.export_raise is not None:
             raise self.export_raise
@@ -1060,7 +1060,7 @@ class TestExportRoute:
         assert body["nodes"][0]["degree"] == 2
         assert len(body["edges"]) == 2
         assert body["truncated"] is False
-        assert service.exports == [("*", 3, 1000)]
+        assert service.exports == [("*", 3, 5000)]
 
     async def test_provenance_keys_stay_off_the_export_wire(
         self, graph_root: Path, tmp_path: Path
@@ -1096,7 +1096,7 @@ class TestExportRoute:
         """★ A caller asking for more than the view renders should hear so."""
         service = FakeService(built_workdir(tmp_path), graph=sample_graph())
         response = await request(
-            make_app(service=service), "GET", "/api/graph/export?max_nodes=2001"
+            make_app(service=service), "GET", "/api/graph/export?max_nodes=5001"
         )
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "validation_error"
@@ -1111,6 +1111,18 @@ class TestExportRoute:
         assert response.status_code == 200
         assert response.json() == {"nodes": [], "edges": [], "truncated": False}
         assert service.exports == []
+
+    def test_the_ceiling_fits_the_engines_import_time_clamp(self) -> None:
+        """★ A ceiling above the engine's import-time clamp is a silent lie.
+
+        The engine caps every get_knowledge_graph slice at MAX_GRAPH_NODES
+        (read once at import), so an API ceiling above the adapter's pin
+        would re-truncate exports while claiming the higher number.
+        """
+        from varagity.api.routes.graph import MAX_EXPORT_NODES
+        from varagity.graph.engines.lightrag import _ENV_PINS
+
+        assert int(_ENV_PINS["MAX_GRAPH_NODES"]) >= MAX_EXPORT_NODES
 
     async def test_an_unopenable_engine_is_a_structured_503(
         self, graph_root: Path, tmp_path: Path
@@ -1148,7 +1160,7 @@ class TestEntityDetailRoute:
         assert body["entity"]["description"] == "Bob talks about keyboards."
         # Only the edges that touch it — "Jane-Keyboard" is a neighbour's edge.
         assert [edge["id"] for edge in body["relations"]] == ["Bob Nakamura-Keyboard"]
-        assert service.exports == [("Bob Nakamura", 1, 2000)]
+        assert service.exports == [("Bob Nakamura", 1, 5000)]
 
     async def test_source_days_resolve_through_the_manifest(
         self, graph_root: Path, tmp_path: Path
@@ -1189,9 +1201,9 @@ class TestEntityDetailRoute:
         assert response.json()["entity"]["id"] == "Bob Nakamura"
         # Exact slice (empty) → whole-graph lookup → canonical re-slice.
         assert service.exports == [
-            ("bob nakamura", 1, 2000),
-            ("*", 1, 2000),
-            ("Bob Nakamura", 1, 2000),
+            ("bob nakamura", 1, 5000),
+            ("*", 1, 5000),
+            ("Bob Nakamura", 1, 5000),
         ]
 
     async def test_an_unknown_entity_is_a_structured_404(

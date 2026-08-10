@@ -88,11 +88,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["graph"])
 
-# The graph view's ceiling (stage-2 decision #19). 10 001 messages measured
-# 347 entities, so 2 000 is headroom rather than a limit in practice — but a
-# browser asked to lay out an unbounded WebGL graph is a hung tab, and the
-# honest answer to "more than this" is `truncated`, not a slow page.
-MAX_EXPORT_NODES = 2000
+# The graph view's ceiling (stage-2 decision #19; raised 2026-08-10). The
+# decision sized it from the eval corpus (347 entities per 10k messages);
+# the real archive's graph outgrew the old 1 000-node default slice, so the
+# owner raised the drawn slice to 5 000. Still finite on purpose: a browser
+# asked to lay out an unbounded WebGL graph is a hung tab, and the honest
+# answer to "more than this" is `truncated`, not a slow page. The engine
+# clamps every slice to its import-time `MAX_GRAPH_NODES`, so the adapter
+# pins that at least this high (a regression test holds the two together).
+MAX_EXPORT_NODES = 5000
 
 # Whole-graph selector (the engine's own convention, mirrored on the wire).
 _WHOLE_GRAPH = "*"
@@ -565,7 +569,7 @@ def export_graph(
     service: ServiceDep,
     label: str = _WHOLE_GRAPH,
     max_depth: Annotated[int, Query(ge=1, le=_MAX_EXPORT_DEPTH)] = 3,
-    max_nodes: Annotated[int, Query(ge=1, le=MAX_EXPORT_NODES)] = 1000,
+    max_nodes: Annotated[int, Query(ge=1, le=MAX_EXPORT_NODES)] = MAX_EXPORT_NODES,
 ) -> GraphExportOut:
     """Read a drawable slice of the graph (spec_graphrag §4.4).
 
@@ -579,9 +583,11 @@ def export_graph(
         label: Entity name to centre the slice on; ``"*"`` (the default)
             takes the whole graph.
         max_depth: Hops to walk out from ``label`` (ignored for ``"*"``).
-        max_nodes: Node cap, ceiling :data:`MAX_EXPORT_NODES`. Above it the
-            request is a ``422`` rather than a silent clamp: a caller asking
-            for more than the view can render should hear so.
+        max_nodes: Node cap, defaulting to its own ceiling
+            :data:`MAX_EXPORT_NODES` (the view draws the fullest slice the
+            contract allows). Above it the request is a ``422`` rather than
+            a silent clamp: a caller asking for more than the view can
+            render should hear so.
 
     Returns:
         The slice; empty (not an error) when nothing has been indexed yet.

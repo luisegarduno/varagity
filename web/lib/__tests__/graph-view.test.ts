@@ -120,7 +120,7 @@ describe("parseMaxNodes", () => {
   });
 
   it("clamps into the server's accepted range — never a 422 from a URL", () => {
-    expect(parseMaxNodes("5000")).toBe(MAX_EXPORT_NODES);
+    expect(parseMaxNodes("99999")).toBe(MAX_EXPORT_NODES);
     expect(parseMaxNodes("0")).toBe(1);
     expect(parseMaxNodes("-3")).toBe(1);
   });

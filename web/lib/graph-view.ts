@@ -71,15 +71,16 @@ export interface GraphViewModel {
 export const UNTYPED = "untyped";
 
 /**
- * How many nodes the view asks for by default. The server's ceiling is
- * 2000; 1000 is the default because 10 001 messages measured 347 entities,
- * so this is headroom rather than a limit — and `truncated` tells the truth
- * when it ever does bite.
+ * How many nodes the view asks for by default — the server's full ceiling:
+ * the real archive's graph outgrew the old 1000-node slice (the 347-entity
+ * eval-corpus measurement it was sized from), so the view now draws the
+ * fullest slice the contract allows and `truncated` tells the truth when
+ * even that bites.
  */
-export const DEFAULT_MAX_NODES = 1000;
+export const DEFAULT_MAX_NODES = 5000;
 
 /** The server's export ceiling — above it the API answers `422`. */
-export const MAX_EXPORT_NODES = 2000;
+export const MAX_EXPORT_NODES = 5000;
 
 /**
  * Parse the `?max_nodes=` URL override.
