@@ -6,7 +6,7 @@
       "kind": "entry",
       "sub": "web/ · :3000",
       "sourceRef": "web/app/map/page.tsx",
-      "detail": "SSE chat with an evidence panel showing how each answer was built, corpus manager, live settings drawer, command palette, and a /map architecture map behind developer mode."
+      "detail": "SSE chat with an evidence panel, corpus manager, live settings drawer, command palette, a sigma.js /graph view of the message graph, and a /map architecture map behind developer mode."
     },
     {
       "id": "cli",
@@ -91,10 +91,10 @@
       "id": "retrievers",
       "label": "Retriever registry",
       "kind": "service",
-      "sub": "semantic·bm25·hybrid·reranked",
+      "sub": "semantic·bm25·hybrid·reranked·hyde",
       "group": "Query path",
       "sourceRef": "varagity/retrieval/hybrid.py:125",
-      "detail": "hybrid fuses both arms (0.8 dense / 0.2 BM25) and hydrates rows from pgvector; reranked composes a base retriever (over-fetch, cross-encode, keep 5) rather than forking fusion."
+      "detail": "hybrid fuses both arms (0.8 dense / 0.2 BM25) and hydrates rows from pgvector; reranked composes a base retriever (over-fetch, cross-encode, keep 5); hyde drafts a passage for the dense arm (ADR-016)."
     },
     {
       "id": "answerer",
@@ -117,9 +117,54 @@
       "id": "eval",
       "label": "Eval harness",
       "kind": "service",
-      "sub": "retrieval · ocr · chat",
+      "sub": "retrieval · ocr · chat · graph",
       "sourceRef": "varagity/eval/evaluate.py",
-      "detail": "Retrieval matrix, chunker sweep, OCR benchmark and multi-turn chat eval against golden datasets — defaults here are benchmark-decided (ADR-004, ADR-011)."
+      "detail": "Retrieval matrix, chunker sweep, OCR benchmark, multi-turn chat and graph-engine evals against golden datasets — defaults here are benchmark-decided (ADR-004, ADR-011, ADR-017)."
+    },
+    {
+      "id": "graph-build",
+      "label": "Graph build flow",
+      "kind": "service",
+      "sub": "Prefect · extract→upsert",
+      "group": "Graph corpus",
+      "sourceRef": "varagity/pipeline/graph_flow.py:85",
+      "detail": "Resumable, API-only build — the API process is the graph's single writer (GraphService, single-flight). The manifest's content hash per doc_key turns re-exports into delete-then-reinsert."
+    },
+    {
+      "id": "msg-sources",
+      "label": "Message sources",
+      "kind": "service",
+      "sub": "imessage · structural dispatch",
+      "group": "Graph corpus",
+      "sourceRef": "varagity/graph/sources/imessage.py:96",
+      "detail": "A registry chosen by sniffing the bytes (matches()), not config: an iMessage chat.db becomes thread-day transcripts keyed doc_key = {thread_id}::{day-span}."
+    },
+    {
+      "id": "graph-engine",
+      "label": "Graph engine registry",
+      "kind": "agent",
+      "sub": "lightrag · retrieval-only",
+      "group": "Graph corpus",
+      "sourceRef": "varagity/graph/engines/lightrag.py:503",
+      "detail": "LightRAG extracts entities/relations with the chat LLM + e5, and retrieves via aquery_data — the repo writes the answers (ADR-017). Import-light: lightrag loads only inside session()."
+    },
+    {
+      "id": "graph-qflow",
+      "label": "Graph query flow",
+      "kind": "service",
+      "sub": "Prefect · retrieve→answer",
+      "group": "Graph corpus",
+      "sourceRef": "varagity/pipeline/graph_flow.py:191",
+      "detail": "A chat turn targets the graph via ChatRequest.corpus — same condense, SSE protocol and evidence panel as chunk RAG. GRAPH_ENABLED=false degrades it to a document answer, labelled."
+    },
+    {
+      "id": "graph-answerer",
+      "label": "Graph answerer",
+      "kind": "agent",
+      "sub": "grounded + cited",
+      "group": "Graph corpus",
+      "sourceRef": "varagity/graph/answer.py",
+      "detail": "Streams an answer grounded in graph facts + transcript excerpts; citations are bracket-form [SOURCE: doc_key] only — line-initial capture breaks on graph labels."
     },
     {
       "id": "pg",
@@ -145,12 +190,34 @@
       "detail": "The gitignored RAG input corpus on disk — a bind mount shared by CLI and API so both agree on the corpus."
     },
     {
+      "id": "graph-docs",
+      "label": "graph-docs/ archives",
+      "kind": "store",
+      "sub": "chat.db bind mount",
+      "detail": "The gitignored message-archive input (iMessage chat.db exports), bind-mounted into the api container only."
+    },
+    {
+      "id": "graph-data",
+      "label": "Graph workdir",
+      "kind": "store",
+      "sub": "graphdata volume · files",
+      "detail": "The extracted graph as files, never Postgres: LightRAG storages plus varagity_manifest.json (the diff key) and the summary sidecar the status route and gauges read. Lock-free reads."
+    },
+    {
       "id": "docling",
       "label": "Docling",
       "kind": "external",
       "domain": "github.com",
       "sub": "layout-aware conversion",
       "detail": "IBM's layout-aware document converter (PDF, office, HTML); also backs the docling_hybrid chunker. Layout/table models download on first use."
+    },
+    {
+      "id": "lightrag",
+      "label": "LightRAG",
+      "kind": "external",
+      "domain": "github.com",
+      "sub": "graph index + retrieval",
+      "detail": "HKUDS/LightRAG, the ADR-017 bake-off winner over cognee and Graphiti; storages are single-writer per workdir, and close() must reset its process-global shared dicts."
     },
     {
       "id": "ocr",
@@ -362,6 +429,82 @@
       "label": "5-config matrix"
     },
     {
+      "from": "api",
+      "to": "graph-build",
+      "kind": "triggers",
+      "label": "POST /api/graph/build"
+    },
+    {
+      "from": "graph-build",
+      "to": "graph-docs",
+      "kind": "reads",
+      "label": "changed doc_keys only"
+    },
+    {
+      "from": "graph-build",
+      "to": "msg-sources",
+      "kind": "calls",
+      "label": "sniff + extract"
+    },
+    {
+      "from": "graph-build",
+      "to": "graph-engine",
+      "kind": "calls",
+      "label": "enqueue + process"
+    },
+    {
+      "from": "graph-build",
+      "to": "prefect",
+      "kind": "writes",
+      "label": "task runs"
+    },
+    {
+      "from": "graph-engine",
+      "to": "lightrag",
+      "kind": "calls"
+    },
+    {
+      "from": "graph-engine",
+      "to": "graph-data",
+      "kind": "writes",
+      "label": "graphml + manifest"
+    },
+    {
+      "from": "api",
+      "to": "graph-qflow",
+      "kind": "triggers",
+      "label": "corpus=graph turns"
+    },
+    {
+      "from": "condenser",
+      "to": "graph-qflow",
+      "kind": "triggers",
+      "label": "standalone query"
+    },
+    {
+      "from": "graph-qflow",
+      "to": "graph-engine",
+      "kind": "calls",
+      "label": "aquery_data (mix)"
+    },
+    {
+      "from": "graph-qflow",
+      "to": "graph-answerer",
+      "kind": "calls"
+    },
+    {
+      "from": "graph-qflow",
+      "to": "prefect",
+      "kind": "writes",
+      "label": "task runs"
+    },
+    {
+      "from": "api",
+      "to": "graph-engine",
+      "kind": "reads",
+      "label": "/graph export"
+    },
+    {
       "from": "prom",
       "to": "api",
       "kind": "reads",
@@ -389,8 +532,8 @@
     [
       "web",
       {
-        "x": 22,
-        "y": 978,
+        "x": 48,
+        "y": 1142,
         "w": 229,
         "h": 56
       }
@@ -398,8 +541,8 @@
     [
       "cli",
       {
-        "x": 60,
-        "y": 579.5,
+        "x": 48,
+        "y": 766,
         "w": 229,
         "h": 56
       }
@@ -407,17 +550,17 @@
     [
       "api",
       {
-        "x": 475,
-        "y": 242.5,
-        "w": 243,
+        "x": 715,
+        "y": 426,
+        "w": 250,
         "h": 56
       }
     ],
     [
       "preview",
       {
-        "x": 775,
-        "y": 1149.5,
+        "x": 837,
+        "y": 1361.5,
         "w": 222,
         "h": 56
       }
@@ -425,8 +568,8 @@
     [
       "eval",
       {
-        "x": 475,
-        "y": 516.5,
+        "x": 713,
+        "y": 727.5,
         "w": 222,
         "h": 56
       }
@@ -434,8 +577,8 @@
     [
       "pg",
       {
-        "x": 1811,
-        "y": 462,
+        "x": 1825,
+        "y": 639.25,
         "w": 229,
         "h": 56
       }
@@ -443,8 +586,8 @@
     [
       "es",
       {
-        "x": 1795,
-        "y": 388,
+        "x": 1811,
+        "y": 1010.75,
         "w": 222,
         "h": 56
       }
@@ -452,17 +595,44 @@
     [
       "docsdir",
       {
-        "x": 1237,
-        "y": 1128.5,
+        "x": 1299,
+        "y": 1318.5,
         "w": 229,
+        "h": 56
+      }
+    ],
+    [
+      "graph-docs",
+      {
+        "x": 2873,
+        "y": 144,
+        "w": 215,
+        "h": 56
+      }
+    ],
+    [
+      "graph-data",
+      {
+        "x": 2855,
+        "y": 70,
+        "w": 215,
         "h": 56
       }
     ],
     [
       "docling",
       {
-        "x": 1291,
-        "y": 978,
+        "x": 1317,
+        "y": 1142,
+        "w": 215,
+        "h": 56
+      }
+    ],
+    [
+      "lightrag",
+      {
+        "x": 2677,
+        "y": 218,
         "w": 215,
         "h": 56
       }
@@ -470,8 +640,8 @@
     [
       "ocr",
       {
-        "x": 1273,
-        "y": 789,
+        "x": 1299,
+        "y": 1010.75,
         "w": 215,
         "h": 56
       }
@@ -479,17 +649,17 @@
     [
       "prefect",
       {
-        "x": 1799,
-        "y": 314,
-        "w": 229,
+        "x": 2729,
+        "y": 846.5,
+        "w": 243,
         "h": 56
       }
     ],
     [
       "corpus",
       {
-        "x": 520.5,
-        "y": 649.5,
+        "x": 546.5,
+        "y": 889.5,
         "w": 229,
         "h": 56
       }
@@ -497,8 +667,8 @@
     [
       "ingest",
       {
-        "x": 510,
-        "y": 787.5,
+        "x": 536,
+        "y": 1027.5,
         "w": 250,
         "h": 92
       }
@@ -506,8 +676,8 @@
     [
       "parsers",
       {
-        "x": 698,
-        "y": 909.5,
+        "x": 724,
+        "y": 1149.5,
         "w": 229,
         "h": 56
       }
@@ -515,8 +685,8 @@
     [
       "chunkers",
       {
-        "x": 465,
-        "y": 909.5,
+        "x": 491,
+        "y": 1149.5,
         "w": 215,
         "h": 56
       }
@@ -524,8 +694,8 @@
     [
       "contextualizer",
       {
-        "x": 837.5,
-        "y": 995.5,
+        "x": 863.5,
+        "y": 1235.5,
         "w": 215,
         "h": 92
       }
@@ -533,8 +703,8 @@
     [
       "qflow",
       {
-        "x": 1172.1666666666667,
-        "y": 440.5,
+        "x": 1198.1666666666667,
+        "y": 668.25,
         "w": 250,
         "h": 56
       }
@@ -542,17 +712,17 @@
     [
       "condenser",
       {
-        "x": 1186.1666666666667,
-        "y": 266.5,
-        "w": 222,
+        "x": 1208.6666666666667,
+        "y": 494.25,
+        "w": 229,
         "h": 92
       }
     ],
     [
       "retrievers",
       {
-        "x": 1141,
-        "y": 526.5,
+        "x": 1167,
+        "y": 754.25,
         "w": 229,
         "h": 116
       }
@@ -560,8 +730,53 @@
     [
       "answerer",
       {
-        "x": 1388,
-        "y": 526.5,
+        "x": 1414,
+        "y": 754.25,
+        "w": 215,
+        "h": 92
+      }
+    ],
+    [
+      "graph-build",
+      {
+        "x": 2260,
+        "y": 62,
+        "w": 243,
+        "h": 56
+      }
+    ],
+    [
+      "msg-sources",
+      {
+        "x": 2390,
+        "y": 270,
+        "w": 215,
+        "h": 56
+      }
+    ],
+    [
+      "graph-engine",
+      {
+        "x": 2129,
+        "y": 270,
+        "w": 243,
+        "h": 116
+      }
+    ],
+    [
+      "graph-qflow",
+      {
+        "x": 1883.5,
+        "y": 62,
+        "w": 243,
+        "h": 56
+      }
+    ],
+    [
+      "graph-answerer",
+      {
+        "x": 1857,
+        "y": 148,
         "w": 215,
         "h": 92
       }
@@ -570,7 +785,7 @@
       "prom",
       {
         "x": 32,
-        "y": 148,
+        "y": 371.5,
         "w": 229,
         "h": 56
       }
@@ -579,7 +794,7 @@
       "graf",
       {
         "x": 39,
-        "y": 62,
+        "y": 285.5,
         "w": 215,
         "h": 56
       }
@@ -588,7 +803,7 @@
       "pexp",
       {
         "x": 35.5,
-        "y": 286,
+        "y": 509.5,
         "w": 222,
         "h": 56
       }
@@ -598,24 +813,32 @@
     {
       "id": "group:0",
       "group": "Ingestion",
-      "x": 449,
-      "y": 603.5,
+      "x": 475,
+      "y": 843.5,
       "w": 619.5,
       "h": 500
     },
     {
       "id": "group:1",
       "group": "Query path",
-      "x": 1125,
-      "y": 220.5,
+      "x": 1151,
+      "y": 448.25,
       "w": 494,
       "h": 438
     },
     {
       "id": "group:2",
+      "group": "Graph corpus",
+      "x": 1841,
+      "y": 16,
+      "w": 780,
+      "h": 386
+    },
+    {
+      "id": "group:3",
       "group": "Observability",
       "x": 16,
-      "y": 16,
+      "y": 239.5,
       "w": 261,
       "h": 342
     }
@@ -630,17 +853,17 @@
       ],
       "points": [
         {
-          "x": 635,
-          "y": 705.5
+          "x": 661,
+          "y": 945.5
         },
         {
-          "x": 635,
-          "y": 787.5
+          "x": 661,
+          "y": 1027.5
         }
       ],
       "labelPos": {
-        "x": 591,
-        "y": 746.5
+        "x": 617,
+        "y": 986.5
       }
     },
     {
@@ -651,20 +874,20 @@
       ],
       "points": [
         {
-          "x": 635,
-          "y": 879.5
+          "x": 661,
+          "y": 1119.5
         },
         {
-          "x": 635,
-          "y": 899.5
+          "x": 661,
+          "y": 1139.5
         },
         {
-          "x": 812.5,
-          "y": 899.5
+          "x": 838.5,
+          "y": 1139.5
         },
         {
-          "x": 812.5,
-          "y": 909.5
+          "x": 838.5,
+          "y": 1149.5
         }
       ]
     },
@@ -676,12 +899,12 @@
       ],
       "points": [
         {
-          "x": 572.5,
-          "y": 879.5
+          "x": 598.5,
+          "y": 1119.5
         },
         {
-          "x": 572.5,
-          "y": 909.5
+          "x": 598.5,
+          "y": 1149.5
         }
       ]
     },
@@ -694,25 +917,25 @@
       ],
       "points": [
         {
-          "x": 697.5,
-          "y": 879.5
+          "x": 723.5,
+          "y": 1119.5
         },
         {
-          "x": 697.5,
-          "y": 889.5
+          "x": 723.5,
+          "y": 1129.5
         },
         {
-          "x": 945,
-          "y": 889.5
+          "x": 971,
+          "y": 1129.5
         },
         {
-          "x": 945,
-          "y": 995.5
+          "x": 971,
+          "y": 1235.5
         }
       ],
       "labelPos": {
-        "x": 984,
-        "y": 937.5
+        "x": 1010,
+        "y": 1177.5
       }
     },
     {
@@ -724,17 +947,17 @@
       ],
       "points": [
         {
-          "x": 1297.1666666666667,
-          "y": 358.5
+          "x": 1323.1666666666667,
+          "y": 586.25
         },
         {
-          "x": 1297.1666666666667,
-          "y": 440.5
+          "x": 1323.1666666666667,
+          "y": 668.25
         }
       ],
       "labelPos": {
-        "x": 1238.1666666666667,
-        "y": 399.5
+        "x": 1264.1666666666667,
+        "y": 627.25
       }
     },
     {
@@ -745,12 +968,12 @@
       ],
       "points": [
         {
-          "x": 1255.5,
-          "y": 496.5
+          "x": 1281.5,
+          "y": 724.25
         },
         {
-          "x": 1255.5,
-          "y": 526.5
+          "x": 1281.5,
+          "y": 754.25
         }
       ]
     },
@@ -762,20 +985,127 @@
       ],
       "points": [
         {
-          "x": 1338.8333333333333,
-          "y": 496.5
+          "x": 1364.8333333333333,
+          "y": 724.25
         },
         {
-          "x": 1338.8333333333333,
-          "y": 506.5
+          "x": 1364.8333333333333,
+          "y": 734.25
         },
         {
-          "x": 1495.5,
-          "y": 506.5
+          "x": 1521.5,
+          "y": 734.25
         },
         {
-          "x": 1495.5,
-          "y": 526.5
+          "x": 1521.5,
+          "y": 754.25
+        }
+      ]
+    },
+    {
+      "from": "graph-build",
+      "to": "msg-sources",
+      "label": "sniff + extract",
+      "orig": [
+        30
+      ],
+      "points": [
+        {
+          "x": 2422,
+          "y": 118
+        },
+        {
+          "x": 2422,
+          "y": 128
+        },
+        {
+          "x": 2497.5,
+          "y": 128
+        },
+        {
+          "x": 2497.5,
+          "y": 270
+        }
+      ],
+      "labelPos": {
+        "x": 2441.5,
+        "y": 194
+      }
+    },
+    {
+      "from": "graph-build",
+      "to": "graph-engine",
+      "label": "enqueue + process",
+      "orig": [
+        31
+      ],
+      "points": [
+        {
+          "x": 2341,
+          "y": 118
+        },
+        {
+          "x": 2341,
+          "y": 250
+        },
+        {
+          "x": 2291,
+          "y": 250
+        },
+        {
+          "x": 2291,
+          "y": 270
+        }
+      ],
+      "labelPos": {
+        "x": 2279,
+        "y": 194
+      }
+    },
+    {
+      "from": "graph-qflow",
+      "to": "graph-engine",
+      "label": "aquery_data (mix)",
+      "orig": [
+        37
+      ],
+      "points": [
+        {
+          "x": 2045.5,
+          "y": 118
+        },
+        {
+          "x": 2045.5,
+          "y": 128
+        },
+        {
+          "x": 2210,
+          "y": 128
+        },
+        {
+          "x": 2210,
+          "y": 270
+        }
+      ],
+      "labelPos": {
+        "x": 2148,
+        "y": 194
+      }
+    },
+    {
+      "from": "graph-qflow",
+      "to": "graph-answerer",
+      "orig": [
+        38
+      ],
+      "points": [
+        {
+          "x": 1964.5,
+          "y": 118
+        },
+        {
+          "x": 1964.5,
+          "y": 148
         }
       ]
     },
@@ -783,16 +1113,16 @@
       "from": "graf",
       "to": "prom",
       "orig": [
-        29
+        42
       ],
       "points": [
         {
           "x": 146.5,
-          "y": 118
+          "y": 341.5
         },
         {
           "x": 146.5,
-          "y": 148
+          "y": 371.5
         }
       ]
     },
@@ -801,21 +1131,21 @@
       "to": "pexp",
       "label": "--profile",
       "orig": [
-        30
+        43
       ],
       "points": [
         {
           "x": 146.5,
-          "y": 204
+          "y": 427.5
         },
         {
           "x": 146.5,
-          "y": 286
+          "y": 509.5
         }
       ],
       "labelPos": {
         "x": 108.5,
-        "y": 245
+        "y": 468.5
       }
     },
     {
@@ -827,33 +1157,33 @@
       ],
       "points": [
         {
-          "x": 251,
-          "y": 1006
+          "x": 277,
+          "y": 1170
         },
         {
-          "x": 261,
-          "y": 1006
+          "x": 287,
+          "y": 1170
         },
         {
-          "x": 261,
-          "y": 853.5
+          "x": 287,
+          "y": 558.5
         },
         {
-          "x": 429,
-          "y": 853.5
+          "x": 669,
+          "y": 558.5
         },
         {
-          "x": 429,
-          "y": 270.5
+          "x": 669,
+          "y": 454
         },
         {
-          "x": 475,
-          "y": 270.5
+          "x": 715,
+          "y": 454
         }
       ],
       "labelPos": {
-        "x": 356,
-        "y": 870.75
+        "x": 370,
+        "y": 570.25
       }
     },
     {
@@ -865,33 +1195,33 @@
       ],
       "points": [
         {
-          "x": 289,
-          "y": 607.5
+          "x": 277,
+          "y": 794
         },
         {
-          "x": 333,
-          "y": 607.5
+          "x": 359,
+          "y": 794
         },
         {
-          "x": 333,
-          "y": 411
+          "x": 359,
+          "y": 627
         },
         {
-          "x": 894,
-          "y": 411
+          "x": 1105,
+          "y": 627
         },
         {
-          "x": 894,
-          "y": 439.5
+          "x": 1105,
+          "y": 667.25
         },
         {
-          "x": 1125,
-          "y": 439.5
+          "x": 1151,
+          "y": 667.25
         }
       ],
       "labelPos": {
-        "x": 841,
-        "y": 427
+        "x": 1052,
+        "y": 644.625
       }
     },
     {
@@ -903,33 +1233,33 @@
       ],
       "points": [
         {
-          "x": 289,
-          "y": 607.5
+          "x": 277,
+          "y": 794
         },
         {
-          "x": 333,
-          "y": 607.5
+          "x": 359,
+          "y": 794
         },
         {
-          "x": 333,
-          "y": 811.5
+          "x": 359,
+          "y": 1065.5
         },
         {
-          "x": 439,
-          "y": 811.5
+          "x": 429,
+          "y": 1065.5
         },
         {
-          "x": 439,
-          "y": 853.5
+          "x": 429,
+          "y": 1093.5
         },
         {
-          "x": 449,
-          "y": 853.5
+          "x": 475,
+          "y": 1093.5
         }
       ],
       "labelPos": {
-        "x": 368,
-        "y": 827.5
+        "x": 394,
+        "y": 1081.5
       }
     },
     {
@@ -941,25 +1271,25 @@
       ],
       "points": [
         {
-          "x": 289,
-          "y": 607.5
+          "x": 277,
+          "y": 794
         },
         {
-          "x": 333,
-          "y": 607.5
+          "x": 359,
+          "y": 794
         },
         {
-          "x": 333,
-          "y": 544.5
+          "x": 359,
+          "y": 755.5
         },
         {
-          "x": 475,
-          "y": 544.5
+          "x": 713,
+          "y": 755.5
         }
       ],
       "labelPos": {
-        "x": 382,
-        "y": 560.5
+        "x": 406,
+        "y": 771.5
       }
     },
     {
@@ -972,25 +1302,33 @@
       ],
       "points": [
         {
-          "x": 718,
-          "y": 270.5
+          "x": 965,
+          "y": 454
         },
         {
-          "x": 894,
-          "y": 270.5
+          "x": 975,
+          "y": 454
         },
         {
-          "x": 894,
-          "y": 439.5
+          "x": 975,
+          "y": 516.5
         },
         {
-          "x": 1125,
-          "y": 439.5
+          "x": 1105,
+          "y": 516.5
+        },
+        {
+          "x": 1105,
+          "y": 667.25
+        },
+        {
+          "x": 1151,
+          "y": 667.25
         }
       ],
       "labelPos": {
-        "x": 829,
-        "y": 286.5
+        "x": 1040,
+        "y": 534.125
       }
     },
     {
@@ -1002,33 +1340,33 @@
       ],
       "points": [
         {
-          "x": 1619,
-          "y": 439.5
+          "x": 1645,
+          "y": 667.25
         },
         {
           "x": 1665,
-          "y": 439.5
+          "y": 667.25
         },
         {
           "x": 1665,
-          "y": 608.5
+          "y": 708.5
         },
         {
-          "x": 1785,
-          "y": 608.5
+          "x": 1779,
+          "y": 708.5
         },
         {
-          "x": 1785,
-          "y": 490
+          "x": 1779,
+          "y": 667.25
         },
         {
-          "x": 1811,
-          "y": 490
+          "x": 1825,
+          "y": 667.25
         }
       ],
       "labelPos": {
-        "x": 1709,
-        "y": 624.5
+        "x": 1735,
+        "y": 724.5
       }
     },
     {
@@ -1040,33 +1378,33 @@
       ],
       "points": [
         {
-          "x": 1619,
-          "y": 439.5
+          "x": 1645,
+          "y": 667.25
         },
         {
           "x": 1665,
-          "y": 439.5
+          "y": 667.25
         },
         {
           "x": 1665,
-          "y": 476.5
+          "y": 1014
         },
         {
-          "x": 1775,
-          "y": 476.5
+          "x": 1765,
+          "y": 1014
         },
         {
-          "x": 1775,
-          "y": 416
+          "x": 1765,
+          "y": 1038.75
         },
         {
-          "x": 1795,
-          "y": 416
+          "x": 1811,
+          "y": 1038.75
         }
       ],
       "labelPos": {
         "x": 1715,
-        "y": 492.5
+        "y": 1033
       }
     },
     {
@@ -1078,33 +1416,41 @@
       ],
       "points": [
         {
-          "x": 718,
-          "y": 270.5
+          "x": 965,
+          "y": 454
         },
         {
-          "x": 728,
-          "y": 270.5
+          "x": 975,
+          "y": 454
         },
         {
-          "x": 728,
-          "y": 174.5
+          "x": 975,
+          "y": 386.5
         },
         {
-          "x": 1785,
-          "y": 174.5
+          "x": 1655,
+          "y": 386.5
         },
         {
-          "x": 1785,
-          "y": 490
+          "x": 1655,
+          "y": 470
         },
         {
-          "x": 1811,
-          "y": 490
+          "x": 1779,
+          "y": 470
+        },
+        {
+          "x": 1779,
+          "y": 667.25
+        },
+        {
+          "x": 1825,
+          "y": 667.25
         }
       ],
       "labelPos": {
-        "x": 814,
-        "y": 190.5
+        "x": 1097,
+        "y": 400.875
       }
     },
     {
@@ -1116,33 +1462,33 @@
       ],
       "points": [
         {
-          "x": 1619,
-          "y": 439.5
+          "x": 1645,
+          "y": 667.25
         },
         {
           "x": 1665,
-          "y": 439.5
+          "y": 667.25
         },
         {
           "x": 1665,
-          "y": 346
+          "y": 1225.5
         },
         {
-          "x": 1765,
-          "y": 346
+          "x": 2064,
+          "y": 1225.5
         },
         {
-          "x": 1765,
-          "y": 342
+          "x": 2064,
+          "y": 874.5
         },
         {
-          "x": 1799,
-          "y": 342
+          "x": 2729,
+          "y": 874.5
         }
       ],
       "labelPos": {
         "x": 1709,
-        "y": 362
+        "y": 1211.125
       }
     },
     {
@@ -1154,33 +1500,33 @@
       ],
       "points": [
         {
-          "x": 251,
-          "y": 1006
+          "x": 277,
+          "y": 1170
         },
         {
-          "x": 261,
-          "y": 1006
+          "x": 287,
+          "y": 1170
         },
         {
-          "x": 261,
-          "y": 895.5
+          "x": 287,
+          "y": 1107.5
         },
         {
-          "x": 439,
-          "y": 895.5
+          "x": 429,
+          "y": 1107.5
         },
         {
-          "x": 439,
-          "y": 853.5
+          "x": 429,
+          "y": 1093.5
         },
         {
-          "x": 449,
-          "y": 853.5
+          "x": 475,
+          "y": 1093.5
         }
       ],
       "labelPos": {
-        "x": 332,
-        "y": 912.75
+        "x": 358,
+        "y": 1119.25
       }
     },
     {
@@ -1193,33 +1539,33 @@
       ],
       "points": [
         {
-          "x": 1068.5,
-          "y": 853.5
+          "x": 1094.5,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 853.5
+          "x": 1105,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 1135.5
+          "x": 1105,
+          "y": 1325.5
         },
         {
-          "x": 1191,
-          "y": 1135.5
+          "x": 1253,
+          "y": 1325.5
         },
         {
-          "x": 1191,
-          "y": 1156.5
+          "x": 1253,
+          "y": 1346.5
         },
         {
-          "x": 1237,
-          "y": 1156.5
+          "x": 1299,
+          "y": 1346.5
         }
       ],
       "labelPos": {
-        "x": 1135,
-        "y": 1151.5
+        "x": 1197,
+        "y": 1341.5
       }
     },
     {
@@ -1231,25 +1577,25 @@
       ],
       "points": [
         {
-          "x": 1068.5,
-          "y": 853.5
+          "x": 1094.5,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 853.5
+          "x": 1105,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 1006
+          "x": 1105,
+          "y": 1170
         },
         {
-          "x": 1291,
-          "y": 1006
+          "x": 1317,
+          "y": 1170
         }
       ],
       "labelPos": {
-        "x": 1180,
-        "y": 1023.25
+        "x": 1206,
+        "y": 1181.75
       }
     },
     {
@@ -1261,25 +1607,25 @@
       ],
       "points": [
         {
-          "x": 1068.5,
-          "y": 853.5
+          "x": 1094.5,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 853.5
+          "x": 1105,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 817
+          "x": 1105,
+          "y": 1038.75
         },
         {
-          "x": 1273,
-          "y": 817
+          "x": 1299,
+          "y": 1038.75
         }
       ],
       "labelPos": {
-        "x": 1171,
-        "y": 833
+        "x": 1197,
+        "y": 1056.125
       }
     },
     {
@@ -1291,41 +1637,33 @@
       ],
       "points": [
         {
-          "x": 1068.5,
-          "y": 853.5
+          "x": 1094.5,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 853.5
+          "x": 1105,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 927
+          "x": 1105,
+          "y": 967.5
         },
         {
-          "x": 1621,
-          "y": 927
+          "x": 1779,
+          "y": 967.5
         },
         {
-          "x": 1621,
-          "y": 934.5
+          "x": 1779,
+          "y": 667.25
         },
         {
-          "x": 1785,
-          "y": 934.5
-        },
-        {
-          "x": 1785,
-          "y": 490
-        },
-        {
-          "x": 1811,
-          "y": 490
+          "x": 1825,
+          "y": 667.25
         }
       ],
       "labelPos": {
-        "x": 1686,
-        "y": 950.5
+        "x": 1206,
+        "y": 981.875
       }
     },
     {
@@ -1337,41 +1675,33 @@
       ],
       "points": [
         {
-          "x": 1068.5,
-          "y": 853.5
+          "x": 1094.5,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 853.5
+          "x": 1105,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 927
+          "x": 1105,
+          "y": 1087.5
         },
         {
-          "x": 1621,
-          "y": 927
+          "x": 1765,
+          "y": 1087.5
         },
         {
-          "x": 1621,
-          "y": 890
+          "x": 1765,
+          "y": 1038.75
         },
         {
-          "x": 1775,
-          "y": 890
-        },
-        {
-          "x": 1775,
-          "y": 416
-        },
-        {
-          "x": 1795,
-          "y": 416
+          "x": 1811,
+          "y": 1038.75
         }
       ],
       "labelPos": {
-        "x": 1698,
-        "y": 874
+        "x": 1218,
+        "y": 1104.875
       }
     },
     {
@@ -1383,33 +1713,33 @@
       ],
       "points": [
         {
-          "x": 1068.5,
-          "y": 853.5
+          "x": 1094.5,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 853.5
+          "x": 1105,
+          "y": 1093.5
         },
         {
-          "x": 1079,
-          "y": 728
+          "x": 1105,
+          "y": 1411.5
         },
         {
-          "x": 1765,
-          "y": 728
+          "x": 2064,
+          "y": 1411.5
         },
         {
-          "x": 1765,
-          "y": 342
+          "x": 2064,
+          "y": 874.5
         },
         {
-          "x": 1799,
-          "y": 342
+          "x": 2729,
+          "y": 874.5
         }
       ],
       "labelPos": {
-        "x": 1159,
-        "y": 744
+        "x": 1149,
+        "y": 1427.5
       }
     },
     {
@@ -1421,25 +1751,25 @@
       ],
       "points": [
         {
-          "x": 251,
-          "y": 1006
+          "x": 277,
+          "y": 1170
         },
         {
-          "x": 261,
-          "y": 1006
+          "x": 287,
+          "y": 1170
         },
         {
-          "x": 261,
-          "y": 1177.5
+          "x": 287,
+          "y": 1389.5
         },
         {
-          "x": 775,
-          "y": 1177.5
+          "x": 837,
+          "y": 1389.5
         }
       ],
       "labelPos": {
-        "x": 658,
-        "y": 1194.75
+        "x": 720,
+        "y": 1401.25
       }
     },
     {
@@ -1451,25 +1781,33 @@
       ],
       "points": [
         {
-          "x": 997,
-          "y": 1177.5
+          "x": 1059,
+          "y": 1389.5
         },
         {
-          "x": 1191,
-          "y": 1177.5
+          "x": 1069,
+          "y": 1389.5
         },
         {
-          "x": 1191,
-          "y": 1156.5
+          "x": 1069,
+          "y": 1367.5
         },
         {
-          "x": 1237,
-          "y": 1156.5
+          "x": 1253,
+          "y": 1367.5
+        },
+        {
+          "x": 1253,
+          "y": 1346.5
+        },
+        {
+          "x": 1299,
+          "y": 1346.5
         }
       ],
       "labelPos": {
-        "x": 1117,
-        "y": 1193.5
+        "x": 1179,
+        "y": 1383.5
       }
     },
     {
@@ -1481,101 +1819,311 @@
       ],
       "points": [
         {
-          "x": 697,
-          "y": 544.5
+          "x": 935,
+          "y": 755.5
         },
         {
-          "x": 894,
-          "y": 544.5
+          "x": 1105,
+          "y": 755.5
         },
         {
-          "x": 894,
-          "y": 439.5
+          "x": 1105,
+          "y": 667.25
         },
         {
-          "x": 1125,
-          "y": 439.5
+          "x": 1151,
+          "y": 667.25
         }
       ],
       "labelPos": {
-        "x": 832,
-        "y": 560.5
+        "x": 1043,
+        "y": 773.125
+      }
+    },
+    {
+      "from": "api",
+      "to": "group:2",
+      "label": "POST /api/graph/build",
+      "orig": [
+        28,
+        35,
+        40
+      ],
+      "points": [
+        {
+          "x": 965,
+          "y": 454
+        },
+        {
+          "x": 975,
+          "y": 454
+        },
+        {
+          "x": 975,
+          "y": 200.5
+        },
+        {
+          "x": 1795,
+          "y": 200.5
+        },
+        {
+          "x": 1795,
+          "y": 209
+        },
+        {
+          "x": 1841,
+          "y": 209
+        }
+      ],
+      "labelPos": {
+        "x": 1055,
+        "y": 216.5
       }
     },
     {
       "from": "group:2",
-      "to": "api",
-      "label": "/metrics 15s",
+      "to": "graph-docs",
+      "label": "changed doc_keys only",
       "orig": [
-        28
+        29
       ],
       "points": [
         {
-          "x": 277,
-          "y": 187
+          "x": 2621,
+          "y": 209
         },
         {
-          "x": 323,
-          "y": 187
+          "x": 2631,
+          "y": 209
         },
         {
-          "x": 323,
-          "y": 255.5
+          "x": 2631,
+          "y": 172
         },
         {
-          "x": 429,
-          "y": 255.5
-        },
-        {
-          "x": 429,
-          "y": 270.5
-        },
-        {
-          "x": 475,
-          "y": 270.5
+          "x": 2873,
+          "y": 172
         }
       ],
       "labelPos": {
-        "x": 376,
-        "y": 271.5
+        "x": 2747,
+        "y": 188
       }
     },
     {
       "from": "group:2",
       "to": "prefect",
-      "label": "flow runs (24h)",
+      "label": "task runs",
       "orig": [
-        31
+        32,
+        39
+      ],
+      "points": [
+        {
+          "x": 2621,
+          "y": 209
+        },
+        {
+          "x": 2631,
+          "y": 209
+        },
+        {
+          "x": 2631,
+          "y": 467.5
+        },
+        {
+          "x": 2719,
+          "y": 467.5
+        },
+        {
+          "x": 2719,
+          "y": 874.5
+        },
+        {
+          "x": 2729,
+          "y": 874.5
+        }
+      ],
+      "labelPos": {
+        "x": 2675,
+        "y": 483.5
+      }
+    },
+    {
+      "from": "group:2",
+      "to": "lightrag",
+      "orig": [
+        33
+      ],
+      "points": [
+        {
+          "x": 2621,
+          "y": 209
+        },
+        {
+          "x": 2631,
+          "y": 209
+        },
+        {
+          "x": 2631,
+          "y": 246
+        },
+        {
+          "x": 2677,
+          "y": 246
+        }
+      ]
+    },
+    {
+      "from": "group:2",
+      "to": "graph-data",
+      "label": "graphml + manifest",
+      "orig": [
+        34
+      ],
+      "points": [
+        {
+          "x": 2621,
+          "y": 209
+        },
+        {
+          "x": 2631,
+          "y": 209
+        },
+        {
+          "x": 2631,
+          "y": 98
+        },
+        {
+          "x": 2855,
+          "y": 98
+        }
+      ],
+      "labelPos": {
+        "x": 2738,
+        "y": 82
+      }
+    },
+    {
+      "from": "group:1",
+      "to": "group:2",
+      "label": "standalone query",
+      "orig": [
+        36
+      ],
+      "points": [
+        {
+          "x": 1645,
+          "y": 667.25
+        },
+        {
+          "x": 1665,
+          "y": 667.25
+        },
+        {
+          "x": 1665,
+          "y": 217.5
+        },
+        {
+          "x": 1795,
+          "y": 217.5
+        },
+        {
+          "x": 1795,
+          "y": 209
+        },
+        {
+          "x": 1841,
+          "y": 209
+        }
+      ],
+      "labelPos": {
+        "x": 1730,
+        "y": 235.125
+      }
+    },
+    {
+      "from": "group:3",
+      "to": "api",
+      "label": "/metrics 15s",
+      "orig": [
+        41
       ],
       "points": [
         {
           "x": 277,
-          "y": 187
+          "y": 410.5
         },
         {
-          "x": 323,
-          "y": 187
+          "x": 563,
+          "y": 410.5
         },
         {
-          "x": 323,
-          "y": 101.5
+          "x": 563,
+          "y": 433
         },
         {
-          "x": 1765,
-          "y": 101.5
+          "x": 669,
+          "y": 433
         },
         {
-          "x": 1765,
-          "y": 342
+          "x": 669,
+          "y": 454
         },
         {
-          "x": 1799,
-          "y": 342
+          "x": 715,
+          "y": 454
         }
       ],
       "labelPos": {
-        "x": 385,
-        "y": 117.5
+        "x": 616,
+        "y": 449
+      }
+    },
+    {
+      "from": "group:3",
+      "to": "prefect",
+      "label": "flow runs (24h)",
+      "orig": [
+        44
+      ],
+      "points": [
+        {
+          "x": 277,
+          "y": 410.5
+        },
+        {
+          "x": 563,
+          "y": 410.5
+        },
+        {
+          "x": 563,
+          "y": 334.5
+        },
+        {
+          "x": 1831,
+          "y": 334.5
+        },
+        {
+          "x": 1831,
+          "y": 418
+        },
+        {
+          "x": 2064,
+          "y": 418
+        },
+        {
+          "x": 2064,
+          "y": 874.5
+        },
+        {
+          "x": 2729,
+          "y": 874.5
+        }
+      ],
+      "labelPos": {
+        "x": 1037,
+        "y": 350.5
       }
     }
   ],
@@ -1628,10 +2176,32 @@
           "domain": "huggingface.co"
         }
       ]
+    ],
+    [
+      "graph-engine",
+      [
+        {
+          "label": "Qwythos-9B (llama.cpp)",
+          "domain": "huggingface.co"
+        },
+        {
+          "label": "multilingual-e5-large",
+          "domain": "huggingface.co"
+        }
+      ]
+    ],
+    [
+      "graph-answerer",
+      [
+        {
+          "label": "Qwythos-9B (llama.cpp)",
+          "domain": "huggingface.co"
+        }
+      ]
     ]
   ],
   "bounds": {
-    "w": 2056,
-    "h": 1221.5
+    "w": 3104,
+    "h": 1433.5
   }
 }

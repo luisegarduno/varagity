@@ -1,8 +1,9 @@
 # ADR-015: In-app codebase map (`/map` + developer mode)
 
-**Status:** Accepted (2026-07-19) · Amended twice (2026-07-20 — see
+**Status:** Accepted (2026-07-19) · Amended thrice (2026-07-20 — see
 [the canvas amendment](#amendment-2026-07-20-the-condensed-foglamp-style-canvas)
-and [the layout-engine amendment](#amendment-2026-07-20-elk-layout-precomputed-beams))
+and [the layout-engine amendment](#amendment-2026-07-20-elk-layout-precomputed-beams);
+2026-08-13 — see [the graph-corpus amendment](#amendment-2026-08-13-the-graph-corpus-group))
 
 ## Context
 
@@ -218,3 +219,17 @@ Consequences: elkjs is a dependency but a build/test-time one in practice
 (its dynamic-import chunk is unreachable from page code); the layout module
 is a port, so upstream improvements are easy to re-take; and the map gains a
 second generated artifact whose regeneration command sits next to its guard.
+
+## Amendment (2026-08-13): the graph-corpus group
+
+GraphRAG (ADR-017) added a whole subsystem the map didn't show: the API-only
+graph build (message sources → LightRAG extraction → the file-based graph
+workdir) and the graph query path a chat turn reaches via
+`ChatRequest.corpus`. The map now draws it as a fourth **Graph corpus**
+container (build flow, message sources, engine registry, query flow, graph
+answerer), with `graph-docs/` and the graph workdir as ungrouped stores and
+LightRAG as an external node beside Docling — which required raising the
+invariant-5 group cap from 3 to 4 in `web/lib/codebase-map.ts`. The same
+edit refreshed the retriever registry (`hyde`, ADR-016), the eval card, and
+the web entry's mention of the sigma.js `/graph` view; the ELK layout
+snapshot was regenerated per the standing rule (`bun run test -u`).

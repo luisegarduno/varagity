@@ -195,15 +195,16 @@ export function validateMap(map: CodebaseMap): string[] {
   checkTop("topTools", map.topTools);
   checkTop("topIntegrations", map.topIntegrations);
 
-  // Invariant 5 — <= 3 groups, each 3–6 nodes.
+  // Invariant 5 — <= 4 groups, each 3–6 nodes (the cap was 3 until the graph
+  // corpus subsystem earned its own container, ADR-015 amendment 2026-08-13).
   const groupCounts = new Map<string, number>();
   for (const node of nodes) {
     if (node.group !== undefined) {
       groupCounts.set(node.group, (groupCounts.get(node.group) ?? 0) + 1);
     }
   }
-  if (groupCounts.size > 3) {
-    errors.push(`too many distinct groups: ${groupCounts.size} > 3`);
+  if (groupCounts.size > 4) {
+    errors.push(`too many distinct groups: ${groupCounts.size} > 4`);
   }
   for (const [group, count] of groupCounts) {
     if (count < 3 || count > 6) {

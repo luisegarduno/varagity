@@ -2,12 +2,13 @@
  * The curated codebase map — the checked-in, hand-maintained picture of how
  * Varagity fits together (ADR-015; update rule in golden-docs/architecture.md).
  *
- * This is the condensed 26-node graph adopted one-shot from a 2026-07-20
+ * This is the condensed graph adopted one-shot (26 nodes) from a 2026-07-20
  * foglamp scan of the repo; the scan artifact is not retained, so this
- * literal is the source of truth: one node per moving part, model usage
- * expressed as edges into the three `model` nodes (the renderer folds those
- * into on-card chips), and three groups (Ingestion · Query path ·
- * Observability) drawn as containers.
+ * literal is the source of truth, edited by hand as the architecture moves
+ * (the GraphRAG corpus joined 2026-08-13): one node per moving part, model
+ * usage expressed as edges into the three `model` nodes (the renderer folds
+ * those into on-card chips), and four groups (Ingestion · Query path ·
+ * Graph corpus · Observability) drawn as containers.
  *
  * Authored as a TS literal ending in `satisfies CodebaseMap` so the
  * `kind`/`EdgeKind` unions genuinely type-check — a JSON literal would widen
@@ -20,7 +21,7 @@ import type { CodebaseMap } from "./codebase-map";
 export const CODEBASE_MAP = {
   project: {
     name: "Varagity",
-    date: "2026-07-20",
+    date: "2026-08-13",
     tagline: "Contextual Retrieval RAG, fully self-hosted on local GPUs",
   },
   topModels: [
@@ -39,6 +40,8 @@ export const CODEBASE_MAP = {
     { id: "chunkers", label: "Chunker registry" },
     { id: "retrievers", label: "Retriever registry" },
     { id: "chat-engines", label: "Chat engine registry" },
+    { id: "graph-engines", label: "Graph engine registry" },
+    { id: "message-sources", label: "Message sources" },
     { id: "ocr", label: "OCR engines" },
     { id: "preview", label: "Page previews" },
   ],
@@ -65,7 +68,7 @@ export const CODEBASE_MAP = {
         // own page here means deleting the map route fails the drift guard.
         sourceRef: "web/app/map/page.tsx",
         detail:
-          "SSE chat with an evidence panel showing how each answer was built, corpus manager, live settings drawer, command palette, and a /map architecture map behind developer mode.",
+          "SSE chat with an evidence panel, corpus manager, live settings drawer, command palette, a sigma.js /graph view of the message graph, and a /map architecture map behind developer mode.",
       },
       {
         id: "cli",
@@ -161,11 +164,11 @@ export const CODEBASE_MAP = {
         id: "retrievers",
         label: "Retriever registry",
         kind: "service",
-        sub: "semantic·bm25·hybrid·reranked",
+        sub: "semantic·bm25·hybrid·reranked·hyde",
         group: "Query path",
         sourceRef: "varagity/retrieval/hybrid.py:125",
         detail:
-          "hybrid fuses both arms (0.8 dense / 0.2 BM25) and hydrates rows from pgvector; reranked composes a base retriever (over-fetch, cross-encode, keep 5) rather than forking fusion.",
+          "hybrid fuses both arms (0.8 dense / 0.2 BM25) and hydrates rows from pgvector; reranked composes a base retriever (over-fetch, cross-encode, keep 5); hyde drafts a passage for the dense arm (ADR-016).",
       },
       {
         id: "answerer",
@@ -191,10 +194,61 @@ export const CODEBASE_MAP = {
         id: "eval",
         label: "Eval harness",
         kind: "service",
-        sub: "retrieval · ocr · chat",
+        sub: "retrieval · ocr · chat · graph",
         sourceRef: "varagity/eval/evaluate.py",
         detail:
-          "Retrieval matrix, chunker sweep, OCR benchmark and multi-turn chat eval against golden datasets — defaults here are benchmark-decided (ADR-004, ADR-011).",
+          "Retrieval matrix, chunker sweep, OCR benchmark, multi-turn chat and graph-engine evals against golden datasets — defaults here are benchmark-decided (ADR-004, ADR-011, ADR-017).",
+      },
+
+      {
+        id: "graph-build",
+        label: "Graph build flow",
+        kind: "service",
+        sub: "Prefect · extract→upsert",
+        group: "Graph corpus",
+        sourceRef: "varagity/pipeline/graph_flow.py:85",
+        detail:
+          "Resumable, API-only build — the API process is the graph's single writer (GraphService, single-flight). The manifest's content hash per doc_key turns re-exports into delete-then-reinsert.",
+      },
+      {
+        id: "msg-sources",
+        label: "Message sources",
+        kind: "service",
+        sub: "imessage · structural dispatch",
+        group: "Graph corpus",
+        sourceRef: "varagity/graph/sources/imessage.py:96",
+        detail:
+          "A registry chosen by sniffing the bytes (matches()), not config: an iMessage chat.db becomes thread-day transcripts keyed doc_key = {thread_id}::{day-span}.",
+      },
+      {
+        id: "graph-engine",
+        label: "Graph engine registry",
+        kind: "agent",
+        sub: "lightrag · retrieval-only",
+        group: "Graph corpus",
+        sourceRef: "varagity/graph/engines/lightrag.py:503",
+        detail:
+          "LightRAG extracts entities/relations with the chat LLM + e5, and retrieves via aquery_data — the repo writes the answers (ADR-017). Import-light: lightrag loads only inside session().",
+      },
+      {
+        id: "graph-qflow",
+        label: "Graph query flow",
+        kind: "service",
+        sub: "Prefect · retrieve→answer",
+        group: "Graph corpus",
+        sourceRef: "varagity/pipeline/graph_flow.py:191",
+        detail:
+          "A chat turn targets the graph via ChatRequest.corpus — same condense, SSE protocol and evidence panel as chunk RAG. GRAPH_ENABLED=false degrades it to a document answer, labelled.",
+      },
+      {
+        id: "graph-answerer",
+        label: "Graph answerer",
+        kind: "agent",
+        sub: "grounded + cited",
+        group: "Graph corpus",
+        sourceRef: "varagity/graph/answer.py",
+        detail:
+          "Streams an answer grounded in graph facts + transcript excerpts; citations are bracket-form [SOURCE: doc_key] only — line-initial capture breaks on graph labels.",
       },
 
       {
@@ -251,6 +305,22 @@ export const CODEBASE_MAP = {
         detail:
           "The gitignored RAG input corpus on disk — a bind mount shared by CLI and API so both agree on the corpus.",
       },
+      {
+        id: "graph-docs",
+        label: "graph-docs/ archives",
+        kind: "store",
+        sub: "chat.db bind mount",
+        detail:
+          "The gitignored message-archive input (iMessage chat.db exports), bind-mounted into the api container only.",
+      },
+      {
+        id: "graph-data",
+        label: "Graph workdir",
+        kind: "store",
+        sub: "graphdata volume · files",
+        detail:
+          "The extracted graph as files, never Postgres: LightRAG storages plus varagity_manifest.json (the diff key) and the summary sidecar the status route and gauges read. Lock-free reads.",
+      },
 
       {
         id: "docling",
@@ -260,6 +330,15 @@ export const CODEBASE_MAP = {
         sub: "layout-aware conversion",
         detail:
           "IBM's layout-aware document converter (PDF, office, HTML); also backs the docling_hybrid chunker. Layout/table models download on first use.",
+      },
+      {
+        id: "lightrag",
+        label: "LightRAG",
+        kind: "external",
+        domain: "github.com",
+        sub: "graph index + retrieval",
+        detail:
+          "HKUDS/LightRAG, the ADR-017 bake-off winner over cognee and Graphiti; storages are single-writer per workdir, and close() must reset its process-global shared dicts.",
       },
       {
         id: "ocr",
@@ -348,6 +427,23 @@ export const CODEBASE_MAP = {
       { from: "web", to: "preview", kind: "triggers", label: "evidence page peek" },
       { from: "preview", to: "docsdir", kind: "reads", label: "renders source page" },
       { from: "eval", to: "qflow", kind: "calls", label: "5-config matrix" },
+
+      { from: "api", to: "graph-build", kind: "triggers", label: "POST /api/graph/build" },
+      { from: "graph-build", to: "graph-docs", kind: "reads", label: "changed doc_keys only" },
+      { from: "graph-build", to: "msg-sources", kind: "calls", label: "sniff + extract" },
+      { from: "graph-build", to: "graph-engine", kind: "calls", label: "enqueue + process" },
+      { from: "graph-build", to: "prefect", kind: "writes", label: "task runs" },
+      { from: "graph-engine", to: "lightrag", kind: "calls" },
+      { from: "graph-engine", to: "llm", kind: "calls", label: "entity extraction" },
+      { from: "graph-engine", to: "e5", kind: "calls", label: "embed graph + queries" },
+      { from: "graph-engine", to: "graph-data", kind: "writes", label: "graphml + manifest" },
+      { from: "api", to: "graph-qflow", kind: "triggers", label: "corpus=graph turns" },
+      { from: "condenser", to: "graph-qflow", kind: "triggers", label: "standalone query" },
+      { from: "graph-qflow", to: "graph-engine", kind: "calls", label: "aquery_data (mix)" },
+      { from: "graph-qflow", to: "graph-answerer", kind: "calls" },
+      { from: "graph-answerer", to: "llm", kind: "calls", label: "grounded prompt" },
+      { from: "graph-qflow", to: "prefect", kind: "writes", label: "task runs" },
+      { from: "api", to: "graph-engine", kind: "reads", label: "/graph export" },
 
       { from: "prom", to: "api", kind: "reads", label: "/metrics 15s" },
       { from: "graf", to: "prom", kind: "reads" },

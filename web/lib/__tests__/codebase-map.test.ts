@@ -37,10 +37,10 @@ describe("CODEBASE_MAP shape", () => {
 
   it("matches the curated totals", () => {
     const { nodes, edges } = CODEBASE_MAP.graph;
-    expect(nodes).toHaveLength(26);
-    expect(edges).toHaveLength(38);
+    expect(nodes).toHaveLength(34);
+    expect(edges).toHaveLength(54);
     expect(CODEBASE_MAP.topModels).toHaveLength(3);
-    expect(CODEBASE_MAP.topTools).toHaveLength(6);
+    expect(CODEBASE_MAP.topTools).toHaveLength(8);
     expect(CODEBASE_MAP.topIntegrations).toHaveLength(10);
 
     const groups = new Map<string, number>();
@@ -48,6 +48,7 @@ describe("CODEBASE_MAP shape", () => {
       if (node.group) groups.set(node.group, (groups.get(node.group) ?? 0) + 1);
     }
     expect([...groups.entries()].sort()).toEqual([
+      ["Graph corpus", 5],
       ["Ingestion", 5],
       ["Observability", 3],
       ["Query path", 4],
@@ -217,8 +218,16 @@ describe("validateMap catches violations", () => {
 
   it("flags too many distinct groups", () => {
     const map = clone();
-    for (let i = 0; i < 3; i += 1) {
-      map.graph.nodes.push({ id: `extra-${i}`, label: "x", kind: "tool", group: "Extra" });
+    // Two fresh groups push the checked-in four past the cap of 4.
+    for (const extra of ["Extra A", "Extra B"]) {
+      for (let i = 0; i < 3; i += 1) {
+        map.graph.nodes.push({
+          id: `extra-${extra === "Extra A" ? "a" : "b"}-${i}`,
+          label: "x",
+          kind: "tool",
+          group: extra,
+        });
+      }
     }
     expect(
       validateMap(map).some((e) => e.includes("too many distinct groups")),

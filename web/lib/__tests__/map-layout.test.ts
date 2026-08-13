@@ -170,7 +170,7 @@ describe("condense", () => {
 
   it("folds the real map's three models into the expected cards", () => {
     const { nodes, chips } = condense(CODEBASE_MAP);
-    expect(nodes).toHaveLength(23);
+    expect(nodes).toHaveLength(31);
     expect(nodes.some((node) => node.kind === "model")).toBe(false);
     expect(chips.get("retrievers")?.map((chip) => chip.label)).toEqual([
       "multilingual-e5-large",
@@ -179,11 +179,16 @@ describe("condense", () => {
     expect(chips.get("ingest")?.map((chip) => chip.label)).toEqual([
       "multilingual-e5-large",
     ]);
-    for (const id of ["condenser", "answerer", "contextualizer"]) {
+    for (const id of ["condenser", "answerer", "contextualizer", "graph-answerer"]) {
       expect(chips.get(id)?.map((chip) => chip.label)).toEqual([
         "Qwythos-9B (llama.cpp)",
       ]);
     }
+    // The graph engine drives both models: extraction via the LLM, embeddings via e5.
+    expect(chips.get("graph-engine")?.map((chip) => chip.label)).toEqual([
+      "Qwythos-9B (llama.cpp)",
+      "multilingual-e5-large",
+    ]);
   });
 });
 
@@ -203,9 +208,10 @@ describe("layoutGraph — real CODEBASE_MAP", () => {
     await assertLayoutProperties(CODEBASE_MAP);
   });
 
-  it("draws the three group containers", async () => {
+  it("draws the four group containers", async () => {
     const result = await layoutGraph(CODEBASE_MAP);
     expect(result.groupBands.map((band) => band.group).sort()).toEqual([
+      "Graph corpus",
       "Ingestion",
       "Observability",
       "Query path",
