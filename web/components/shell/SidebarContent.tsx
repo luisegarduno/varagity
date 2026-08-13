@@ -482,12 +482,15 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
               Map
             </Button>
           )}
-          {/* Only the always-mounted desktop instance answers the ⌘K palette,
-              so a palette open never raises two dialogs. */}
-          <SettingsDrawer openOnBusEvent={onNavigate === undefined} />
         </div>
         <div className="flex items-center justify-between pr-1 pl-0.5">
-          <ThemeToggle />
+          <div className="flex items-center gap-1">
+            <ThemeToggle />
+            {/* Only the always-mounted desktop instance answers the ⌘K palette,
+                so a palette open never raises two dialogs. Lives on this row so
+                the nav row above can't overflow the rail. */}
+            <SettingsDrawer openOnBusEvent={onNavigate === undefined} />
+          </div>
           <span className="text-[10px] text-muted-foreground">
             local · single-user
           </span>
