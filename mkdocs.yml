@@ -133,6 +133,14 @@ extra:
       link: https://github.com/luisegarduno/varagity
       name: Varagity on GitHub
 
+# Deliberately unlisted pages: they build and serve at their own URL but
+# never appear in the navigation (and opt out of the search index via their
+# own front matter). Listing them here keeps `mkdocs build` from flagging
+# them as orphans.
+#   quiz.md — /quiz/, the architecture practice quiz (an easter egg).
+not_in_nav: |
+  quiz.md
+
 nav:
   - Home: index.md
   - Architecture: architecture.md

@@ -113,3 +113,90 @@
     transform: none;
   }
 }
+
+/* ---- /quiz — the architecture practice page --------------------------- */
+
+/* Deliberately unlisted (mkdocs.yml `not_in_nav`). Each question's solution
+ * is a pymdownx.details block (`??? question "Reveal solution"`), restyled
+ * from Material's collapsible-admonition look into a pill button: closed,
+ * only the button shows; open, the solution sits in a tinted card beneath
+ * it. The tokens are the only per-scheme values — the primary indigo reads
+ * on the light page, while slate's primary is the dark header surface, so
+ * the button there takes the accent indigo with dark text. */
+
+.md-typeset .quiz {
+  --quiz-button-bg: var(--md-primary-fg-color);
+  --quiz-button-bg-hover: var(--md-primary-fg-color--dark);
+  --quiz-button-fg: #ffffff;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .quiz {
+  --quiz-button-bg: var(--md-accent-fg-color);
+  --quiz-button-bg-hover: #adb4ff;          /* oklch(0.80 0.12 278) */
+  --quiz-button-fg: #101018;
+}
+
+.md-typeset .quiz details.question {
+  margin: 0.8em 0 2.4em;
+  padding: 0;
+  border: 0;
+  border-radius: 0.55rem;
+  background: transparent;
+  box-shadow: none;
+}
+
+.md-typeset .quiz details.question[open] {
+  padding: 0.8rem 1rem 0.2rem;
+  background: var(--md-code-bg-color);
+}
+
+.md-typeset .quiz details.question > summary {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0.45em 2.4em 0.45em 2.3em;
+  border: 0;
+  border-radius: 2rem;
+  background: var(--quiz-button-bg);
+  color: var(--quiz-button-fg);
+  font-weight: 600;
+  transition: background-color 125ms, box-shadow 125ms, transform 125ms;
+}
+
+.md-typeset .quiz details.question > summary:hover,
+.md-typeset .quiz details.question > summary:focus-visible {
+  background: var(--quiz-button-bg-hover);
+  box-shadow: 0 0.35rem 0.9rem -0.4rem rgba(81, 86, 175, 0.6);
+  transform: translateY(-0.06rem);
+}
+
+/* Material positions the type icon (::before) and the chevron (::after)
+ * absolutely inside the summary; re-centre them for the pill's padding and
+ * paint both in the button's text colour (the icon is a mask). */
+.md-typeset .quiz details.question > summary::before,
+.md-typeset .quiz details.question > summary::after {
+  top: 50%;
+  margin-top: -0.5rem;
+  background-color: currentColor;
+}
+
+.md-typeset .quiz details.question > summary::before {
+  left: 0.8em;
+}
+
+.md-typeset .quiz details.question > summary::after {
+  right: 0.8em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset .quiz details.question > summary {
+    transition: none;
+  }
+
+  .md-typeset .quiz details.question > summary:hover,
+  .md-typeset .quiz details.question > summary:focus-visible {
+    transform: none;
+  }
+}
