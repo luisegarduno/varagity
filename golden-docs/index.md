@@ -28,6 +28,15 @@ This site is the **as-built documentation** of the system (v1 + v2):
 
     [:octicons-arrow-right-24: Read the architecture](architecture.md)
 
+-   :material-sitemap:{ .lg .middle } __Codebase map__
+
+    ---
+
+    The whole system as one interactive graph — the web GUI's `/map`, built
+    into this site: click a card to trace its downstream flow.
+
+    [:octicons-arrow-right-24: Explore the map](map.md)
+
 -   :material-database-search:{ .lg .middle } __Data model__
 
     ---

@@ -23,7 +23,8 @@ answer prompt), composer 📎 uploads of files *and folders* with auto-ingest + 
 honest Infra empty-states, the prefect-exporter `OFFSET_MINUTES` fix), and pnpm→bun as
 package manager only (ADR-014). Page previews shipped between v2 and v3 (ADR-010).
 
-Post-v3 features ship on their own specs: the codebase map (ADR-015), HyDE retrieval
+Post-v3 features ship on their own specs: the codebase map (ADR-015; also built into the
+docs site, ADR-018), HyDE retrieval
 (ADR-016), and **GraphRAG** (ADR-017, complete) — a **peer message-graph corpus** beside
 chunk RAG. An iMessage `chat.db` is extracted into a knowledge graph (LightRAG,
 retrieval-only; the repo writes the answers) by a resumable, API-only build; a chat turn
@@ -35,7 +36,9 @@ Where things live:
   (`tasks/v1/`…`tasks/v3/`; feature specs like `spec_codebase_map.md` and
   `graphrag/spec_graphrag.md` sit beside them).
 - `golden-docs/` — **as-built** documentation, rendered by MkDocs (`uv run mkdocs serve`):
-  architecture, data model, pipelines, runbook, ADRs 001–017, Python API reference;
+  architecture, data model, pipelines, runbook, ADRs 001–018, Python API reference;
+  `golden-docs/map.md` frames `golden-docs/assets/map/`, a **committed Vite build** of
+  the web map (`web/docs-map/`) — regenerate with `bun run build:docs-map`;
   `golden-docs/api.md` is the HTTP contract + SSE protocols, rendered from the
   `golden-docs/openapi.json` snapshot (regenerate via `scripts/export_openapi.py` —
   a unit test fails on drift).
@@ -127,6 +130,7 @@ bun run test                       # Vitest unit tests — the suite that CI cov
 bun run e2e                        # opt-in Playwright — needs the live stack on :3000/:8000
 bun run lint && bun run typecheck && bun run build
 bun run gen:types                  # regenerate lib/types.ts from the API's OpenAPI schema
+bun run build:docs-map             # rebuild golden-docs/assets/map (the docs-site /map) — a Vitest guard fails on a stale bundle
 ```
 
 Host-mode runs against the compose services need localhost env overrides
@@ -174,6 +178,12 @@ never point a host process at the live graph while the api container is up). See
   `invalidateQueries`. Conversation *list* and *transcript* keys are deliberately
   disjoint (invalidation is prefix-matched), so a persisted turn re-orders the list
   without discarding the transcript it was just folded into.
+- **Committed builds**: `golden-docs/assets/map/` is a Vite build of `web/docs-map/` —
+  the docs site's copy of `/map` (ADR-018), framed by `golden-docs/map.md`. Rebuild with
+  `bun run build:docs-map` after touching `web/components/map/`, the map data or layout
+  snapshot, `web/app/globals.css`, or `web/docs-map/`; `web/lib/__tests__/docs-map.test.ts`
+  hashes exactly those inputs and fails CI otherwise. Vite runs under Node — ADR-014's
+  line (bun = package manager only) stands.
 - **Migrations**: ordered, idempotent SQL in `varagity/stores/migrations/NNN_*.sql`,
   tracked in `schema_migrations`, applied by the API on startup. `schema.sql` stays the
   fresh-install fast path — keep both in sync.
@@ -291,6 +301,11 @@ never point a host process at the live graph while the api container is up). See
   settings drawer); `preview_enabled` is read-only in `GET /api/config`.
 - `golden-docs/openapi.json` must be regenerated (`uv run python scripts/export_openapi.py`)
   whenever the API surface changes — a unit test fails otherwise.
+- The map's favicons resolve through `MapIconBaseContext` (`web/components/map/icon-base.ts`),
+  never a literal `/map-icons/`: the docs bundle serves them beside its page because GitHub
+  Pages serves the site under a subpath. And Material's privacy plugin localizes external
+  URLs only in rendered pages and static `.css`/`.js` — the docs map's fonts therefore ride
+  `web/docs-map/fonts.css` as a `url()` import; a `<link>` in the static HTML would phone home.
 - `bun install` silently **converts** a `pnpm-lock.yaml` into `bun.lock` when no `bun.lock`
   exists — never let both lockfiles live in the repo, or the next install re-converts a
   stale file. (`web/` has only `bun.lock` since v3.)

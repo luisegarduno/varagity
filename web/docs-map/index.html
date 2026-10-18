@@ -1,0 +1,62 @@
+<!doctype html>
+<!--
+  The docs-site page for the codebase map (ADR-018). `bun run build:docs-map`
+  (Vite, vite.config.ts beside this file) builds it with main.tsx into
+  golden-docs/assets/map/, which MkDocs copies verbatim and golden-docs/map.md
+  frames. Nothing here reaches the API: the map is a static view over the
+  curated data and the checked-in ELK layout.
+-->
+<html lang="en" class="h-full antialiased">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Varagity · Codebase map</title>
+    <script>
+      // Theme. The docs page (Material for MkDocs) keeps its palette on
+      // <body data-md-color-scheme> ("default" | "slate"); framed same-origin
+      // by it, mirror that attribute live. Standalone — or framed by a page
+      // we can't read — follow the OS. Inline and ahead of the stylesheet so
+      // the first paint is already the right scheme (no light flash in dark).
+      (function () {
+        var html = document.documentElement;
+        function apply(dark) {
+          html.classList.toggle("dark", dark);
+          html.style.colorScheme = dark ? "dark" : "light";
+        }
+        var host = null;
+        try {
+          if (window.parent !== window) host = window.parent.document.body;
+        } catch (_) {
+          host = null; // cross-origin host: no access, no sync
+        }
+        if (host && host.hasAttribute("data-md-color-scheme")) {
+          var mirror = function () {
+            apply(host.getAttribute("data-md-color-scheme") === "slate");
+          };
+          mirror();
+          new MutationObserver(mirror).observe(host, {
+            attributes: true,
+            attributeFilter: ["data-md-color-scheme"],
+          });
+          return;
+        }
+        var query = window.matchMedia("(prefers-color-scheme: dark)");
+        apply(query.matches);
+        query.addEventListener("change", function (event) {
+          apply(event.matches);
+        });
+      })();
+    </script>
+    <script type="module" src="./main.tsx"></script>
+  </head>
+  <body class="h-dvh overflow-hidden">
+    <div id="root" class="flex h-full flex-col"></div>
+    <noscript>
+      <p class="p-6 text-sm">
+        The codebase map is interactive and needs JavaScript. The same graph
+        is described in prose on the Architecture page.
+      </p>
+    </noscript>
+  </body>
+</html>

@@ -1,0 +1,24 @@
+/*
+ * Stylesheet entry of the docs-site map bundle (ADR-018).
+ *
+ * The app's globals.css is imported whole — the tokens, the `.dark` variant,
+ * the map keyframes and the agent-card beam — so the docs page and /map can
+ * never drift apart on colour or motion. Tailwind's automatic source
+ * detection runs from the Vite root (this directory); the map's component
+ * files are named explicitly below, so only the utilities the map uses are
+ * emitted, not the whole app's.
+ */
+@import "../app/globals.css";
+
+@source "../components/map";
+@source "../components/ui/button.tsx";
+
+/* next/font sets these on <html> in the app; here the faces arrive through
+   fonts.css (Google Fonts, localized by the docs site's privacy plugin at
+   build time), and these fallbacks keep the map legible before — or
+   without — them. */
+:root {
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-geist-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --font-instrument-serif: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+}

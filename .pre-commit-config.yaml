@@ -5,8 +5,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # golden-docs/assets/map/ is a committed Vite build (ADR-018) —
+      # regenerated, never hand-edited, so the hygiene fixers leave it alone.
       - id: trailing-whitespace
+        exclude: ^golden-docs/assets/map/
       - id: end-of-file-fixer
+        exclude: ^golden-docs/assets/map/
       # --unsafe: syntax-only check. mkdocs.yml carries a `!!python/name:...`
       # tag (the Material mermaid fence formatter) that the safe loader can't
       # construct; --unsafe still catches genuine YAML syntax errors.

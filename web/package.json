@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:docs-map": "vite build --config docs-map/vite.config.ts",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
@@ -44,6 +45,7 @@
     "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "^4",
+    "@tailwindcss/vite": "^4.3.2",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
@@ -53,6 +55,7 @@
     "openapi-typescript": "^7.13.0",
     "tailwindcss": "^4",
     "typescript": "^5",
+    "vite": "^8.1.4",
     "vitest": "^4.1.10"
   }
 }

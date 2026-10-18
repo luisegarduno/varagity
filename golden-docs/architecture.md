@@ -429,7 +429,8 @@ to a document answer — reported on the turn, never silently.
 ## The codebase map
 
 This page explains Varagity in prose and Mermaid fragments; the web GUI also
-ships the whole system as one interactive graph at **`/map`** — entry points,
+ships the whole system as one interactive graph at **`/map`** (and this site
+at [Codebase map](map.md)) — entry points,
 the Prefect flows, the chat engines, the pluggable registries, and the
 datastores as cards on a pan/zoom canvas (HTML cards over one SVG edge
 underlay), with the three models folded into favicon chips on the cards that
@@ -453,6 +454,17 @@ truncated past its pinned line — the mirror of the drift-guarded
 *semantics*: whether an arrow still tells the truth is the human's job, so an
 architectural change that leaves the referenced files in place still needs the
 map edited by hand.
+
+The same view is built into this site at [Codebase map](map.md): a
+**committed Vite bundle** (`golden-docs/assets/map/`, built from
+`web/docs-map/` — [ADR-018](adr/ADR-018-docs-site-map.md)) that `map.md`
+frames, so the picture reads without the stack running. The update rule
+therefore has a **second step**: after editing the data — or anything under
+`web/components/map/`, the layout snapshot, `web/app/globals.css`, or
+`web/docs-map/` — run `cd web && bun run build:docs-map` and commit the
+output. A second Vitest guard (`web/lib/__tests__/docs-map.test.ts`) hashes
+exactly those inputs and fails CI when the committed bundle was built from
+anything else.
 
 ## Module map
 

@@ -1,0 +1,8 @@
+/* The three faces the app loads through next/font (web/app/layout.tsx):
+   Geist for text, Geist Mono for code, Instrument Serif for the display
+   heading. One external reference, written as url() because that is what
+   the docs site's privacy plugin (mkdocs.yml) rewrites in a static
+   stylesheet at build time — the published page never contacts Google
+   Fonts. Emitted verbatim beside the bundle by vite.config.ts; a <link> in
+   the static HTML would not be localized, which is why it lives here. */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500&family=Geist+Mono&family=Instrument+Serif:ital@0;1&display=swap");

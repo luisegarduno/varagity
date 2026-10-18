@@ -22,3 +22,4 @@ conversation that produced it. Format: Context → Decision → Consequences.
 | [ADR-015](ADR-015-codebase-map.md) | In-app codebase map (`/map` + developer mode) — curated TS data, condensed foglamp-style canvas | Accepted (amended) |
 | [ADR-016](ADR-016-hyde-retrieval.md) | HyDE as a composing retriever, paired under rerank (default stays `hybrid`) | Accepted |
 | [ADR-017](ADR-017-graphrag-engine.md) | The GraphRAG engine + its storage/viz/degrade/defaults directives (bake-off-decided: LightRAG) | Accepted (amended) |
+| [ADR-018](ADR-018-docs-site-map.md) | The codebase map on the docs site — the `/map` view, Vite-built into a checked-in bundle and framed | Accepted |

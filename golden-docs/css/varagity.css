@@ -200,3 +200,28 @@
     transform: none;
   }
 }
+
+/* ---- /map — the embedded codebase map (ADR-018) ------------------------- */
+
+/* The frame is the map's own page (assets/map/index.html — a Vite build of
+ * the web GUI's /map view, committed); it follows this site's palette by
+ * reading <body data-md-color-scheme> through the same-origin parent, so
+ * there is nothing to pass in. Sized to the viewport minus the header and
+ * the intro, never shorter than a usable canvas; the backgrounds match so
+ * the frame has nothing to flash while it loads. */
+
+.md-typeset .codebase-map {
+  margin: 1.2em 0 0.8em;
+  overflow: hidden;
+  border: 0.05rem solid var(--md-default-fg-color--lightest);
+  border-radius: 0.55rem;
+  background: var(--md-default-bg-color);
+}
+
+.md-typeset .codebase-map iframe {
+  display: block;
+  width: 100%;
+  height: clamp(30rem, calc(100vh - 13rem), 56rem);
+  border: 0;
+  background: var(--md-default-bg-color);
+}

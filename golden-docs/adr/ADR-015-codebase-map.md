@@ -4,6 +4,7 @@
 [the canvas amendment](#amendment-2026-07-20-the-condensed-foglamp-style-canvas)
 and [the layout-engine amendment](#amendment-2026-07-20-elk-layout-precomputed-beams);
 2026-08-13 — see [the graph-corpus amendment](#amendment-2026-08-13-the-graph-corpus-group))
+· **See also** [ADR-018](ADR-018-docs-site-map.md) — the same view built into the docs site
 
 ## Context
 

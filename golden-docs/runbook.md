@@ -316,9 +316,12 @@ pointed at the compose `api` or a [host-run
 API](#host-vs-container-env-usage). Free the port first
 (`docker compose stop web`): the dev server must own `:3000`, which is also
 the only origin `API_CORS_ORIGINS` allows by default. `bun run test` (Vitest
-unit), `bun run lint`, `bun run build`, and `bun run gen:types` (regenerates
+unit), `bun run lint`, `bun run build`, `bun run gen:types` (regenerates
 `lib/types.ts` from the running API's OpenAPI schema — generated, never
-hand-edited) round out the toolchain.
+hand-edited), and `bun run build:docs-map` (rebuilds `golden-docs/assets/map/`,
+the docs site's committed copy of `/map` —
+[ADR-018](adr/ADR-018-docs-site-map.md); a Vitest guard fails on a stale
+bundle) round out the toolchain.
 
 **bun is the package manager, not the runtime.** Node executes everything —
 `next`, `vitest`, and `playwright` run under Node via their shebang scripts
