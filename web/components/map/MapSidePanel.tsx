@@ -10,7 +10,8 @@ import { useState } from "react";
 
 import type { CodebaseMap, TopItem } from "@/lib/codebase-map";
 
-import { Glyph, iconSrc, type GLYPH_PATHS } from "./MapNode";
+import { useIconSrc } from "./icon-base";
+import { Glyph, type GLYPH_PATHS } from "./MapNode";
 
 /** One callout row: favicon (with glyph fallback) + label. */
 function TopRow({
@@ -21,6 +22,7 @@ function TopRow({
   fallback: keyof typeof GLYPH_PATHS;
 }) {
   const [failed, setFailed] = useState(false);
+  const iconSrc = useIconSrc();
   const domain = item.domain;
   return (
     <li className="flex items-center gap-2">

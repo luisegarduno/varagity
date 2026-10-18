@@ -18,6 +18,8 @@ import type { MapNode as MapNodeModel, NodeKind } from "@/lib/codebase-map";
 import type { ModelChip, NodeBox } from "@/lib/map-layout";
 import { cn } from "@/lib/utils";
 
+import { useIconSrc } from "./icon-base";
+
 /**
  * Filled glyph paths from the MIT-licensed Tabler icon set, inlined because
  * the house lucide set has no filled variants and the foglamp look leans on
@@ -176,15 +178,6 @@ export const KIND_META: Record<NodeKind, KindMeta> = {
   },
 };
 
-/**
- * Resolve a favicon domain to its vendored asset (`public/map-icons/`) —
- * the map never fetches icons from the network (house privacy rule; the
- * assets were vendored once at build-authoring time).
- */
-export function iconSrc(domain: string): string {
-  return `/map-icons/${domain}.png`;
-}
-
 /** A vendored favicon that falls back to the kind glyph if the asset 404s. */
 function Favicon({
   domain,
@@ -196,6 +189,7 @@ function Favicon({
   className?: string;
 }) {
   const [failed, setFailed] = useState(false);
+  const iconSrc = useIconSrc();
   if (failed) return <Glyph name={KIND_META[kind].glyph} className={className} />;
   return (
     // Static vendored asset inside a zoomable canvas; next/image adds nothing.
