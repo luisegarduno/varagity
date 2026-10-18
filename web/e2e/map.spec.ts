@@ -223,6 +223,39 @@ test("keyboard: Tab reaches cards in reading order and Enter spotlights", async 
   await expect(second).toBeFocused();
 });
 
+test("tapping the project card folds it to a title pill; tapping again opens it", async ({
+  page,
+}) => {
+  await primeAppState(page);
+  await page.goto("/map");
+
+  // The disclosure button lives inside the panel's heading.
+  const toggle = page
+    .getByRole("heading", { name: /codebase map/i })
+    .getByRole("button");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  const bodyId = await toggle.getAttribute("aria-controls");
+  const body = page.locator(`[id="${bodyId}"]`);
+  await expect(body.getByText("Models", { exact: true })).toBeVisible();
+
+  // A tap anywhere on the card folds it, not just on the title…
+  await body.getByText("Models", { exact: true }).click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(body).toBeHidden();
+
+  // …and a tap on the remaining pill opens it again.
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(body).toBeVisible();
+
+  // The keyboard drives the same toggle (a native button: Enter and Space).
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await page.keyboard.press("Space");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+});
+
 test("developer mode off hides the entry points, but /map still loads (D7)", async ({
   page,
 }) => {

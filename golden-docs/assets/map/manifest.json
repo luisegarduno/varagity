@@ -1,6 +1,6 @@
 {
   "regenerate": "bun run build:docs-map",
-  "sourceHash": "sha256:a66022561c8e3ed90aa90309a0a7f7a1a2addc07a263995aa4e54631e2c3f969",
+  "sourceHash": "sha256:c8f256a4787ba6a62d3e7389f0b6fad2daf7c2151ba9d3cda4da8e641e627550",
   "inputs": [
     "app/globals.css",
     "components/map/CodebaseMapView.tsx",
