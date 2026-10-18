@@ -22,7 +22,8 @@ scroll wheel pans too); pinch or <kbd>Ctrl</kbd> + wheel zooms;
 <kbd>+</kbd> / <kbd>−</kbd> / <kbd>0</kbd> zoom and reset from the keyboard,
 and <kbd>Tab</kbd> walks the cards in reading order. Hovering a legend entry
 highlights that kind. **Tap the project card** (top left) to fold it down to
-its title, which frees the canvas on a phone; tap it again to open it. Cards and edges enter along the flow direction, and
+its title; tap it again to open it. On a phone it starts folded, so the canvas
+is visible first. Cards and edges enter along the flow direction, and
 every so often a comet runs an edge and flashes the card it lands on — the
 same motion as the app, and still under `prefers-reduced-motion`. The map
 follows this site's light/dark toggle.

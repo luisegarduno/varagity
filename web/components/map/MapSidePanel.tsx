@@ -2,20 +2,39 @@
  * The floating side panel over the map canvas: project name + tagline, then
  * the Models / Tools / Integrations callouts with their vendored favicons —
  * foglamp's left card, restyled onto the house tokens. A tap folds it down to
- * a title pill (on a phone it otherwise covers most of the canvas); another
- * tap opens it again.
+ * a title pill; another tap opens it again. It starts folded on a phone,
+ * where it would otherwise cover most of the canvas.
  */
 
 "use client";
 
 import { ChevronDownIcon } from "lucide-react";
-import { useId, useState } from "react";
+import { useId, useState, useSyncExternalStore } from "react";
 
 import type { CodebaseMap, TopItem } from "@/lib/codebase-map";
 import { cn } from "@/lib/utils";
 
 import { useIconSrc } from "./icon-base";
 import { Glyph, type GLYPH_PATHS } from "./MapNode";
+
+// Tailwind's `max-sm` — below it the panel starts folded.
+const PHONE_QUERY = "(max-width: 639px)";
+
+function subscribePhone(onChange: () => void): () => void {
+  const mql = window.matchMedia(PHONE_QUERY);
+  mql.addEventListener("change", onChange);
+  return () => mql.removeEventListener("change", onChange);
+}
+
+function isPhoneSnapshot(): boolean {
+  return window.matchMedia(PHONE_QUERY).matches;
+}
+
+function isPhoneServerSnapshot(): boolean {
+  // SSR renders the open shape; the `max-sm:` classes below fold it in CSS,
+  // so a phone's first paint is right before hydration flips this to true.
+  return false;
+}
 
 /** One callout row: favicon (with glyph fallback) + label. */
 function TopRow({
@@ -82,16 +101,28 @@ function TopSection({
  * card is the tap target; the title button carries the disclosure semantics
  * for keyboard and screen-reader users and has no handler of its own — its
  * click (pointer, Enter, or Space) bubbles to the card's, so it toggles once.
+ * Until the first tap the viewport decides: folded on a phone, open otherwise.
  */
 export function MapSidePanel({ map }: { map: CodebaseMap }) {
-  const [open, setOpen] = useState(true);
+  // null = not toggled yet, so the viewport decides.
+  const [userChoice, setUserChoice] = useState<boolean | null>(null);
+  const isPhone = useSyncExternalStore(
+    subscribePhone,
+    isPhoneSnapshot,
+    isPhoneServerSnapshot,
+  );
+  const open = userChoice ?? !isPhone;
+  // Only the server render (and the hydration pass) is open on a phone.
+  const foldOnPhone = userChoice === null && open;
   const bodyId = useId();
   return (
     <div
-      onClick={() => setOpen((prev) => !prev)}
+      onClick={() => setUserChoice(!open)}
       className={cn(
         "pointer-events-auto absolute top-4 left-4 z-20 flex max-h-[70%] cursor-pointer flex-col overflow-y-auto border border-border bg-card/95 text-card-foreground backdrop-blur-sm [box-shadow:var(--map-card-shadow)] dark:border-transparent",
         open ? "w-60 rounded-[28px] p-5 sm:w-64" : "rounded-full py-2.5 pr-4 pl-5",
+        foldOnPhone &&
+          "max-sm:w-auto max-sm:rounded-full max-sm:py-2.5 max-sm:pr-4 max-sm:pl-5",
       )}
     >
       <h1 className="font-heading text-xl leading-tight font-normal">
@@ -110,12 +141,17 @@ export function MapSidePanel({ map }: { map: CodebaseMap }) {
             className={cn(
               "size-4 shrink-0 text-muted-foreground motion-safe:transition-transform",
               open && "rotate-180",
+              foldOnPhone && "max-sm:rotate-0",
             )}
           />
         </button>
       </h1>
 
-      <div id={bodyId} hidden={!open}>
+      <div
+        id={bodyId}
+        hidden={!open}
+        className={cn(foldOnPhone && "max-sm:hidden")}
+      >
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
           {map.project.tagline}
         </p>

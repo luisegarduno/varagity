@@ -223,9 +223,9 @@ test("keyboard: Tab reaches cards in reading order and Enter spotlights", async 
   await expect(second).toBeFocused();
 });
 
-test("tapping the project card folds it to a title pill; tapping again opens it", async ({
+test("the project card starts folded on a phone and toggles with a tap", async ({
   page,
-}) => {
+}, testInfo) => {
   await primeAppState(page);
   await page.goto("/map");
 
@@ -233,13 +233,21 @@ test("tapping the project card folds it to a title pill; tapping again opens it"
   const toggle = page
     .getByRole("heading", { name: /codebase map/i })
     .getByRole("button");
-  await expect(toggle).toHaveAttribute("aria-expanded", "true");
   const bodyId = await toggle.getAttribute("aria-controls");
   const body = page.locator(`[id="${bodyId}"]`);
-  await expect(body.getByText("Models", { exact: true })).toBeVisible();
+  const models = body.getByText("Models", { exact: true });
+
+  // Open on desktop; folded on a phone, where it would cover the canvas.
+  if (isMobileProject(testInfo)) {
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(body).toBeHidden();
+    await toggle.click();
+  }
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(models).toBeVisible();
 
   // A tap anywhere on the card folds it, not just on the title…
-  await body.getByText("Models", { exact: true }).click();
+  await models.click();
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
   await expect(body).toBeHidden();
 
