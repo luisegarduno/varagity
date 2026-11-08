@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  EXPORTS_DIRNAME,
   fileExtension,
   isHiddenPath,
+  isReservedPath,
   planAttachments,
   safeFileName,
   safeRelativePath,
@@ -196,6 +198,39 @@ describe("planAttachments", () => {
     expect(plan.skipped).toEqual({ "unsupported type": 1 });
   });
 
+  it("skips a pick of the reserved backup folder and counts it", () => {
+    // Picking docs/varagity-exports itself: every path starts with the
+    // reserved folder, so nothing is uploaded — not even an allowed type.
+    const plan = planAttachments(
+      [
+        pickedFile("varagity-rag-20261108-1312.zip", "varagity-exports/varagity-rag-20261108-1312.zip"),
+        pickedFile("notes.md", "varagity-exports/notes.md"),
+      ],
+      ALLOWED,
+      1,
+      { folder: true },
+    );
+    expect(plan.accepted).toEqual([]);
+    expect(plan.paths).toEqual([]);
+    expect(plan.skipped).toEqual({ reserved: 2 });
+    expect(summarizeSkipped(plan.skipped)).toBe("2 files skipped — reserved");
+  });
+
+  it("keeps a nested folder of that name, and refuses a flat file named like it", () => {
+    const folder = planAttachments(
+      [pickedFile("a.md", "corpus/varagity-exports/a.md")],
+      ALLOWED,
+      1,
+      { folder: true },
+    );
+    expect(folder.paths).toEqual(["corpus/varagity-exports/a.md"]);
+    const flat = planAttachments([pickedFile("varagity-exports")], null, null, {
+      folder: false,
+    });
+    expect(flat.accepted).toEqual([]);
+    expect(flat.skipped).toEqual({ reserved: 1 });
+  });
+
   it("skips extension/size checks while config is unloaded, but still path-filters", () => {
     const plan = planAttachments(
       [pickedFile("anything.xyz", "docs/anything.xyz"), pickedFile("x", "docs/.hidden/x")],
@@ -236,6 +271,24 @@ describe("skipLabel", () => {
     expect(skipLabel("invalid_path")).toBe("invalid path");
     expect(skipLabel("path_too_deep")).toBe("folder too deep");
     expect(skipLabel("hidden")).toBe("hidden");
+    expect(skipLabel("reserved_path")).toBe("reserved");
+    expect(skipLabel("reserved")).toBe("reserved");
     expect(skipLabel("write_failed")).toBe("rejected");
+  });
+});
+
+describe("isReservedPath", () => {
+  it("matches the reserved folder and anything inside it, in any case", () => {
+    expect(EXPORTS_DIRNAME).toBe("varagity-exports");
+    expect(isReservedPath("varagity-exports")).toBe(true);
+    expect(isReservedPath("varagity-exports/b.zip")).toBe(true);
+    expect(isReservedPath("Varagity-Exports\\b.zip")).toBe(true);
+  });
+
+  it("leaves nested folders, lookalikes and ordinary paths alone", () => {
+    expect(isReservedPath("docs/varagity-exports/b.zip")).toBe(false);
+    expect(isReservedPath("varagity-exports.zip")).toBe(false);
+    expect(isReservedPath("my-varagity-exports/x.md")).toBe(false);
+    expect(isReservedPath("")).toBe(false);
   });
 });

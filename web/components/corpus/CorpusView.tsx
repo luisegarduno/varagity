@@ -3,14 +3,17 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
 
+import { BackupPanel } from "@/components/corpus/BackupPanel";
 import { DocumentTable } from "@/components/corpus/DocumentTable";
 import { IngestPanel } from "@/components/corpus/IngestPanel";
 import { UploadDropzone } from "@/components/corpus/UploadDropzone";
+import { useBackupRun } from "@/components/corpus/use-backup";
 import { useSettingsCatalog } from "@/components/settings/use-settings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useMountEffect } from "@/hooks/use-mount-effect";
 import { ApiError, startIngest, streamIngestStatus } from "@/lib/api";
+import { formatCount } from "@/lib/backup-reducer";
 import {
   initialIngestView,
   reduceIngestEvent,
@@ -24,9 +27,10 @@ const UNREACHABLE = "API unreachable — is the stack up? (docker compose up -d)
 /**
  * The document corpus tab (spec_v2 §4.2): upload dropzone, live ingest
  * progress (the status SSE replays, so reloading mid-run re-renders the
- * same picture), the ingested-document table, and the stale-corpus
- * "Re-ingest to apply" affordance. An empty corpus gets the guided
- * upload → ingest → ask flow instead of a bare table.
+ * same picture), the export & restore panel (ADR-019), the
+ * ingested-document table, and the stale-corpus "Re-ingest to apply"
+ * affordance. An empty corpus gets the guided upload → ingest → ask flow
+ * instead of a bare table.
  *
  * Renders the tab's column only — `CorpusTabs` owns the page header and
  * the scroll container both corpora share.
@@ -42,6 +46,9 @@ export function CorpusView() {
   const [ingest, setIngest] = useState<IngestView>(initialIngestView);
   const [ingestError, setIngestError] = useState<string | null>(null);
   const followingRef = useRef(false);
+  // The export & restore panel's own run + bundle list (it follows its own
+  // replaying stream, exactly as the ingest panel does below).
+  const backup = useBackupRun("rag");
 
   const corpusStale = catalog?.corpus_stale ?? false;
   const [hasUploaded, setHasUploaded] = useState(false);
@@ -120,6 +127,14 @@ export function CorpusView() {
   // (a live or terminal run renders the normal layout with its panel).
   const guided =
     documents !== null && documents.length === 0 && ingest.run === null;
+  // What an export would save right now — the backup panel's "Now:" line.
+  const holding =
+    documents === null || documents.length === 0
+      ? null
+      : `${formatCount(documents.length, "documents")} · ${formatCount(
+          documents.reduce((sum, document) => sum + document.n_chunks, 0),
+          "chunks",
+        )}`;
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 p-4 sm:p-6">
@@ -215,6 +230,17 @@ export function CorpusView() {
             disabled={isRunning}
             onIngest={() => void handleStartIngest(false)}
             onReingest={() => void handleStartIngest(true)}
+          />
+
+          <BackupPanel
+            corpus="rag"
+            view={backup.view}
+            bundles={backup.bundles}
+            bundlesError={backup.bundlesError}
+            holding={holding}
+            empty={documents !== null && documents.length === 0}
+            error={backup.error}
+            onExport={() => void backup.startExport()}
           />
 
           <DocumentTable documents={documents} onChanged={refreshDocuments} />

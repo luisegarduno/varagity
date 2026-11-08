@@ -1,6 +1,214 @@
 {
   "components": {
     "schemas": {
+      "BackupLogEvent": {
+        "description": "Payload of the backup-status SSE ``log`` event.\n\nRelayed ``varagity.backup`` log records (what was exported, a swept\npartial, an embedding-model drift warning), so the panel shows what the\nserver log would.\n\nAttributes:\n    level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).\n    message: The formatted log message.",
+        "properties": {
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "level",
+          "message"
+        ],
+        "title": "BackupLogEvent",
+        "type": "object"
+      },
+      "BackupProgressEvent": {
+        "description": "Payload of the backup-status SSE ``progress`` event.\n\nAn export walks ``snapshot`` (open one consistent read of the corpus) \u2192\n``documents`` \u2192 ``chunks`` (rows written, with ``current``/``total``) \u2192\n``finalize`` (the vector matrix, the manifest, the atomic rename).\n\nAttributes:\n    stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize``.\n    current: Rows written so far in a counted stage.\n    total: The stage's row count.",
+        "properties": {
+          "current": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Current"
+          },
+          "stage": {
+            "enum": [
+              "snapshot",
+              "documents",
+              "chunks",
+              "finalize"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total"
+          }
+        },
+        "required": [
+          "stage"
+        ],
+        "title": "BackupProgressEvent",
+        "type": "object"
+      },
+      "BackupRunOut": {
+        "description": "One backup run's state (``POST /api/backups/{corpus}/export`` + its stream).\n\nAttributes:\n    run_id: The run handle.\n    corpus: The corpus being backed up.\n    operation: What the run does \u2014 ``export`` writes a new bundle.\n    state: ``running`` | ``completed`` | ``failed``.\n    bundle: The file the run wrote (set once it is published \u2014 an export\n        names nothing until its bundle is whole).\n    saved_to: Where it landed, relative to the checkout\n        (``docs/varagity-exports/<name>``) \u2014 the path \"Copy path\"\n        copies, right in both host and compose mode.\n    started_at: When the run started.\n    finished_at: When it reached a terminal state (``None`` while\n        running).\n    error: The run-level failure (``failed`` only).\n    summary: The final counters (``completed`` only).",
+        "properties": {
+          "bundle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bundle"
+          },
+          "corpus": {
+            "enum": [
+              "rag",
+              "graph"
+            ],
+            "title": "Corpus",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "operation": {
+            "const": "export",
+            "title": "Operation",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "saved_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saved To"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "running",
+              "completed",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupSummaryOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "corpus",
+          "operation",
+          "state",
+          "started_at"
+        ],
+        "title": "BackupRunOut",
+        "type": "object"
+      },
+      "BackupStatusEvent": {
+        "description": "Payload of the backup-status SSE ``status`` event.\n\nThe stream's first frame (a snapshot on connect) and its last (the\nterminal state). ``run=None`` means no backup run has run for this\ncorpus in this API process \u2014 the stream closes immediately after.\n\nAttributes:\n    run: The current (or last) run, if any.",
+        "properties": {
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "BackupStatusEvent",
+        "type": "object"
+      },
+      "BackupSummaryOut": {
+        "description": "What a completed backup run did (terminal runs only).\n\nAttributes:\n    counts: What the bundle holds \u2014 ``documents`` and ``chunks`` for a\n        RAG bundle.\n    size_bytes: The bundle's size on disk.\n    wall_clock_s: Seconds from the snapshot to the published bundle.",
+        "properties": {
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "wall_clock_s": {
+            "title": "Wall Clock S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "counts",
+          "size_bytes",
+          "wall_clock_s"
+        ],
+        "title": "BackupSummaryOut",
+        "type": "object"
+      },
       "Body_upload_documents_api_documents_post": {
         "properties": {
           "files": {
@@ -61,6 +269,145 @@
           "files"
         ],
         "title": "Body_upload_graph_documents_api_graph_documents_post",
+        "type": "object"
+      },
+      "BundleManifestOut": {
+        "description": "A backup bundle's ``bundle.json``, as the backups list reports it (ADR-019).\n\nThe file format's own model (:class:`varagity.backup.bundle.BundleManifest`)\non the wire unchanged \u2014 the panel shows what a bundle holds (``counts``)\nand what it was made under (the embedding model and dimension, the\ningest settings, the stale flag) straight from the manifest.",
+        "properties": {
+          "corpus": {
+            "enum": [
+              "rag",
+              "graph"
+            ],
+            "title": "Corpus",
+            "type": "string"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "embedding_dim": {
+            "title": "Embedding Dim",
+            "type": "integer"
+          },
+          "embedding_model": {
+            "title": "Embedding Model",
+            "type": "string"
+          },
+          "format": {
+            "const": "varagity-backup",
+            "title": "Format",
+            "type": "string"
+          },
+          "ingest_settings": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingest Settings"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/BundleMember"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "version",
+          "corpus",
+          "created_at",
+          "embedding_model",
+          "embedding_dim",
+          "stale",
+          "counts",
+          "members"
+        ],
+        "title": "BundleManifestOut",
+        "type": "object"
+      },
+      "BundleMember": {
+        "description": "One data member of a bundle, as its manifest records it.\n\nAttributes:\n    name: The member's path inside the zip.\n    size_bytes: Its uncompressed size.\n    sha256: The hex sha256 of its uncompressed bytes \u2014 what a restore\n        verifies before it touches a store.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "size_bytes",
+          "sha256"
+        ],
+        "title": "BundleMember",
+        "type": "object"
+      },
+      "BundleOut": {
+        "description": "One bundle file in ``GET /api/backups/{corpus}`` (ADR-019).\n\nAttributes:\n    name: The bundle's file name in the corpus's ``varagity-exports/``\n        folder \u2014 the key the download route takes.\n    size_bytes: Its size on disk.\n    modified_at: Its mtime (UTC).\n    manifest: Its ``bundle.json``, or ``None`` when the file has none or\n        it is unreadable \u2014 a zip copied into the folder by hand is\n        listed, never hidden.",
+        "properties": {
+          "manifest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BundleManifestOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "modified_at": {
+            "format": "date-time",
+            "title": "Modified At",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "size_bytes",
+          "modified_at"
+        ],
+        "title": "BundleOut",
         "type": "object"
       },
       "ChatOverrides": {
@@ -2431,7 +2778,7 @@
         "type": "object"
       },
       "UploadedFileOut": {
-        "description": "Outcome for one file of a ``POST /api/documents`` upload.\n\nAttributes:\n    file_name: The stored (sanitized) file name (rejections echo the\n        client-supplied name/path they rejected).\n    size_bytes: Bytes written (``0`` when rejected).\n    stored: Whether the file landed in ``DOCS_PATH``.\n    replaced: Whether an existing file at the same target was\n        overwritten (a re-upload; the next ingest re-processes it under\n        a new hash).\n    reason: Rejection reason when ``stored`` is false\n        (``extension_not_allowed`` | ``file_too_large`` |\n        ``invalid_filename`` | ``invalid_path`` | ``path_too_deep`` |\n        ``write_failed`` \u2014 the last is a server-side problem, escalated\n        to a structured ``500`` when no file in the batch landed).\n        Graph corpus uploads add ``unsupported_graph_source``: the file\n        landed, no registered message source claimed it, and it was\n        removed again (spec_graphrag \u00a710.2).\n    relative_path: The stored path relative to ``DOCS_PATH`` when the\n        upload declared one (folder uploads, spec_v3 \u00a75.2); ``None``\n        for flat uploads and rejections.",
+        "description": "Outcome for one file of a ``POST /api/documents`` upload.\n\nAttributes:\n    file_name: The stored (sanitized) file name (rejections echo the\n        client-supplied name/path they rejected).\n    size_bytes: Bytes written (``0`` when rejected).\n    stored: Whether the file landed in ``DOCS_PATH``.\n    replaced: Whether an existing file at the same target was\n        overwritten (a re-upload; the next ingest re-processes it under\n        a new hash).\n    reason: Rejection reason when ``stored`` is false\n        (``extension_not_allowed`` | ``file_too_large`` |\n        ``invalid_filename`` | ``invalid_path`` | ``path_too_deep`` |\n        ``write_failed`` \u2014 the last is a server-side problem, escalated\n        to a structured ``500`` when no file in the batch landed).\n        Graph corpus uploads add ``unsupported_graph_source``: the file\n        landed, no registered message source claimed it, and it was\n        removed again (spec_graphrag \u00a710.2). Both corpora refuse\n        ``reserved_path``: a path under \u2014 or a flat file named \u2014 the\n        reserved ``varagity-exports`` backup folder (ADR-019).\n    relative_path: The stored path relative to ``DOCS_PATH`` when the\n        upload declared one (folder uploads, spec_v3 \u00a75.2); ``None``\n        for flat uploads and rejections.",
         "properties": {
           "file_name": {
             "title": "File Name",
@@ -2583,6 +2930,251 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/backups/{corpus}": {
+      "get": {
+        "description": "List the backup bundles in a corpus's ``varagity-exports/`` folder.\n\nA directory read plus one small member per bundle \u2014 the manifest is\nfound through each zip's central directory, so a folder of large\nbundles lists in milliseconds.\n\nArgs:\n    corpus: The corpus whose backups to list.\n\nReturns:\n    One entry per bundle file, newest first (empty when the folder does\n    not exist yet).",
+        "operationId": "list_backups_api_backups__corpus__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "corpus",
+            "required": true,
+            "schema": {
+              "const": "rag",
+              "title": "Corpus",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BundleOut"
+                  },
+                  "title": "Response List Backups Api Backups  Corpus  Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Backups",
+        "tags": [
+          "backups"
+        ]
+      }
+    },
+    "/api/backups/{corpus}/export": {
+      "post": {
+        "description": "Start a background export and return its handle.\n\nThe bundle is written into ``<corpus root>/varagity-exports/`` as\n``varagity-<corpus>-<UTC yyyymmdd-HHMM>.zip`` (a same-minute repeat gets\na ``-2`` suffix \u2014 never a replace), from one consistent snapshot of the\ncorpus.\n\nArgs:\n    corpus: The corpus to export.\n    runners: The process-wide backup runners.\n    preflight: The awaitable reachability check (structured 503).\n    store: The per-request vector store (the nothing-to-export check).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``503 postgres_unreachable`` when the database is\n        down; ``422 nothing_to_export`` when nothing is ingested; ``500\n        docs_path_not_writable`` when the exports folder can't be\n        written; ``409 corpus_busy`` while any operation \u2014 another\n        export included \u2014 holds the corpus (the message names it).",
+        "operationId": "start_export_api_backups__corpus__export_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "corpus",
+            "required": true,
+            "schema": {
+              "const": "rag",
+              "title": "Corpus",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Start Export",
+        "tags": [
+          "backups"
+        ]
+      }
+    },
+    "/api/backups/{corpus}/files/{name}": {
+      "get": {
+        "description": "Return one bundle as a file download.\n\nA plain ``GET`` answering with ``Content-Disposition: attachment``, so\nthe panel's Download is an ordinary link \u2014 the browser saves the file\n(and offers its own \"Show in folder\") without a cross-origin fetch.\n\nArgs:\n    corpus: The corpus the bundle belongs to.\n    name: The bundle's file name in the exports folder.\n\nReturns:\n    The bundle's bytes as ``application/zip``.\n\nRaises:\n    HTTPException: ``404 bundle_not_found`` when no such bundle lives in\n        the folder \u2014 which covers a name trying to escape it.",
+        "operationId": "download_backup_api_backups__corpus__files__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "corpus",
+            "required": true,
+            "schema": {
+              "const": "rag",
+              "title": "Corpus",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The bundle, as a `Content-Disposition: attachment` download."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Backup",
+        "tags": [
+          "backups"
+        ]
+      }
+    },
+    "/api/backups/{corpus}/status": {
+      "get": {
+        "description": "Stream the corpus's current (or last) backup run as SSE.\n\nFrames: ``status`` (snapshot; also terminal, with the summary and the\nsaved path), ``progress`` (``snapshot`` \u2192 ``documents`` \u2192 ``chunks`` \u2192\n``finalize``), ``log`` (relayed ``varagity.backup`` lines). With no run\nin this API process the stream is a single idle ``status`` frame; after\na terminal run it replays that run and closes.\n\nArgs:\n    corpus: The corpus whose backup run to follow.\n    runners: The process-wide backup runners.\n\nYields:\n    The framed events, oldest first, then live until terminal.",
+        "operationId": "backup_status_api_backups__corpus__status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "corpus",
+            "required": true,
+            "schema": {
+              "const": "rag",
+              "title": "Corpus",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Backup Status",
+        "tags": [
+          "backups"
+        ]
+      }
+    },
     "/api/chat": {
       "post": {
         "description": "Answer one question as a typed SSE stream (spec_v2 \u00a74.3).\n\nEvent order: ``retrieval`` (the provenance payload) \u2192 ``reasoning``/\n``token`` deltas, interleaved with throttled ``stats`` frames while the\nmodel server reports throughput \u2192 ``done`` (ids, full answer, usage +\nper-stage latency). A failure after the stream opened emits an in-band\n``error`` event instead. Aborted turns (client disconnect) persist\nnothing \u2014 the turn is persisted *at* ``done``.\n\n``stats`` is optional in the protocol: it appears only when the model\nserver reports its own decode counters (llama.cpp does; see\n:class:`~varagity.models.llm.GenerationTimings`), so clients must treat\nzero ``stats`` frames as normal rather than as a stalled stream.\n\nArgs:\n    plan: The validated request plan.\n\nYields:\n    The framed SSE events, in protocol order.",

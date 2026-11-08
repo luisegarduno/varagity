@@ -43,6 +43,8 @@ class FakeConnection:
         self.results = list(results or [])
         self.queries: list[tuple[str, Any]] = []
         self.batches: list[tuple[str, list[Any]]] = []
+        self.server_cursors: list[tuple[str, bool, int, str]] = []
+        self.streams: list[list[Any]] = []
         self.transactions = 0
         self.closed = False
 
@@ -50,10 +52,12 @@ class FakeConnection:
         self.queries.append((sql, params))
         return self.results.pop(0) if self.results else FakeCursor()
 
-    def cursor(self) -> Any:
+    def cursor(self, name: str = "", *, binary: bool = False) -> Any:
         connection = self
 
         class _Cursor:
+            itersize = 100
+
             def __enter__(self) -> "_Cursor":
                 return self
 
@@ -62,6 +66,14 @@ class FakeConnection:
 
             def executemany(self, sql: str, params: Any) -> None:
                 connection.batches.append((sql, list(params)))
+
+            def execute(self, sql: str) -> None:
+                # A named (server-side) cursor: record its shape, then serve
+                # the next scripted result set when iterated.
+                connection.server_cursors.append((name, binary, self.itersize, sql))
+
+            def __iter__(self) -> Iterator[Any]:
+                return iter(connection.streams.pop(0))
 
         return _Cursor()
 
@@ -274,3 +286,63 @@ class TestReads:
         conn = FakeConnection()
         assert store_with(conn).fetch_by_identity([]) == {}
         assert conn.queries == []
+
+
+class TestCorpusSnapshot:
+    """The backup export's read (ADR-019): one REPEATABLE READ snapshot."""
+
+    def test_one_read_only_repeatable_read_transaction_documents_then_chunks(self) -> None:
+        conn = FakeConnection([FakeCursor(), FakeCursor(row=(2, 3))])
+        vector = Vector([0.5, 0.25])
+        document_rows = [
+            ("docaaa000000000a", "/abs/corpus/a.md", "md", "deadbeef", 2, INGESTED_AT),
+            ("docbbb000000000b", "/abs/corpus/b.md", "md", "cafebabe", 1, INGESTED_AT),
+        ]
+        chunk_rows = [
+            (
+                f"docaaa000000000a::{i}",
+                "docaaa000000000a",
+                i,
+                i,
+                f"c{i}",
+                None,
+                f"c{i}",
+                {},
+                INGESTED_AT,
+                vector,
+            )
+            for i in range(3)
+        ]
+        conn.streams = [document_rows, chunk_rows]
+        store = store_with(conn)
+
+        with store.iter_corpus() as snapshot:
+            assert (snapshot.document_count, snapshot.chunk_count) == (2, 3)
+            documents = list(snapshot.documents())
+            chunks = list(snapshot.chunks())
+
+        assert conn.transactions == 1  # every read inside one transaction
+        # The isolation level must be the transaction's first statement.
+        assert conn.queries[0][0] == ("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        assert "count(*) FROM documents" in conn.queries[1][0]
+        assert "count(*) FROM chunks" in conn.queries[1][0]
+        (doc_cursor, chunk_cursor) = conn.server_cursors
+        # Server-side (named), binary (vectors arrive bit-exact), batched.
+        assert doc_cursor[0] and doc_cursor[1] is True and doc_cursor[2] == 500
+        assert chunk_cursor[0] and chunk_cursor[1] is True and chunk_cursor[2] == 500
+        assert "FROM documents" in doc_cursor[3] and "ORDER BY doc_id" in doc_cursor[3]
+        assert "embedding" not in doc_cursor[3]
+        assert "ORDER BY original_index, doc_id" in chunk_cursor[3]
+        assert "embedding" in chunk_cursor[3]
+
+        assert [row.doc_id for row in documents] == ["docaaa000000000a", "docbbb000000000b"]
+        assert documents[1].content_hash == "cafebabe"
+        assert documents[0].ingested_at == INGESTED_AT
+        assert [row.chunk_id for row in chunks] == [f"docaaa000000000a::{i}" for i in range(3)]
+        assert chunks[0].embedding is vector
+        assert chunks[2].original_index == 2
+
+    def test_an_empty_corpus_counts_zero(self) -> None:
+        conn = FakeConnection([FakeCursor(), FakeCursor(row=None)])
+        with store_with(conn).iter_corpus() as snapshot:
+            assert (snapshot.document_count, snapshot.chunk_count) == (0, 0)

@@ -18,6 +18,8 @@ One page per package:
 - [Contextual Retrieval](context.md) — `situate_context()`
 - [Stores](stores.md) — `ChunkRecord`, pgvector, Elasticsearch BM25,
   conversation persistence, app settings, the migration runner
+- [Backups](backup.md) — the backup bundle (manifest, all-or-nothing
+  writer, listing) and the RAG export from one corpus snapshot
 - [Retrieval](retrieval.md) — semantic / bm25 / hybrid + fusion, and the
   `reranked` composition over them
 - [Chat engines](chat.md) — the `PreparedQuery` two-string split, the
@@ -28,7 +30,7 @@ One page per package:
 - [Generation](generation.md) — context prompt & grounded answers
 - [Orchestration](pipeline.md) — the Prefect flows
 - [HTTP API](api.md) — the FastAPI service: SSE chat, conversations,
-  settings, documents/corpus, ingest, health
+  settings, documents/corpus, ingest, backups, health
 - [Page preview](preview.md) — evidence-panel page previews: locate
   (trigram scoring + pdfium rects), render, source resolution, PPTX
   conversion

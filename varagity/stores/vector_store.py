@@ -8,7 +8,10 @@ the postgres container on first boot).
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import psycopg
@@ -136,6 +139,154 @@ SELECT COALESCE(metadata->>'chunking_strategy', 'unknown'), count(*)
 FROM chunks
 GROUP BY 1
 """
+
+# The corpus snapshot behind a backup export (ADR-019). The isolation level
+# must be the transaction's first statement; READ ONLY because an export
+# never writes, and so a bug can't turn the snapshot into a mutation.
+_SNAPSHOT_ISOLATION_SQL = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+
+_CORPUS_COUNTS_SQL = "SELECT (SELECT count(*) FROM documents), (SELECT count(*) FROM chunks)"
+
+# doc_id order keeps a bundle's documents.jsonl deterministic.
+_CORPUS_DOCUMENTS_SQL = """
+SELECT doc_id, source, file_type, content_hash, n_chunks, ingested_at
+FROM documents
+ORDER BY doc_id
+"""
+
+# original_index is the corpus-global ingest counter, so this is ingest order;
+# doc_id breaks the (theoretical) tie between two concurrent runs' ranges —
+# (doc_id, original_index) is unique, so the order is total and repeatable.
+_CORPUS_CHUNKS_SQL = """
+SELECT chunk_id, doc_id, original_index, chunk_index, content, context,
+       contextualized_content, metadata, created_at, embedding
+FROM chunks
+ORDER BY original_index, doc_id
+"""
+
+# Rows fetched per server-side round trip while streaming a snapshot: a chunk
+# row is a few KB with its vector, so a batch stays well under 10 MB.
+_SNAPSHOT_BATCH_ROWS = 500
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusDocumentRow:
+    """One ``documents`` row, every column, as a corpus snapshot reads it.
+
+    Attributes:
+        doc_id: The document's stable id.
+        source: Absolute file path recorded at ingest time.
+        file_type: File extension without the dot.
+        content_hash: sha256 of the source file's bytes at ingest time.
+        n_chunks: Chunks ingested (``0`` = no extractable text).
+        ingested_at: When the document (last) landed in the stores.
+    """
+
+    doc_id: str
+    source: str
+    file_type: str
+    content_hash: str
+    n_chunks: int
+    ingested_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusChunkRow:
+    """One ``chunks`` row, every column, as a corpus snapshot reads it.
+
+    Attributes:
+        chunk_id: ``{doc_id}::{chunk_index}``.
+        doc_id: The owning document.
+        original_index: The corpus-global index (the cross-store join key).
+        chunk_index: Position within the document.
+        content: The original chunk text.
+        context: The contextual blurb (``None`` when contextualization was
+            off).
+        contextualized_content: The embedded and BM25-indexed text.
+        metadata: The full ``ChunkRecord`` JSON.
+        created_at: The chunk's creation timestamp.
+        embedding: The passage vector, exactly as stored (read in pgvector's
+            binary format, so no decimal round trip touches a bit).
+    """
+
+    chunk_id: str
+    doc_id: str
+    original_index: int
+    chunk_index: int
+    content: str
+    context: str | None
+    contextualized_content: str
+    metadata: dict[str, Any]
+    created_at: datetime
+    embedding: Vector
+
+
+class CorpusSnapshot:
+    """One consistent, read-only view of ``documents`` and ``chunks``.
+
+    Handed out by :meth:`ContextualVectorDB.iter_corpus` for the life of its
+    ``with`` block: the counts and both row streams come from the same
+    REPEATABLE READ transaction, so an ingest or delete committing mid-export
+    can never tear a bundle — every row belongs to one moment, and the
+    counts agree with the streams.
+
+    Attributes:
+        document_count: ``documents`` rows in the snapshot.
+        chunk_count: ``chunks`` rows in the snapshot.
+    """
+
+    def __init__(
+        self, conn: psycopg.Connection[Any], *, document_count: int, chunk_count: int
+    ) -> None:
+        """Bind the snapshot to its open transaction.
+
+        Args:
+            conn: The connection holding the snapshot's transaction.
+            document_count: ``documents`` rows in the snapshot.
+            chunk_count: ``chunks`` rows in the snapshot.
+        """
+        self._conn = conn
+        self.document_count = document_count
+        self.chunk_count = chunk_count
+
+    def documents(self) -> Iterator[CorpusDocumentRow]:
+        """Stream every ``documents`` row, ``doc_id`` order.
+
+        Yields:
+            One row per document.
+        """
+        for row in self._stream("varagity_snapshot_documents", _CORPUS_DOCUMENTS_SQL):
+            yield CorpusDocumentRow(*row)
+
+    def chunks(self) -> Iterator[CorpusChunkRow]:
+        """Stream every ``chunks`` row with its vector, ingest order.
+
+        Yields:
+            One row per chunk, ordered by ``original_index`` (``doc_id``
+            breaking ties) — the order a bundle's ``chunks.jsonl`` and its
+            embedding matrix share.
+        """
+        for row in self._stream("varagity_snapshot_chunks", _CORPUS_CHUNKS_SQL):
+            yield CorpusChunkRow(*row)
+
+    def _stream(self, name: str, sql: str) -> Iterator[tuple[Any, ...]]:
+        """Run one query through a server-side cursor inside the snapshot.
+
+        A named (server-side) cursor fetches in batches, so a corpus of any
+        size streams in bounded memory; binary results hand the vectors over
+        bit-exact.
+
+        Args:
+            name: The server-side cursor's name.
+            sql: The query to stream.
+
+        Yields:
+            The raw result rows, in query order.
+        """
+        with self._conn.cursor(name=name, binary=True) as cursor:
+            cursor.itersize = _SNAPSHOT_BATCH_ROWS
+            cursor.execute(sql)
+            yield from cursor
 
 
 def default_conninfo() -> str:
@@ -285,6 +436,28 @@ class ContextualVectorDB(ClosingContextMixin):
         """
         rows = self._conn.execute(_LIST_DOCUMENTS_SQL).fetchall()
         return [_row_to_document(row) for row in rows]
+
+    @contextmanager
+    def iter_corpus(self) -> Iterator[CorpusSnapshot]:
+        """Open one consistent snapshot of the whole corpus (a backup export).
+
+        Everything a RAG bundle holds — every ``documents`` row, then every
+        ``chunks`` row with its vector — is read inside **one** REPEATABLE
+        READ, READ ONLY transaction (ADR-019), so the export is a single
+        moment of the corpus even while an ingest or delete commits beside
+        it. The rows stream through server-side cursors, so memory stays
+        flat however large the corpus is. Readers never block writers in
+        Postgres: the open snapshot holds no lock an ingest would wait on.
+
+        Yields:
+            The snapshot, valid until the ``with`` block exits (which ends
+            the transaction).
+        """
+        with self._conn.transaction():
+            self._conn.execute(_SNAPSHOT_ISOLATION_SQL)
+            row = self._conn.execute(_CORPUS_COUNTS_SQL).fetchone()
+            documents, chunks = (0, 0) if row is None else (int(row[0]), int(row[1]))
+            yield CorpusSnapshot(self._conn, document_count=documents, chunk_count=chunks)
 
     def get_document(self, doc_id: str) -> DocumentInfo | None:
         """Fetch one ingested document by id.

@@ -166,3 +166,41 @@ def test_by_bucket_enumerates_every_bucket() -> None:
     named = dict(buckets.by_bucket())
     assert list(named) == ["text_like", "pdf", "office", "web", "image"]
     assert named["office"] == [Path("c.docx")]
+
+
+def test_the_reserved_exports_folder_is_skipped(
+    tmp_path: Path, settings_env: Callable[..., None]
+) -> None:
+    """ADR-019: bundles are never sources — even if their suffix were allowed."""
+    root = tmp_path / "docs"
+    (root / "varagity-exports").mkdir(parents=True)
+    (root / "varagity-exports" / "varagity-rag-20261108-1312.zip").write_bytes(b"PK")
+    (root / "varagity-exports" / "stray.md").write_text("never a source")
+    (root / "kept.md").write_text("a real document")
+    settings_env(ALLOWED_EXTENSIONS=".md,.zip")
+    buckets = discover_documents(str(root), verbose=0)
+    assert [p.name for p in buckets.text_like] == ["kept.md"]
+    assert buckets.total == 1
+
+
+def test_the_reserved_name_is_matched_case_insensitively(
+    tmp_path: Path, settings_env: Callable[..., None]
+) -> None:
+    """On a case-insensitive filesystem a differently-cased twin *is* the folder."""
+    root = tmp_path / "docs"
+    (root / "Varagity-Exports").mkdir(parents=True)
+    (root / "Varagity-Exports" / "a.md").write_text("still reserved")
+    settings_env(ALLOWED_EXTENSIONS=".md")
+    assert discover_documents(str(root), verbose=0).total == 0
+
+
+def test_a_nested_folder_of_the_same_name_is_ordinary_corpus(
+    tmp_path: Path, settings_env: Callable[..., None]
+) -> None:
+    """Only the corpus root's own varagity-exports/ is reserved."""
+    root = tmp_path / "docs"
+    (root / "projects" / "varagity-exports").mkdir(parents=True)
+    (root / "projects" / "varagity-exports" / "notes.md").write_text("an ordinary document")
+    settings_env(ALLOWED_EXTENSIONS=".md")
+    buckets = discover_documents(str(root), verbose=0)
+    assert [p.name for p in buckets.text_like] == ["notes.md"]

@@ -5,11 +5,11 @@ corpus-list, delete, and preview sites share, so it carries dedicated tests
 for each branch of "resolve a path and confirm it stays under the root".
 """
 
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 
 import pytest
 
-from varagity.paths import resolve_contained
+from varagity.paths import EXPORTS_DIRNAME, is_exports_path, relative_to_root, resolve_contained
 
 
 def test_contained_file_returns_the_resolved_path(tmp_path: Path) -> None:
@@ -59,3 +59,54 @@ def test_unresolvable_path_oserror_returns_none(
 
     monkeypatch.setattr(Path, "resolve", _raise)
     assert resolve_contained(root / "x.md", root) is None
+
+
+class TestRelativeToRoot:
+    def test_a_contained_source_is_relative_posix(self, tmp_path: Path) -> None:
+        root = (tmp_path / "corpus").resolve()
+        (root / "q3").mkdir(parents=True)
+        assert relative_to_root(str(root / "q3" / "notes.md"), root) == "q3/notes.md"
+
+    def test_a_source_need_not_exist(self, tmp_path: Path) -> None:
+        """A backup records relative paths for documents whose files are gone."""
+        root = (tmp_path / "corpus").resolve()
+        root.mkdir()
+        assert relative_to_root(root / "deleted.pdf", root) == "deleted.pdf"
+
+    def test_an_outside_source_has_none(self, tmp_path: Path) -> None:
+        root = (tmp_path / "corpus").resolve()
+        root.mkdir()
+        assert relative_to_root("/app/docs/a.md", root) is None
+
+
+class TestIsExportsPath:
+    @pytest.mark.parametrize(
+        "relative",
+        [
+            "varagity-exports",
+            "varagity-exports/varagity-rag-20261108-1312.zip",
+            "varagity-exports/deep/x.md",
+            "Varagity-Exports/x.md",  # case-insensitive filesystems
+            PurePosixPath("varagity-exports/x.md"),
+            Path("varagity-exports"),
+        ],
+    )
+    def test_the_reserved_folder_and_its_contents(self, relative: str | PurePath) -> None:
+        assert is_exports_path(relative) is True
+
+    @pytest.mark.parametrize(
+        "relative",
+        [
+            "",
+            "notes.md",
+            "varagity-exports.zip",  # a file beside it, not the folder
+            "q3/varagity-exports/x.md",  # nested: ordinary corpus
+            "my-varagity-exports/x.md",
+        ],
+    )
+    def test_everything_else(self, relative: str) -> None:
+        assert is_exports_path(relative) is False
+
+
+def test_the_reserved_folder_name() -> None:
+    assert EXPORTS_DIRNAME == "varagity-exports"

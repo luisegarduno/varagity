@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from varagity.backup.bundle import BundleManifest
 from varagity.stores.records import RetrievedChunk
 
 # The JSON scalar types a setting value can take on the wire (spec_v2 §4.7).
@@ -684,7 +685,9 @@ class UploadedFileOut(BaseModel):
             to a structured ``500`` when no file in the batch landed).
             Graph corpus uploads add ``unsupported_graph_source``: the file
             landed, no registered message source claimed it, and it was
-            removed again (spec_graphrag §10.2).
+            removed again (spec_graphrag §10.2). Both corpora refuse
+            ``reserved_path``: a path under — or a flat file named — the
+            reserved ``varagity-exports`` backup folder (ADR-019).
         relative_path: The stored path relative to ``DOCS_PATH`` when the
             upload declared one (folder uploads, spec_v3 §5.2); ``None``
             for flat uploads and rejections.
@@ -1228,3 +1231,127 @@ class GraphEntityDetailOut(BaseModel):
     entity: GraphExportNodeOut
     relations: list[GraphExportEdgeOut] = []
     sources: list[GraphTranscriptRefOut] = []
+
+
+class BundleManifestOut(BundleManifest):
+    """A backup bundle's ``bundle.json``, as the backups list reports it (ADR-019).
+
+    The file format's own model (:class:`varagity.backup.bundle.BundleManifest`)
+    on the wire unchanged — the panel shows what a bundle holds (``counts``)
+    and what it was made under (the embedding model and dimension, the
+    ingest settings, the stale flag) straight from the manifest.
+    """
+
+
+class BundleOut(BaseModel):
+    """One bundle file in ``GET /api/backups/{corpus}`` (ADR-019).
+
+    Attributes:
+        name: The bundle's file name in the corpus's ``varagity-exports/``
+            folder — the key the download route takes.
+        size_bytes: Its size on disk.
+        modified_at: Its mtime (UTC).
+        manifest: Its ``bundle.json``, or ``None`` when the file has none or
+            it is unreadable — a zip copied into the folder by hand is
+            listed, never hidden.
+    """
+
+    name: str
+    size_bytes: int
+    modified_at: datetime
+    manifest: BundleManifestOut | None = None
+
+
+class BackupSummaryOut(BaseModel):
+    """What a completed backup run did (terminal runs only).
+
+    Attributes:
+        counts: What the bundle holds — ``documents`` and ``chunks`` for a
+            RAG bundle.
+        size_bytes: The bundle's size on disk.
+        wall_clock_s: Seconds from the snapshot to the published bundle.
+    """
+
+    counts: dict[str, int]
+    size_bytes: int
+    wall_clock_s: float
+
+
+class BackupRunOut(BaseModel):
+    """One backup run's state (``POST /api/backups/{corpus}/export`` + its stream).
+
+    Attributes:
+        run_id: The run handle.
+        corpus: The corpus being backed up.
+        operation: What the run does — ``export`` writes a new bundle.
+        state: ``running`` | ``completed`` | ``failed``.
+        bundle: The file the run wrote (set once it is published — an export
+            names nothing until its bundle is whole).
+        saved_to: Where it landed, relative to the checkout
+            (``docs/varagity-exports/<name>``) — the path "Copy path"
+            copies, right in both host and compose mode.
+        started_at: When the run started.
+        finished_at: When it reached a terminal state (``None`` while
+            running).
+        error: The run-level failure (``failed`` only).
+        summary: The final counters (``completed`` only).
+    """
+
+    run_id: str
+    corpus: Literal["rag", "graph"]
+    operation: Literal["export"]
+    state: Literal["running", "completed", "failed"]
+    bundle: str | None = None
+    saved_to: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    error: str | None = None
+    summary: BackupSummaryOut | None = None
+
+
+class BackupStatusEvent(BaseModel):
+    """Payload of the backup-status SSE ``status`` event.
+
+    The stream's first frame (a snapshot on connect) and its last (the
+    terminal state). ``run=None`` means no backup run has run for this
+    corpus in this API process — the stream closes immediately after.
+
+    Attributes:
+        run: The current (or last) run, if any.
+    """
+
+    run: BackupRunOut | None = None
+
+
+class BackupProgressEvent(BaseModel):
+    """Payload of the backup-status SSE ``progress`` event.
+
+    An export walks ``snapshot`` (open one consistent read of the corpus) →
+    ``documents`` → ``chunks`` (rows written, with ``current``/``total``) →
+    ``finalize`` (the vector matrix, the manifest, the atomic rename).
+
+    Attributes:
+        stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize``.
+        current: Rows written so far in a counted stage.
+        total: The stage's row count.
+    """
+
+    stage: Literal["snapshot", "documents", "chunks", "finalize"]
+    current: int | None = None
+    total: int | None = None
+
+
+class BackupLogEvent(BaseModel):
+    """Payload of the backup-status SSE ``log`` event.
+
+    Relayed ``varagity.backup`` log records (what was exported, a swept
+    partial, an embedding-model drift warning), so the panel shows what the
+    server log would.
+
+    Attributes:
+        level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).
+        message: The formatted log message.
+    """
+
+    level: str
+    message: str

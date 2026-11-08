@@ -177,6 +177,7 @@ nav:
       - Chunking: reference/chunking.md
       - Contextual Retrieval: reference/context.md
       - Stores: reference/stores.md
+      - Backups: reference/backup.md
       - Retrieval: reference/retrieval.md
       - Chat engines: reference/chat.md
       - GraphRAG: reference/graph.md

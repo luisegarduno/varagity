@@ -10,7 +10,7 @@ hand-written sections is **auto-rendered from `openapi.json`**, a checked-in
 snapshot of the app's schema (see [Keeping this page
 honest](#keeping-this-page-honest)).
 
-Two things OpenAPI cannot express are documented by hand here: the two SSE
+Two things OpenAPI cannot express are documented by hand here: the SSE
 event protocols and the error-envelope conventions.
 
 ## The error envelope
@@ -36,13 +36,16 @@ The code vocabulary, as built:
 | `no_file_stored` | 422 | `POST /api/documents` when every file in the batch was rejected. |
 | `paths_mismatch` | 422 | `POST /api/documents` when the `paths` form field doesn't pair 1:1 with `files` (the folder-upload positional contract is checked, not trusted). |
 | `modified_mismatch` | 422 | `POST /api/documents` when the `modified` form field (per-file last-modified epoch-ms; restamps each stored file's mtime so `file_modified_at` provenance survives the upload) doesn't pair 1:1 with `files`. Malformed *entries* are ignored per file, not errors. |
-| `too_many_files` / `batch_too_large` | 422 | `POST /api/documents` when the batch busts `UPLOAD_MAX_FILES` / `UPLOAD_MAX_TOTAL_MB` — rejected before any byte is written. Per-file problems (`invalid_path`, `path_too_deep`, `extension_not_allowed`, `file_too_large`, …) are **not** errors: they ride `UploadedFileOut.reason` inside the 201. |
+| `too_many_files` / `batch_too_large` | 422 | `POST /api/documents` when the batch busts `UPLOAD_MAX_FILES` / `UPLOAD_MAX_TOTAL_MB` — rejected before any byte is written. Per-file problems (`invalid_path`, `path_too_deep`, `extension_not_allowed`, `file_too_large`, `reserved_path` — a path under, or a flat file named, the reserved `varagity-exports` backup folder — …) are **not** errors: they ride `UploadedFileOut.reason` inside the 201. |
+| `nothing_to_export` | 422 | `POST /api/backups/{corpus}/export` when the corpus holds no documents — an empty bundle is not a backup. |
+| `bundle_not_found` | 404 | `GET /api/backups/{corpus}/files/{name}` for any name that is not a bundle file inside the corpus's `varagity-exports/` folder — hidden and in-flight `.partial` files, non-`.zip` names, and names (or symlinks) leading out of the folder included. |
 | `conversation_not_found` | 404 | `POST /api/chat` (pre-stream) and the conversation routes. |
 | `document_not_found` | 404 | `DELETE /api/documents/{doc_id}` and the two `…/preview/*` routes — the bulk `POST /api/documents/delete` reports unknown ids in `not_found` rather than failing the batch. |
 | `preview_disabled`, `unsupported_type`, `file_missing`, `file_changed`, `conversion_unavailable`, `conversion_failed`, `page_out_of_range` | 404 | `GET /api/documents/{doc_id}/preview/page/{page}` only — an `<img>` can't read a JSON envelope, so the page route turns each degrade reason into a 404 code. The locate route reports the same conditions inside a **200** envelope instead ([below](#the-preview-pair-degradable-by-design)). |
 | `ingest_already_running` | 409 | `POST /api/ingest` while a run is in flight (one run at a time). |
+| `corpus_busy` | 409 | `POST /api/backups/{corpus}/export` while another operation holds the corpus's write gate — a second export included. The message names the holder (`an export is running`). |
 | `<service>_unreachable` | 503 | Dependency preflights and per-request store construction: `postgres_unreachable`, `es_unreachable`, `llamacpp_unreachable`, `infinity_unreachable`. |
-| `docs_path_not_writable` | 500 | `POST /api/documents` when `DOCS_PATH` rejects writes (the container-UID gotcha — see the runbook). |
+| `docs_path_not_writable` | 500 | `POST /api/documents` when `DOCS_PATH` rejects writes (the container-UID gotcha — see the runbook); `POST /api/backups/rag/export` when `docs/varagity-exports/` can't be created or written (the same gotcha, or a *file* squatting on the folder's name). |
 | `internal_error` | 500 | Any unhandled exception (enveloped by the middleware). |
 | `pipeline_error` | — | **In-band SSE only**: the chat stream's `error` event when the pipeline fails after the 200 flushed. |
 | `bad_request`, `not_found`, `method_not_allowed`, `service_unavailable`, `http_<status>` | 400/404/405/503/other | Status-derived fallbacks for framework-raised errors (unknown path, wrong method, …). |
@@ -127,6 +130,53 @@ One `progress` frame per stage transition — except `contextualize`, the
 ingest's long pole (one LLM blurb per chunk), which additionally ticks
 per-chunk via `current`/`total`, so the browser's progress bar moves at the
 same granularity as the terminal's.
+
+## The backup status stream — `GET /api/backups/{corpus}/status`
+
+`POST /api/backups/{corpus}/export` writes one backup bundle — a zip of the
+corpus's processed rows, see [Data model](data-model.md#backup-bundles) —
+into the corpus folder's reserved `varagity-exports/`. It returns `202` with
+a run handle (`BackupRunOut`) at once, and the tracked `rag-export` flow
+runs on a background thread, the same shape as ingest. Everything that can
+refuse an export is checked **before** the 202, so a refusal is a clean
+status, never a failed run:
+
+1. The preflight: `503 postgres_unreachable` (an export reads the rows and
+   the stale flag, and calls no model service).
+2. `422 nothing_to_export` when nothing is ingested.
+3. `500 docs_path_not_writable` when the exports folder can't be written.
+4. `409 corpus_busy` while any operation holds the corpus.
+
+The last one is a per-corpus **write gate**, not a per-runner flag: one
+operation per corpus at a time, a second export included. Only `rag` is a
+valid `{corpus}` today; anything else is a `422 validation_error`.
+
+`GET /api/backups/{corpus}/status` has the ingest stream's **replay-from-frame-one**
+semantics. A subscriber gets the run's whole backlog, then live events until
+the terminal frame. With no backup run in this API process it is a single
+idle `status` frame (`run: null`).
+
+| Event | Payload | Fields |
+|---|---|---|
+| `status` | `BackupStatusEvent` | `run` (`BackupRunOut`: `run_id`, `corpus`, `operation` `export`, `state` `running`/`completed`/`failed`, timestamps, run-level `error`). A completed export adds `bundle` (the file name), `saved_to` (`docs/varagity-exports/<name>`, the checkout-relative path the panel's Copy path copies) and `summary` (`counts`, `size_bytes`, `wall_clock_s`). The first frame is the snapshot and the last is the terminal state. |
+| `progress` | `BackupProgressEvent` | `stage` (`snapshot` \| `documents` \| `chunks` \| `finalize`), plus `current`/`total` rows for the two counted stages. Throttled to about 50 frames per stage, so a large corpus doesn't flood the stream. |
+| `log` | `BackupLogEvent` | `level`, `message`: relayed `varagity.backup` records. These include what was exported, a swept partial from an interrupted export, and a warning when rows record an embedding model other than `EMBEDDING_MODEL`. |
+
+The terminal transition is atomic: the run turns terminal, its last frame
+joins the backlog, and the corpus is released together. A client that
+starts the next export as soon as it sees `completed` never races a
+spurious `corpus_busy`.
+
+The other two backup routes are plain:
+
+- `GET /api/backups/{corpus}` lists the folder's bundles, newest first. Each
+  entry carries its `bundle.json` manifest, read alone through the zip's
+  central directory, or `manifest: null` for a zip that isn't a readable
+  Varagity backup.
+- `GET /api/backups/{corpus}/files/{name}` returns one bundle as
+  `application/zip` with `Content-Disposition: attachment`. The panel's
+  Download is a plain link, so no cross-origin fetch (and no CORS) is
+  involved.
 
 ## The preview pair — degradable by design
 

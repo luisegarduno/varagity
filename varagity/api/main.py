@@ -30,6 +30,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from varagity.api import runtime_settings
 from varagity.api.routes import (
+    backups,
     chat,
     conversations,
     documents,
@@ -41,6 +42,9 @@ from varagity.api.routes import (
 )
 from varagity.api.routes import settings as settings_routes
 from varagity.api.schemas import (
+    BackupLogEvent,
+    BackupProgressEvent,
+    BackupStatusEvent,
     DeltaEvent,
     DoneEvent,
     ErrorBody,
@@ -66,11 +70,12 @@ from varagity.stores.vector_store import default_conninfo
 logger = logging.getLogger(__name__)
 
 # The SSE protocols' event payloads (spec_v2 §4.3 chat + §4.2 ingest
-# status + spec_graphrag §5.2 graph build). No route returns them directly
-# (they ride inside the event streams), so FastAPI would omit them from the
-# OpenAPI schema — and the web app's generated TypeScript types are the
-# *whole* wire contract, SSE payloads included (schemas.py). create_app()
-# merges their JSON schemas into components/schemas.
+# status + spec_graphrag §5.2 graph build + ADR-019 backup status). No route
+# returns them directly (they ride inside the event streams), so FastAPI
+# would omit them from the OpenAPI schema — and the web app's generated
+# TypeScript types are the *whole* wire contract, SSE payloads included
+# (schemas.py). create_app() merges their JSON schemas into
+# components/schemas.
 _SSE_EVENT_MODELS = (
     RetrievalEvent,
     DeltaEvent,
@@ -83,6 +88,9 @@ _SSE_EVENT_MODELS = (
     GraphBuildStatusEvent,
     GraphBuildProgressEvent,
     GraphBuildLogEvent,
+    BackupStatusEvent,
+    BackupProgressEvent,
+    BackupLogEvent,
 )
 
 # Stable codes for statuses raised with a plain-string detail; handlers fall
@@ -385,6 +393,7 @@ def create_app() -> FastAPI:
     app.include_router(documents.router)
     app.include_router(ingest.router)
     app.include_router(graph.router)
+    app.include_router(backups.router)
     if settings.METRICS_ENABLED:
         # The corpus and graph gauges are collected at scrape time, so they
         # only need to exist when something can scrape them (spec_v3 §6.1a;

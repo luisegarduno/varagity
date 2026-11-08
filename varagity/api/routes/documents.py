@@ -56,7 +56,7 @@ from varagity.api.schemas import (
     UploadResponse,
 )
 from varagity.config import get_settings
-from varagity.paths import resolve_contained
+from varagity.paths import is_exports_path, relative_to_root, resolve_contained
 from varagity.preview import locate, render_page_png, resolve_preview_source
 from varagity.stores.bm25_store import ElasticsearchBM25
 from varagity.stores.records import DocumentInfo
@@ -241,6 +241,11 @@ def _store_upload(
     sniffing the stored bytes instead — a copied ``chat.db`` is routinely
     renamed, so its name proves nothing.
 
+    Both surfaces refuse the reserved backup folder (ADR-019): a path whose
+    first segment is ``varagity-exports`` — or a flat file of that name,
+    which would occupy the folder's place — is reported as
+    ``reserved_path``, so no upload can ever land among the bundles.
+
     Args:
         upload: The multipart part (spooled by Starlette).
         docs_root: The corpus directory to write into.
@@ -281,6 +286,10 @@ def _store_upload(
                 reason="invalid_filename",
             )
         name = flat_name
+    if is_exports_path(relative if relative is not None else name):
+        return UploadedFileOut(
+            file_name=raw_path or name, size_bytes=0, stored=False, reason="reserved_path"
+        )
     extension = Path(name).suffix.lower()
     if allowed_extensions is not None and extension not in allowed_extensions:
         return UploadedFileOut(
@@ -476,29 +485,6 @@ def upload_documents(
     return UploadResponse(files=results)
 
 
-def _relative_to_corpus(source: str, docs_root: Path) -> str | None:
-    """A source's path relative to ``DOCS_PATH``, when it lives inside.
-
-    The corpus table's grouping key: folder uploads (spec_v3 §5.2) keep
-    their directory structure, and the GUI folds the flat document list
-    back into those folders. Only the server knows the corpus root, so the
-    relative path is computed here rather than string-guessed client-side.
-
-    Args:
-        source: The absolute source path recorded at ingest time.
-        docs_root: The resolved ``DOCS_PATH`` directory.
-
-    Returns:
-        The POSIX-separated relative path, or ``None`` when the source
-        doesn't resolve inside the corpus directory (ingested from
-        elsewhere — such documents simply list flat).
-    """
-    resolved = resolve_contained(Path(source), docs_root)
-    if resolved is None:
-        return None
-    return resolved.relative_to(docs_root).as_posix()
-
-
 @router.get("/api/documents")
 def list_documents(store: VectorStoreDep) -> list[DocumentOut]:
     """List every ingested document (the corpus-management table).
@@ -519,7 +505,7 @@ def list_documents(store: VectorStoreDep) -> list[DocumentOut]:
     return [
         DocumentOut(
             file_name=Path(info.source).name,
-            relative_path=_relative_to_corpus(info.source, docs_root),
+            relative_path=relative_to_root(info.source, docs_root),
             **info.model_dump(),
         )
         for info in store.list_documents()

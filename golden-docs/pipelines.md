@@ -357,6 +357,61 @@ picture one opened at the start did. `progress` frames walk
   `reingest=true` run — deleting a source file sets it, and the tab says so
   until a rebuild retracts those messages.
 
+## The backup flow (`rag-export`)
+
+`rag-export` (`varagity/pipeline/backup_flow.py`) writes the chunk corpus
+into a backup bundle ([Data model](data-model.md#backup-bundles)). It is a
+thin `@flow` shell over `varagity.backup.rag.export_rag`, for the same
+reason `graph-build` is one: the work belongs to the backup package, while
+Prefect owns the *record* that a backup ran, how long it took, and whether
+it failed.
+
+```mermaid
+flowchart LR
+    start(["rag_export_flow(dest, ingest_settings)"]) --> stale["read _corpus_stale<br/>(app_settings)"]
+    stale --> snap["iter_corpus()<br/>one REPEATABLE READ snapshot"]
+    snap --> docs["documents.jsonl<br/>+ relative_path"]
+    docs --> chunks["chunks.jsonl<br/>vectors spooled beside it"]
+    chunks --> fin["embeddings.f32 · bundle.json<br/>fsync · os.replace"]
+```
+
+- **One flow run per export, no tasks.** An export is a single consistent
+  read. Splitting it into task runs would invent boundaries the snapshot
+  doesn't have. Stage progress travels as the API runner's `progress`
+  events instead: `snapshot` → `documents` → `chunks` → `finalize`.
+- **No model service, no retries.** The flow reads postgres and writes one
+  file. A failure removes the partial bundle, so the honest response is to
+  surface it and let the user press Export again, not to re-read the corpus
+  silently.
+- **One pass, aligned by construction.** A zip takes one member at a time,
+  so the vector matrix is spooled to an unnamed temp file beside the bundle
+  while `chunks.jsonl` streams, then copied in as `embeddings.f32` (stored,
+  not deflated, because float32 noise doesn't compress). Row *i* is line
+  *i*'s vector because both came from the same row of the same snapshot.
+- **API and GUI only.** There is deliberately no CLI export command. It
+  matches the graph build's posture, and keeps one shape for both corpora.
+
+### API-triggered exports
+
+`POST /api/backups/rag/export` is the ingest runner's shape again: a daemon
+thread inside the API process, an immediate `202` handle, and
+`GET /api/backups/rag/status` streaming the run as SSE with full backlog
+replay ([HTTP API](api.md#the-backup-status-stream-get-apibackupscorpusstatus)).
+
+- **The corpus gate.** `BackupRunner` (`varagity/api/backup_runner.py`)
+  claims the corpus's `CorpusGate` (`varagity/api/corpus_gate.py`) for the
+  whole run. A second export is refused with `409 corpus_busy`, which names
+  the holder. The gate is the run's one-at-a-time rule. It is per *corpus*,
+  not per runner, so other operations can claim the same gate.
+- **What the runner hands the flow.** It captures the reingest-affecting
+  settings at start (in `app_settings`' env-string form) and passes them in,
+  so `varagity.backup` never imports the API layer. The flow reads the stale
+  flag itself, *after* those settings.
+- **The saved path.** A completed run reports `bundle` and `saved_to`
+  (`docs/varagity-exports/<name>`), relative to the checkout. The API sees
+  `/app/docs` in compose, but the user's file manager sees `./docs`, so the
+  corpus folder's own name is the path that reads right in both modes.
+
 ## Evaluation flows
 
 Thin flows (`eval-matrix`, `eval-ocr`, `eval-chat`, `eval-graph`) over the

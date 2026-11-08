@@ -933,6 +933,146 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/backups/{corpus}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Backups
+         * @description List the backup bundles in a corpus's ``varagity-exports/`` folder.
+         *
+         *     A directory read plus one small member per bundle — the manifest is
+         *     found through each zip's central directory, so a folder of large
+         *     bundles lists in milliseconds.
+         *
+         *     Args:
+         *         corpus: The corpus whose backups to list.
+         *
+         *     Returns:
+         *         One entry per bundle file, newest first (empty when the folder does
+         *         not exist yet).
+         */
+        get: operations["list_backups_api_backups__corpus__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backups/{corpus}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Export
+         * @description Start a background export and return its handle.
+         *
+         *     The bundle is written into ``<corpus root>/varagity-exports/`` as
+         *     ``varagity-<corpus>-<UTC yyyymmdd-HHMM>.zip`` (a same-minute repeat gets
+         *     a ``-2`` suffix — never a replace), from one consistent snapshot of the
+         *     corpus.
+         *
+         *     Args:
+         *         corpus: The corpus to export.
+         *         runners: The process-wide backup runners.
+         *         preflight: The awaitable reachability check (structured 503).
+         *         store: The per-request vector store (the nothing-to-export check).
+         *
+         *     Returns:
+         *         The new run's snapshot (state ``running``).
+         *
+         *     Raises:
+         *         HTTPException: ``503 postgres_unreachable`` when the database is
+         *             down; ``422 nothing_to_export`` when nothing is ingested; ``500
+         *             docs_path_not_writable`` when the exports folder can't be
+         *             written; ``409 corpus_busy`` while any operation — another
+         *             export included — holds the corpus (the message names it).
+         */
+        post: operations["start_export_api_backups__corpus__export_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backups/{corpus}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Backup Status
+         * @description Stream the corpus's current (or last) backup run as SSE.
+         *
+         *     Frames: ``status`` (snapshot; also terminal, with the summary and the
+         *     saved path), ``progress`` (``snapshot`` → ``documents`` → ``chunks`` →
+         *     ``finalize``), ``log`` (relayed ``varagity.backup`` lines). With no run
+         *     in this API process the stream is a single idle ``status`` frame; after
+         *     a terminal run it replays that run and closes.
+         *
+         *     Args:
+         *         corpus: The corpus whose backup run to follow.
+         *         runners: The process-wide backup runners.
+         *
+         *     Yields:
+         *         The framed events, oldest first, then live until terminal.
+         */
+        get: operations["backup_status_api_backups__corpus__status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backups/{corpus}/files/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Backup
+         * @description Return one bundle as a file download.
+         *
+         *     A plain ``GET`` answering with ``Content-Disposition: attachment``, so
+         *     the panel's Download is an ordinary link — the browser saves the file
+         *     (and offers its own "Show in folder") without a cross-origin fetch.
+         *
+         *     Args:
+         *         corpus: The corpus the bundle belongs to.
+         *         name: The bundle's file name in the exports folder.
+         *
+         *     Returns:
+         *         The bundle's bytes as ``application/zip``.
+         *
+         *     Raises:
+         *         HTTPException: ``404 bundle_not_found`` when no such bundle lives in
+         *             the folder — which covers a name trying to escape it.
+         */
+        get: operations["download_backup_api_backups__corpus__files__name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/metrics": {
         parameters: {
             query?: never;
@@ -961,6 +1101,79 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * BackupRunOut
+         * @description One backup run's state (``POST /api/backups/{corpus}/export`` + its stream).
+         *
+         *     Attributes:
+         *         run_id: The run handle.
+         *         corpus: The corpus being backed up.
+         *         operation: What the run does — ``export`` writes a new bundle.
+         *         state: ``running`` | ``completed`` | ``failed``.
+         *         bundle: The file the run wrote (set once it is published — an export
+         *             names nothing until its bundle is whole).
+         *         saved_to: Where it landed, relative to the checkout
+         *             (``docs/varagity-exports/<name>``) — the path "Copy path"
+         *             copies, right in both host and compose mode.
+         *         started_at: When the run started.
+         *         finished_at: When it reached a terminal state (``None`` while
+         *             running).
+         *         error: The run-level failure (``failed`` only).
+         *         summary: The final counters (``completed`` only).
+         */
+        BackupRunOut: {
+            /** Run Id */
+            run_id: string;
+            /**
+             * Corpus
+             * @enum {string}
+             */
+            corpus: "rag" | "graph";
+            /**
+             * Operation
+             * @constant
+             */
+            operation: "export";
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "running" | "completed" | "failed";
+            /** Bundle */
+            bundle?: string | null;
+            /** Saved To */
+            saved_to?: string | null;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Error */
+            error?: string | null;
+            summary?: components["schemas"]["BackupSummaryOut"] | null;
+        };
+        /**
+         * BackupSummaryOut
+         * @description What a completed backup run did (terminal runs only).
+         *
+         *     Attributes:
+         *         counts: What the bundle holds — ``documents`` and ``chunks`` for a
+         *             RAG bundle.
+         *         size_bytes: The bundle's size on disk.
+         *         wall_clock_s: Seconds from the snapshot to the published bundle.
+         */
+        BackupSummaryOut: {
+            /** Counts */
+            counts: {
+                [key: string]: number;
+            };
+            /** Size Bytes */
+            size_bytes: number;
+            /** Wall Clock S */
+            wall_clock_s: number;
+        };
         /** Body_upload_documents_api_documents_post */
         Body_upload_documents_api_documents_post: {
             /** Files */
@@ -974,6 +1187,93 @@ export interface components {
         Body_upload_graph_documents_api_graph_documents_post: {
             /** Files */
             files: string[];
+        };
+        /**
+         * BundleManifestOut
+         * @description A backup bundle's ``bundle.json``, as the backups list reports it (ADR-019).
+         *
+         *     The file format's own model (:class:`varagity.backup.bundle.BundleManifest`)
+         *     on the wire unchanged — the panel shows what a bundle holds (``counts``)
+         *     and what it was made under (the embedding model and dimension, the
+         *     ingest settings, the stale flag) straight from the manifest.
+         */
+        BundleManifestOut: {
+            /**
+             * Format
+             * @constant
+             */
+            format: "varagity-backup";
+            /** Version */
+            version: number;
+            /**
+             * Corpus
+             * @enum {string}
+             */
+            corpus: "rag" | "graph";
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Embedding Model */
+            embedding_model: string;
+            /** Embedding Dim */
+            embedding_dim: number;
+            /** Stale */
+            stale: boolean;
+            /** Counts */
+            counts: {
+                [key: string]: number;
+            };
+            /** Ingest Settings */
+            ingest_settings?: {
+                [key: string]: string;
+            } | null;
+            /** Members */
+            members: components["schemas"]["BundleMember"][];
+        };
+        /**
+         * BundleMember
+         * @description One data member of a bundle, as its manifest records it.
+         *
+         *     Attributes:
+         *         name: The member's path inside the zip.
+         *         size_bytes: Its uncompressed size.
+         *         sha256: The hex sha256 of its uncompressed bytes — what a restore
+         *             verifies before it touches a store.
+         */
+        BundleMember: {
+            /** Name */
+            name: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Sha256 */
+            sha256: string;
+        };
+        /**
+         * BundleOut
+         * @description One bundle file in ``GET /api/backups/{corpus}`` (ADR-019).
+         *
+         *     Attributes:
+         *         name: The bundle's file name in the corpus's ``varagity-exports/``
+         *             folder — the key the download route takes.
+         *         size_bytes: Its size on disk.
+         *         modified_at: Its mtime (UTC).
+         *         manifest: Its ``bundle.json``, or ``None`` when the file has none or
+         *             it is unreadable — a zip copied into the folder by hand is
+         *             listed, never hidden.
+         */
+        BundleOut: {
+            /** Name */
+            name: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /**
+             * Modified At
+             * Format: date-time
+             */
+            modified_at: string;
+            manifest?: components["schemas"]["BundleManifestOut"] | null;
         };
         /**
          * ChatOverrides
@@ -2100,7 +2400,9 @@ export interface components {
          *             to a structured ``500`` when no file in the batch landed).
          *             Graph corpus uploads add ``unsupported_graph_source``: the file
          *             landed, no registered message source claimed it, and it was
-         *             removed again (spec_graphrag §10.2).
+         *             removed again (spec_graphrag §10.2). Both corpora refuse
+         *             ``reserved_path``: a path under — or a flat file named — the
+         *             reserved ``varagity-exports`` backup folder (ADR-019).
          *         relative_path: The stored path relative to ``DOCS_PATH`` when the
          *             upload declared one (folder uploads, spec_v3 §5.2); ``None``
          *             for flat uploads and rejections.
@@ -2134,6 +2436,69 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * BackupLogEvent
+         * @description Payload of the backup-status SSE ``log`` event.
+         *
+         *     Relayed ``varagity.backup`` log records (what was exported, a swept
+         *     partial, an embedding-model drift warning), so the panel shows what the
+         *     server log would.
+         *
+         *     Attributes:
+         *         level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).
+         *         message: The formatted log message.
+         */
+        BackupLogEvent: {
+            /** Level */
+            level: string;
+            /** Message */
+            message: string;
+        };
+        /**
+         * BackupProgressEvent
+         * @description Payload of the backup-status SSE ``progress`` event.
+         *
+         *     An export walks ``snapshot`` (open one consistent read of the corpus) →
+         *     ``documents`` → ``chunks`` (rows written, with ``current``/``total``) →
+         *     ``finalize`` (the vector matrix, the manifest, the atomic rename).
+         *
+         *     Attributes:
+         *         stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize``.
+         *         current: Rows written so far in a counted stage.
+         *         total: The stage's row count.
+         */
+        BackupProgressEvent: {
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "snapshot" | "documents" | "chunks" | "finalize";
+            /**
+             * Current
+             * @default null
+             */
+            current: number | null;
+            /**
+             * Total
+             * @default null
+             */
+            total: number | null;
+        };
+        /**
+         * BackupStatusEvent
+         * @description Payload of the backup-status SSE ``status`` event.
+         *
+         *     The stream's first frame (a snapshot on connect) and its last (the
+         *     terminal state). ``run=None`` means no backup run has run for this
+         *     corpus in this API process — the stream closes immediately after.
+         *
+         *     Attributes:
+         *         run: The current (or last) run, if any.
+         */
+        BackupStatusEvent: {
+            /** @default null */
+            run: components["schemas"]["BackupRunOut"] | null;
         };
         /**
          * DeltaEvent
@@ -3603,6 +3968,167 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_backups_api_backups__corpus__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                corpus: "rag";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BundleOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_export_api_backups__corpus__export_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                corpus: "rag";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupRunOut"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    backup_status_api_backups__corpus__status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                corpus: "rag";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_backup_api_backups__corpus__files__name__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                corpus: "rag";
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The bundle, as a `Content-Disposition: attachment` download. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/zip": string;
                 };
             };
             /** @description Not Found */
