@@ -606,6 +606,80 @@ sequenceDiagram
     Note over L,PG: crash before COMMIT ⇒ no marker ⇒ file re-attempted next run<br/>(the chunk_id-addressed ES bulk already overwrote, so nothing duplicates)
 ```
 
+## Backup bundles
+
+`docker compose down -v` deletes every named volume, and with them the
+processed corpus: the chunk rows, their contextual blurbs and embeddings,
+and the BM25 index. The source folders survive, because they are host binds.
+A **backup bundle** is written into a reserved folder inside one of those
+binds, so it survives beside the sources (`varagity/backup/`).
+
+```text
+docs/varagity-exports/                          reserved: discovery skips it, uploads refuse it
+├── .varagity-rag-20261108-1312.zip.partial     an export in flight; never listed, swept by the next export
+└── varagity-rag-20261108-1312.zip              renamed into place once complete
+    ├── documents.jsonl    documents rows + relative_path                      deflated
+    ├── chunks.jsonl       every chunks column but the embedding,              deflated
+    │                      ORDER BY original_index
+    ├── embeddings.f32     N × EMBEDDING_DIM little-endian float32;            stored
+    │                      row i belongs to chunks line i
+    └── bundle.json        the manifest, written last
+```
+
+- **The reserved folder.** `varagity-exports/` at the corpus root is never
+  corpus. Ingest discovery (and so the CLI's ingest too) skips it whole, and
+  both upload routes refuse a path under it, or a flat file named like it,
+  with the per-file reason `reserved_path`. Only the root's own folder is
+  reserved, matched case-insensitively. A `varagity-exports/` nested deeper
+  is ordinary corpus.
+- **One consistent snapshot.** Every row comes from a single
+  `REPEATABLE READ, READ ONLY` transaction
+  (`ContextualVectorDB.iter_corpus`), streamed through server-side cursors.
+  An ingest or delete committing mid-export can't tear a bundle, and the
+  export blocks no writer.
+- **Bit-exact vectors.** The snapshot reads pgvector's *binary* format, and
+  each vector becomes a little-endian float32 matrix row by a byte swap, not
+  a decimal round trip. Row *i* of `embeddings.f32` is the vector of line *i*
+  of `chunks.jsonl` by construction: both are written in one pass over the
+  same snapshot.
+- **No BM25 member.** Every field of an Elasticsearch document is a copy of a
+  `chunks` column ([below](#elasticsearch-index)), so the index can always
+  be rebuilt from the rows with no model call.
+- **`relative_path`** is each document's `source` relative to `DOCS_PATH`.
+  It is `null` for a document ingested from outside the corpus directory.
+  `doc_id` already hashes it, and it is the portable form of `source` across
+  host and container mode. (An export run by a host-mode API against
+  container-written rows records no relative paths, because `/app/docs/…`
+  doesn't resolve under `./docs`.)
+- **All-or-nothing.** The writer streams into a hidden `.{name}.partial`,
+  hashes every member as it goes, writes `bundle.json` as the **last** member
+  (so it can record every member's sha256), syncs the file, and renames it
+  into place with `os.replace`. Any failure deletes the partial, and the
+  next export sweeps whatever a crash left behind. A listing therefore sees
+  a whole bundle or nothing.
+- **Names** are `varagity-<corpus>-<UTC yyyymmdd-HHMM>.zip`. A same-minute
+  repeat gets `-2`, `-3`, …, and an export never replaces a file.
+
+`bundle.json` (`BundleManifest`) carries what the rows themselves don't
+record: the export-time facts a restore must judge the bundle by.
+
+| Field | Meaning |
+|---|---|
+| `format`, `version` | `"varagity-backup"`, `1` — what makes a zip a Varagity bundle, and its layout. |
+| `corpus` | `rag` (the graph corpus's bundle shares the container). |
+| `created_at` | The snapshot instant (UTC). |
+| `embedding_model`, `embedding_dim` | `EMBEDDING_MODEL` / `EMBEDDING_DIM` at export. pgvector checks only the vector size, so the model name is the only guard against vectors from another embedding space. An export whose rows record a different `metadata.embedding_model` logs a warning. |
+| `stale` | The `_corpus_stale` flag at export. |
+| `counts` | `{"documents": …, "chunks": …}`. |
+| `ingest_settings` | The reingest-affecting settings at export (`CHUNKING_STRATEGY`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `CONTEXTUALIZE`, `OCR_ENGINE`), in the env-string form `app_settings` stores. They are read *before* the stale flag, so a settings change racing the export can only make the bundle more conservative, never less. |
+| `members` | `{name, size_bytes, sha256}` per data member, in write order. |
+
+The zip's central directory lets `GET /api/backups/{corpus}` read
+`bundle.json` alone. Listing a folder of large bundles costs a directory
+read, not an unpack. Chat history, conversation folders and settings-drawer
+overrides are deliberately **not** in a bundle: it backs up the corpus, not
+the app.
+
 ## Golden eval dataset
 
 `data/eval/golden_qa.jsonl` — one JSON object per line:

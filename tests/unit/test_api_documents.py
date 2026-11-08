@@ -5,6 +5,7 @@ write path; list/delete fake the two store dependencies (the both-stores
 delete against real containers lives in the integration suite).
 """
 
+import io
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,11 +14,11 @@ from typing import Any
 import httpx
 import pytest
 from elastic_transport import ConnectionError as ESConnectionError
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile
 
 from varagity.api.deps import get_bm25_store, get_vector_store
 from varagity.api.main import create_app
-from varagity.api.routes.documents import _safe_relative_path
+from varagity.api.routes.documents import _safe_relative_path, _store_upload
 from varagity.stores.records import DocumentInfo
 
 
@@ -802,3 +803,63 @@ class TestBulkDelete:
             json={"doc_ids": []},
         )
         assert response.status_code == 422
+
+
+class TestReservedExportsFolder:
+    """ADR-019: no upload may land in (or take the place of) varagity-exports/."""
+
+    async def test_a_folder_upload_into_the_reserved_folder_is_refused(
+        self, docs_root: Path
+    ) -> None:
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("x.md", b"sneaky"), upload_part("ok.md", b"fine")],
+            data={"paths": ["varagity-exports/x.md", "q3/ok.md"]},
+        )
+        assert response.status_code == 201  # the other file still landed
+        entries = {entry["file_name"]: entry for entry in response.json()["files"]}
+        assert entries["varagity-exports/x.md"]["stored"] is False
+        assert entries["varagity-exports/x.md"]["reason"] == "reserved_path"
+        assert not (docs_root / "varagity-exports").exists()
+        assert (docs_root / "q3" / "ok.md").exists()
+
+    async def test_a_differently_cased_first_segment_is_refused_too(self, docs_root: Path) -> None:
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("x.md", b"sneaky")],
+            data={"paths": ["Varagity-Exports/x.md"]},
+        )
+        assert response.status_code == 422
+        assert "reserved_path" in response.json()["error"]["message"]
+
+    async def test_a_flat_file_named_like_the_folder_is_refused(self, docs_root: Path) -> None:
+        """It would squat on the folder's name and break the next export."""
+        response = await request(
+            make_app(), "POST", "/api/documents", files=[upload_part("varagity-exports", b"x")]
+        )
+        assert response.status_code == 422
+        assert "varagity-exports: reserved_path" in response.json()["error"]["message"]
+        assert not (docs_root / "varagity-exports").exists()
+
+    async def test_a_nested_folder_of_that_name_is_ordinary_corpus(self, docs_root: Path) -> None:
+        response = await request(
+            make_app(),
+            "POST",
+            "/api/documents",
+            files=[upload_part("x.md", b"fine")],
+            data={"paths": ["q3/varagity-exports/x.md"]},
+        )
+        assert response.status_code == 201
+        assert (docs_root / "q3" / "varagity-exports" / "x.md").exists()
+
+    def test_the_graph_upload_path_refuses_it_as_well(self, tmp_path: Path) -> None:
+        """The graph route stores through the same function with no extension gate."""
+        upload = UploadFile(file=io.BytesIO(b"SQLite format 3\x00"), filename="varagity-exports")
+        outcome = _store_upload(upload, tmp_path, 1024, allowed_extensions=None)
+        assert outcome.stored is False
+        assert outcome.reason == "reserved_path"
+        assert list(tmp_path.iterdir()) == []

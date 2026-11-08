@@ -8,4 +8,6 @@
 
 ::: varagity.pipeline.graph_flow
 
+::: varagity.pipeline.backup_flow
+
 ::: varagity.pipeline.eval_flow

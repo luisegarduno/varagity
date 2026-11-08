@@ -7,6 +7,11 @@ Bucketing (spec §9.1, spec_v2 §8.1): plain-text formats
 no-OCR Docling office path (``office``); ``.html``/``.htm``/``.xhtml``
 likewise (``web``); bitmap images are OCR-only (``image``). Extensions
 outside the ``ALLOWED_EXTENSIONS`` whitelist are ignored (logged at DEBUG).
+
+The reserved ``<DOCS_PATH>/varagity-exports/`` folder is skipped whole
+(ADR-019): it holds backup bundles, never sources, and the rule must hold
+even if an ``ALLOWED_EXTENSIONS`` edit ever admitted a bundle's suffix. The
+CLI's ingest runs this same discovery, so it skips the folder too.
 """
 
 import logging
@@ -15,6 +20,7 @@ from pathlib import Path
 
 from varagity.config import get_settings
 from varagity.debug.show import check_verbose, v_discover
+from varagity.paths import EXPORTS_DIRNAME, is_exports_path
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +137,9 @@ def discover_documents(docs_path: str, verbose: int | None = None) -> Buckets:
 
     allowed = settings.allowed_extension_set
     for path in sorted(root.rglob("*")):
+        if is_exports_path(path.relative_to(root)):
+            logger.debug("ignoring %s (inside the reserved %s/ folder)", path, EXPORTS_DIRNAME)
+            continue
         if not path.is_file():
             continue
         extension = path.suffix.lower()

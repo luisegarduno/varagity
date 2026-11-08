@@ -1,0 +1,114 @@
+"use client";
+
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useRef, useState } from "react";
+
+import { useMountEffect } from "@/hooks/use-mount-effect";
+import {
+  ApiError,
+  startExport,
+  streamBackupStatus,
+  type BundleOut,
+  type TargetCorpus,
+} from "@/lib/api";
+import {
+  initialBackupView,
+  reduceBackupEvent,
+  type BackupView,
+} from "@/lib/backup-reducer";
+import { backupsQuery, queryKeys } from "@/lib/queries";
+
+const UNREACHABLE = "API unreachable — is the stack up? (docker compose up -d)";
+
+/** What `useBackupRun` hands a corpus tab (and, through it, `BackupPanel`). */
+export interface BackupRunHandle {
+  /** The folded backup-status stream. */
+  view: BackupView;
+  /** The corpus's bundles, newest first (`null` while loading). */
+  bundles: BundleOut[] | null;
+  /** Why the bundle list could not be read, if it couldn't. */
+  bundlesError: string | null;
+  /** Why the last start was refused (`409 corpus_busy`, `422`, …). */
+  error: string | null;
+  /** Whether a backup run is in flight. */
+  running: boolean;
+  /** Start an export; follows its stream on success. */
+  startExport: () => Promise<void>;
+}
+
+/**
+ * One corpus's backup run (ADR-019): the bundle list plus the live status
+ * stream, folded through the pure `reduceBackupEvent`.
+ *
+ * The `CorpusView.followIngest` pattern, lifted into a hook so both corpus
+ * tabs can host the same panel: attach to the replaying stream once on
+ * mount (a live, finished, or absent run all render correctly), re-attach
+ * after a successful start, and invalidate the corpus's `["backups", …]`
+ * list when a run ends — a finished export has a new bundle to show.
+ */
+export function useBackupRun(corpus: TargetCorpus): BackupRunHandle {
+  const queryClient = useQueryClient();
+  const { data: bundles = null, error: listError } = useQuery(backupsQuery(corpus));
+  const [view, setView] = useState<BackupView>(initialBackupView);
+  const [error, setError] = useState<string | null>(null);
+  const followingRef = useRef(false);
+
+  const bundlesError =
+    listError === null
+      ? null
+      : listError instanceof ApiError
+        ? listError.message
+        : UNREACHABLE;
+
+  // Follow the current (or last) run; the generator ends at the terminal
+  // frame, after which the bundle list reflects what the run wrote.
+  const follow = useCallback(() => {
+    if (followingRef.current) return;
+    followingRef.current = true;
+    void (async () => {
+      try {
+        let next = initialBackupView;
+        setView(next);
+        for await (const event of streamBackupStatus(corpus)) {
+          next = reduceBackupEvent(next, event);
+          setView(next);
+        }
+        if (next.run !== null && next.run.state !== "running") {
+          void queryClient.invalidateQueries({ queryKey: queryKeys.backups(corpus) });
+        }
+      } catch {
+        // Stream dropped (API restart, network): the panel keeps the last
+        // known state; starting a run or reloading reconnects.
+      } finally {
+        followingRef.current = false;
+      }
+    })();
+  }, [corpus, queryClient]);
+
+  useMountEffect(() => {
+    follow();
+  });
+
+  const start = useCallback(async () => {
+    try {
+      await startExport(corpus);
+      setError(null);
+      follow();
+    } catch (failure) {
+      setError(
+        failure instanceof ApiError
+          ? failure.message
+          : "Could not start the export — is the stack up?",
+      );
+    }
+  }, [corpus, follow]);
+
+  return {
+    view,
+    bundles,
+    bundlesError,
+    error,
+    running: view.run?.state === "running",
+    startExport: start,
+  };
+}

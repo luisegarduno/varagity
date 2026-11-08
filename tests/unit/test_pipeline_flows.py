@@ -21,6 +21,9 @@ from prefect.client.schemas.filters import FlowRunFilter
 from prefect.testing.utilities import prefect_test_harness
 from prometheus_client import REGISTRY
 
+from tests.unit.test_backup_rag import FakeStore as FakeCorpusStore
+from tests.unit.test_backup_rag import chunk as backup_chunk
+from tests.unit.test_backup_rag import document as backup_document
 from tests.unit.test_loader import FakeBM25, FakeEmbeddings, FakeStore
 from varagity.chat import PreparedQuery, Turn
 from varagity.graph.records import BuildReport
@@ -621,3 +624,86 @@ class TestGraphBuildFlow:
         from varagity.pipeline import graph_build_flow
 
         assert graph_build_flow.retries in (0, None)
+
+
+class TestRagExportFlow:
+    """The RAG export's tracking shell — the backup package does the work (ADR-019)."""
+
+    @pytest.fixture
+    def docs_root(self, tmp_path: Path, settings_env: Callable[..., None]) -> Path:
+        root = tmp_path / "docs"
+        root.mkdir()
+        settings_env(DOCS_PATH=str(root), EMBEDDING_MODEL="test-model", EMBEDDING_DIM=2)
+        return root
+
+    @staticmethod
+    def corpus(docs_root: Path) -> "FakeCorpusStore":
+        return FakeCorpusStore(
+            [backup_document("doc-a", str(docs_root / "a.md"), 1)],
+            [backup_chunk("doc-a", 0, 0, [0.5, 0.25])],
+        )
+
+    def test_rag_export_is_a_tracked_flow_run(self, docs_root: Path) -> None:
+        from varagity.backup.bundle import read_manifest
+        from varagity.pipeline import rag_export_flow
+
+        frames: list[str] = []
+        state = rag_export_flow(
+            docs_root / "varagity-exports",
+            ingest_settings={"CHUNK_SIZE": "400"},
+            on_progress=lambda stage, current, total: frames.append(stage),
+            store=self.corpus(docs_root),
+            stale=False,
+            return_state=True,
+        )
+        assert state.is_completed()
+        result = state.result()
+        assert rag_export_flow.name == "rag-export"
+        assert result.counts == {"documents": 1, "chunks": 1}
+        assert read_manifest(result.bundle.path).ingest_settings == {"CHUNK_SIZE": "400"}
+        assert frames[0] == "snapshot" and frames[-1] == "finalize"
+        with get_client(sync_client=True) as client:
+            run = client.read_flow_run(state.state_details.flow_run_id)
+        assert run.state is not None and run.state.is_completed()
+
+    def test_the_flow_reads_the_stale_flag_and_opens_its_own_store(
+        self, docs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unseeded, the flow asks app_settings for the flag and connects itself."""
+        from varagity.backup.bundle import read_manifest
+        from varagity.pipeline import rag_export_flow
+
+        backup_flow_module = importlib.import_module("varagity.pipeline.backup_flow")
+        corpus = self.corpus(docs_root)
+        opened: list[str] = []
+
+        class FlaggedSettings:
+            def __enter__(self) -> "FlaggedSettings":
+                opened.append("settings")
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                opened.append("settings closed")
+
+            def is_corpus_stale(self) -> bool:
+                return True
+
+        class OwnedStore:
+            def __enter__(self) -> FakeCorpusStore:
+                opened.append("store")
+                return corpus
+
+            def __exit__(self, *exc: object) -> None:
+                opened.append("store closed")
+
+        monkeypatch.setattr(backup_flow_module, "AppSettingsStore", FlaggedSettings)
+        monkeypatch.setattr(backup_flow_module, "ContextualVectorDB", OwnedStore)
+        result = rag_export_flow(docs_root / "varagity-exports", ingest_settings={})
+        assert read_manifest(result.bundle.path).stale is True
+        assert opened == ["settings", "settings closed", "store", "store closed"]
+
+    def test_the_flow_carries_no_retries(self) -> None:
+        """A failed export leaves no bundle; the user presses Export again."""
+        from varagity.pipeline import rag_export_flow
+
+        assert rag_export_flow.retries in (0, None)

@@ -380,3 +380,44 @@ def get_graph_build_preflight() -> Callable[[], Awaitable[None]]:
         :func:`require_graph_build_services`.
     """
     return require_graph_build_services
+
+
+# What each backup operation touches (ADR-019). None of them calls a model
+# service — that is the point of a backup — so the set is just the stores
+# the operation reads or writes: a RAG export reads the rows (and the
+# corpus-stale flag beside them) from postgres, and nothing else.
+BACKUP_REQUIRED_SERVICES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("rag", "export"): ("postgres",),
+}
+
+
+async def require_backup_services(corpus: str, operation: str) -> None:
+    """Backup preflight: 503 if a store the operation needs is down.
+
+    Runs before ``POST /api/backups/{corpus}/…`` spawns the run, so an
+    outage is a clean structured error instead of an instantly failed run.
+
+    Args:
+        corpus: The corpus being backed up (``rag``).
+        operation: The backup operation (``export``).
+
+    Raises:
+        HTTPException: ``503`` naming the first unreachable service.
+        KeyError: If the ``(corpus, operation)`` pair has no requirements on
+            record (a route/contract mismatch — never a user error).
+    """
+    required = BACKUP_REQUIRED_SERVICES[(corpus, operation)]
+    statuses = await check_services(required)
+    for name in required:
+        status = statuses[name]
+        if not status.ok:
+            raise _unreachable(name, status.detail or "no detail")
+
+
+def get_backup_preflight() -> Callable[[str, str], Awaitable[None]]:
+    """Provide the backup reachability preflight (override seam for tests).
+
+    Returns:
+        :func:`require_backup_services`, called with ``(corpus, operation)``.
+    """
+    return require_backup_services

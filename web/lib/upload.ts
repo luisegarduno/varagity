@@ -110,9 +110,30 @@ export function isHiddenPath(raw: string): boolean {
     .some((segment) => segment.trim().startsWith("."));
 }
 
+/**
+ * The folder each corpus root reserves for backup bundles (ADR-019) — a
+ * mirror of the server's `EXPORTS_DIRNAME`.
+ */
+export const EXPORTS_DIRNAME = "varagity-exports";
+
+/**
+ * Whether a picked path is — or lies inside — the reserved backup folder.
+ *
+ * Mirrors the server's `is_exports_path`: only the *first* segment decides
+ * (a nested folder of that name is ordinary corpus), matched in any case,
+ * and a flat file of that name counts too (it would squat on the folder).
+ * Picking `docs/varagity-exports` itself through the composer is the case
+ * this exists for: re-uploading bundles as documents is never what you want.
+ */
+export function isReservedPath(raw: string): boolean {
+  const first = raw.replace(/\\/g, "/").split("/")[0]?.trim() ?? "";
+  return first.toLowerCase() === EXPORTS_DIRNAME;
+}
+
 /** Display buckets the attach flow summarizes skipped files into. */
 export type SkipLabel =
   | "hidden"
+  | "reserved"
   | "unsupported type"
   | "too large"
   | "invalid path"
@@ -124,6 +145,9 @@ export function skipLabel(reason: string): SkipLabel {
   switch (reason) {
     case "hidden":
       return "hidden";
+    case "reserved":
+    case "reserved_path":
+      return "reserved";
     case "extension_not_allowed":
       return "unsupported type";
     case "file_too_large":
@@ -168,7 +192,8 @@ export function mergeSkipCounts(into: SkipCounts, from: SkipCounts): void {
  * Client-side filtering is required here, not defense-in-depth: a folder
  * pick ignores `accept`, handing back `.DS_Store`, `.git/`, images — those
  * are counted per bucket for a one-line summary (a 400-file folder must
- * not become 380 rejection rows), never enumerated. A `null`
+ * not become 380 rejection rows), never enumerated. A pick rooted at the
+ * reserved `varagity-exports/` backup folder is skipped as `reserved`. A `null`
  * `allowedExtensions` (config not loaded yet) skips the extension/size
  * checks — the server stays authoritative.
  */
@@ -185,6 +210,12 @@ export function planAttachments(
     const rawPath = options.folder ? file.webkitRelativePath || file.name : file.name;
     if (options.folder && isHiddenPath(rawPath)) {
       countSkip(skipped, "hidden");
+      continue;
+    }
+    if (isReservedPath(rawPath)) {
+      // The server refuses these too (`reserved_path`); skipping here keeps
+      // a whole picked backups folder from costing one upload round trip.
+      countSkip(skipped, "reserved");
       continue;
     }
     if (allowedExtensions !== null) {

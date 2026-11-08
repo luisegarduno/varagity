@@ -24,10 +24,12 @@ import {
   graphEntity,
   graphExport,
   graphStatus,
+  listBackups,
   listConversations,
   listDocuments,
   listGroups,
   locatePreview,
+  type TargetCorpus,
 } from "@/lib/api";
 
 /**
@@ -59,6 +61,12 @@ export const queryKeys = {
   /** One chunk's located page preview (keyed by chunk, not its text). */
   preview: (docId: string, chunkKey: string) =>
     ["preview", docId, chunkKey] as const,
+  /**
+   * One corpus's backup bundles (ADR-019). Its own `backups` prefix, so an
+   * export's invalidation never reaches the document table or the graph
+   * keys — nor the other corpus's bundle list.
+   */
+  backups: (corpus: TargetCorpus) => ["backups", corpus] as const,
 };
 
 /** The conversation list, most recently updated first (the sidebar, ⌘K). */
@@ -163,6 +171,19 @@ export function graphEntityQuery(name: string) {
     queryFn: () => graphEntity(name),
     staleTime: 60_000,
     retry: false,
+  });
+}
+
+/**
+ * The bundles in one corpus's `varagity-exports/` folder (the backup panel's
+ * list). Refetched when a backup run ends — the panel's stream invalidates
+ * this key — and on mount, since a bundle can also arrive by hand (a file
+ * manager, `scp`).
+ */
+export function backupsQuery(corpus: TargetCorpus) {
+  return queryOptions({
+    queryKey: queryKeys.backups(corpus),
+    queryFn: () => listBackups(corpus),
   });
 }
 

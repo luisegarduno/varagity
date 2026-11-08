@@ -2,6 +2,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
 import {
+  backupsQuery,
   configQuery,
   conversationQuery,
   conversationsQuery,
@@ -29,6 +30,7 @@ describe("query keys", () => {
     expect(previewQuery("d0", "d0::3", "text").queryKey).toEqual(
       queryKeys.preview("d0", "d0::3"),
     );
+    expect(backupsQuery("rag").queryKey).toEqual(queryKeys.backups("rag"));
   });
 
   it("keeps the group list disjoint from the conversation keys", () => {
@@ -111,5 +113,31 @@ describe("previewQuery", () => {
     const query = previewQuery("a398491c7441925f", "a398491c7441925f::0", "x");
     expect(query.staleTime).toBe(Infinity);
     expect(query.retry).toBe(1);
+  });
+});
+
+describe("backup queries", () => {
+  it("keys each corpus's bundle list under its own backups prefix", () => {
+    expect(queryKeys.backups("rag")).toEqual(["backups", "rag"]);
+    expect(queryKeys.backups("rag")).not.toEqual(queryKeys.backups("graph"));
+  });
+
+  it("keeps the backups prefix disjoint from the corpus and graph keys", () => {
+    // An export's end invalidates ["backups", corpus]; prefix matching must
+    // never reach the document table, the graph's keys, or the other
+    // corpus's list.
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.backups("rag"), []);
+    client.setQueryData(queryKeys.backups("graph"), []);
+    client.setQueryData(queryKeys.documents, []);
+    client.setQueryData(queryKeys.graphStatus, {});
+    client.setQueryData(queryKeys.graphDocuments, []);
+
+    const matched = client
+      .getQueryCache()
+      .findAll({ queryKey: queryKeys.backups("rag") })
+      .map((query) => query.queryKey);
+
+    expect(matched).toEqual([queryKeys.backups("rag")]);
   });
 });

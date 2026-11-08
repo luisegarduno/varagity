@@ -64,6 +64,13 @@ export type GraphExportNode = Schemas["GraphExportNodeOut"];
 export type GraphExportEdge = Schemas["GraphExportEdgeOut"];
 export type GraphEntityDetail = Schemas["GraphEntityDetailOut"];
 export type GraphTranscriptRef = Schemas["GraphTranscriptRefOut"];
+export type BundleOut = Schemas["BundleOut"];
+export type BundleManifest = Schemas["BundleManifestOut"];
+export type BackupRun = Schemas["BackupRunOut"];
+export type BackupSummary = Schemas["BackupSummaryOut"];
+export type BackupStatusEvent = Schemas["BackupStatusEvent"];
+export type BackupProgressEvent = Schemas["BackupProgressEvent"];
+export type BackupLogEvent = Schemas["BackupLogEvent"];
 
 /** Which corpus a chat turn targets (`ChatRequest.corpus`, spec_graphrag §4.2). */
 export type TargetCorpus = NonNullable<ChatRequest["corpus"]>;
@@ -390,6 +397,34 @@ export function graphEntity(name: string): Promise<GraphEntityDetail> {
 }
 
 /**
+ * List the backup bundles in a corpus's reserved `varagity-exports/` folder
+ * (ADR-019), newest first — each with its `bundle.json` summary, or a
+ * `null` manifest for a zip that isn't a readable Varagity backup.
+ */
+export function listBackups(corpus: TargetCorpus): Promise<BundleOut[]> {
+  return request(`/api/backups/${corpus}`);
+}
+
+/**
+ * Start exporting a corpus into a new bundle and return the run handle.
+ *
+ * `409 corpus_busy` while any operation (another export included) holds the
+ * corpus, `422 nothing_to_export` when it is empty.
+ */
+export function startExport(corpus: TargetCorpus): Promise<BackupRun> {
+  return request(`/api/backups/${corpus}/export`, { method: "POST" });
+}
+
+/**
+ * URL of one bundle as a download — a plain `<a href>`. The route answers
+ * `Content-Disposition: attachment`, so a navigation saves the file with no
+ * cross-origin fetch (and no CORS) involved.
+ */
+export function backupFileUrl(corpus: TargetCorpus, name: string): string {
+  return `${API_URL}/api/backups/${corpus}/files/${encodeURIComponent(name)}`;
+}
+
+/**
  * One parsed frame of the chat SSE protocol, discriminated on the event
  * name (spec_v2 §4.3): `retrieval` → `reasoning`/`token` deltas → `done`,
  * with `error` as the in-band mid-stream failure. Throttled `stats`
@@ -438,6 +473,18 @@ export type GraphBuildEvent =
   | { type: "log"; data: GraphBuildLogEvent };
 
 const GRAPH_BUILD_EVENT_NAMES = new Set(["status", "progress", "log"]);
+
+/**
+ * One parsed frame of the backup-status SSE protocol (ADR-019) — the ingest
+ * protocol's shape again: a `status` snapshot, `progress` per stage, relayed
+ * `log` lines, and a terminal `status` carrying the saved path and summary.
+ */
+export type BackupEvent =
+  | { type: "status"; data: BackupStatusEvent }
+  | { type: "progress"; data: BackupProgressEvent }
+  | { type: "log"; data: BackupLogEvent };
+
+const BACKUP_EVENT_NAMES = new Set(["status", "progress", "log"]);
 
 /**
  * Parse a raw SSE byte stream into `{type, data}` events.
@@ -531,6 +578,34 @@ export async function* streamGraphBuildStatus(
     response.body,
     GRAPH_BUILD_EVENT_NAMES,
   ) as AsyncGenerator<GraphBuildEvent, void, undefined>;
+}
+
+/**
+ * Follow a corpus's current (or last) backup run over
+ * `GET /api/backups/{corpus}/status`.
+ *
+ * Same replay contract as {@link streamIngestStatus}: the run's events from
+ * its first frame, then live until the terminal `status` — or a single idle
+ * `status` frame when no backup has run since the API started.
+ */
+export async function* streamBackupStatus(
+  corpus: TargetCorpus,
+  signal?: AbortSignal,
+): AsyncGenerator<BackupEvent, void, undefined> {
+  const response = await fetch(`${API_URL}/api/backups/${corpus}/status`, { signal });
+  if (!response.ok) throw await toApiError(response);
+  if (!response.body) {
+    throw new ApiError(
+      response.status,
+      "empty_body",
+      "The backup status response carried no stream.",
+    );
+  }
+  yield* parseNamedSSE(response.body, BACKUP_EVENT_NAMES) as AsyncGenerator<
+    BackupEvent,
+    void,
+    undefined
+  >;
 }
 
 /**
