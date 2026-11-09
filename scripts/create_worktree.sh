@@ -142,11 +142,13 @@ cleanup_worktree() {
     fi
 }
 
-# Copy Claude local settings (gitignored, so not present in the new worktree)
-if [ -f ".claude/settings.local.json" ]; then
-    echo "📋 Copying .claude/settings.local.json to worktree..."
+# Copy the whole .claude directory (skills, agents, commands, settings.local.json, ...).
+# .claude/ is gitignored, so `git worktree add` checks out none of it. worktrees/ is skipped:
+# `claude --worktree` keeps its own checkouts there, and those must not be duplicated.
+if [ -d ".claude" ]; then
+    echo "📋 Copying .claude/ (skills, agents, commands, settings) to worktree..."
     mkdir -p "$WORKTREE_PATH/.claude"
-    cp .claude/settings.local.json "$WORKTREE_PATH/.claude/settings.local.json"
+    find .claude -mindepth 1 -maxdepth 1 ! -name worktrees -exec cp -a {} "$WORKTREE_PATH/.claude/" \;
 fi
 
 # Copy all gitignored .env* files (root and subdirectories), preserving their relative paths.
