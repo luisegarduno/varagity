@@ -1,25 +1,27 @@
-"""Prefect backup flows: the RAG export and restore, the graph export (ADR-019).
+"""Prefect backup flows: export and restore, for both corpora (ADR-019).
 
 Thin ``@flow`` shells over :func:`varagity.backup.rag.export_rag`,
-:func:`varagity.backup.rag.restore_rag` and
-:func:`varagity.backup.graph.export_graph`, for the reason the graph build is
-one: the work belongs to the backup package (one corpus snapshot and one
+:func:`varagity.backup.rag.restore_rag`,
+:func:`varagity.backup.graph.export_graph` and
+:func:`varagity.backup.graph.restore_graph`, for the reason the graph build
+is one: the work belongs to the backup package (one corpus snapshot and one
 all-or-nothing bundle write; one replacing transaction and one index
-rebuild; one copy of the graph's workdir under its write lock), while
-Prefect owns the *record* that a backup ran, how long it took, and whether
-it failed. One flow run per operation — not a task per member or per stage:
-an export is a single consistent read and a restore a single transaction,
-and slicing either into task runs would invent boundaries they do not have.
-Per-stage progress travels as the API runner's ``progress`` events instead
-(tracking and streaming compose, as they do for ingest and the graph build).
+rebuild; one copy of the graph's workdir under its write lock; one extract
+and one swap of it), while Prefect owns the *record* that a backup ran, how
+long it took, and whether it failed. One flow run per operation — not a task
+per member or per stage: an export is a single consistent read and a restore
+a single transaction (or a single swap), and slicing either into task runs
+would invent boundaries they do not have. Per-stage progress travels as the
+API runner's ``progress`` events instead (tracking and streaming compose, as
+they do for ingest and the graph build).
 
 No Prefect-level retries: a failed export leaves no bundle behind (the
 partial is removed) and a failed restore leaves the previous corpus (its
-transaction rolled back) — or, failing in the BM25 rebuild after the commit,
-says so — so the honest response is to surface the failure and let the user
-press the button again, not to repeat the work silently. Parameter
-validation is off because the stores (and the graph service) are live
-handles, not serializable payloads.
+transaction rolled back, or its previous workdir put back) — or, failing in
+the BM25 rebuild after the commit, says so — so the honest response is to
+surface the failure and let the user press the button again, not to repeat
+the work silently. Parameter validation is off because the stores (and the
+graph service) are live handles, not serializable payloads.
 """
 
 from collections.abc import Callable, Mapping
@@ -30,7 +32,14 @@ from pathlib import Path
 from prefect import flow
 from prefect.logging import get_run_logger
 
-from varagity.backup.graph import GraphExportProgressCallback, GraphExportReport, export_graph
+from varagity.backup.graph import (
+    GraphExportProgressCallback,
+    GraphExportReport,
+    GraphRestore,
+    GraphRestoreProgressCallback,
+    export_graph,
+    restore_graph,
+)
 from varagity.backup.rag import (
     ProgressCallback,
     RagExport,
@@ -201,3 +210,57 @@ def graph_export_flow(
         result.wall_clock_s,
     )
     return result
+
+
+@flow(name="graph-restore", validate_parameters=False)
+def graph_restore_flow(
+    bundle: Path,
+    *,
+    run_id: str,
+    on_progress: GraphRestoreProgressCallback | None = None,
+    service: GraphService | None = None,
+    settings_store: AppSettingsStore | None = None,
+) -> GraphRestore:
+    """Restore the message graph from a bundle as a tracked flow run.
+
+    Extracts the bundle's workdir beside the live one and swaps it in under
+    the graph service's write and open locks — the previous graph comes back
+    if the restored one won't open — then, and only once all of that
+    succeeded, writes the graph-stale flag the bundle recorded. Needs no
+    model service: only postgres, for the flag.
+
+    Args:
+        bundle: The bundle file (inside ``<GRAPH_DOCS_PATH>/varagity-exports``).
+        run_id: The restore run's id (names the staging and previous folders
+            beside the workdir).
+        on_progress: Called with ``(stage, current, total)`` per stage
+            (``validate`` → ``extract``, counting bytes → ``swap`` →
+            ``open``).
+        service: The graph service whose workdir to replace; the process's
+            own (the graph's single writer) when omitted.
+        settings_store: Where the stale flag is written; a connection of its
+            own is opened (and closed) when omitted.
+
+    Returns:
+        What was restored, with the stale flag it left.
+    """
+    logger = get_run_logger()
+    active = service if service is not None else get_graph_service()
+    result = restore_graph(active, bundle, run_id=run_id, on_progress=on_progress)
+    # The bundle's own flag: the graph is exactly what was exported, so it is
+    # stale exactly when it was then (a source deleted before the export).
+    stale = result.manifest.stale
+    if settings_store is not None:
+        settings_store.set_graph_stale(stale)
+    else:
+        with AppSettingsStore() as owned_settings:
+            owned_settings.set_graph_stale(stale)
+    logger.info(
+        "graph restore loaded %s: %d file(s), %d thread-day(s) in %.1fs%s",
+        result.bundle_name,
+        result.files,
+        result.counts.get("thread_days", 0),
+        result.wall_clock_s,
+        " — the graph is flagged stale" if stale else "",
+    )
+    return replace(result, stale=stale)

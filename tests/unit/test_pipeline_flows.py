@@ -716,13 +716,17 @@ class TestRagExportFlow:
 
 
 class FakeFlagStore:
-    """Records the corpus-stale writes a flow makes."""
+    """Records the stale-flag writes a flow makes."""
 
     def __init__(self) -> None:
         self.writes: list[bool] = []
+        self.graph_writes: list[bool] = []
 
     def set_corpus_stale(self, stale: bool) -> None:
         self.writes.append(stale)
+
+    def set_graph_stale(self, stale: bool) -> None:
+        self.graph_writes.append(stale)
 
 
 class TestRagRestoreFlow:
@@ -936,3 +940,128 @@ class TestGraphExportFlow:
         from varagity.pipeline import graph_export_flow
 
         assert graph_export_flow.retries in (0, None)
+
+
+class TestGraphRestoreFlow:
+    """The graph restore's tracking shell — the backup package does the work (ADR-019)."""
+
+    @pytest.fixture
+    def service(
+        self, tmp_path: Path, settings_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+    ) -> GraphService:
+        settings_env(
+            EMBEDDING_MODEL="test-model",
+            EMBEDDING_DIM=2,
+            GRAPH_DOCS_PATH=str(tmp_path / "graph-docs"),
+            GRAPH_STORAGE_PATH=str(tmp_path / "graph-data"),
+            GRAPH_ENGINE="lightrag",
+        )
+        monkeypatch.setitem(GRAPH_ENGINE_REGISTRY, "_flow_probe", FakeEngine())
+        return GraphService(
+            "_flow_probe", workdir=build_workdir(tmp_path / "graph-data" / "lightrag")
+        )
+
+    @staticmethod
+    def bundle(service: GraphService, tmp_path: Path, *, stale: bool) -> Path:
+        from varagity.backup.graph import export_graph
+
+        return export_graph(
+            service, tmp_path / "graph-docs" / "varagity-exports", read_stale=lambda: stale
+        ).bundle.path
+
+    def test_graph_restore_is_a_tracked_flow_run_that_writes_the_bundles_flag(
+        self, service: GraphService, tmp_path: Path
+    ) -> None:
+        from varagity.pipeline import graph_restore_flow
+
+        bundle = self.bundle(service, tmp_path, stale=True)
+        flags = FakeFlagStore()
+        frames: list[str] = []
+        state = graph_restore_flow(
+            bundle,
+            run_id="r1",
+            on_progress=lambda stage, current, total: frames.append(stage),
+            service=service,
+            settings_store=flags,
+            return_state=True,
+        )
+        assert state.is_completed()
+        result = state.result()
+        assert graph_restore_flow.name == "graph-restore"
+        assert result.stale is True
+        assert flags.graph_writes == [True]  # the bundle's own flag, after the swap
+        assert flags.writes == []  # never the document corpus's
+        assert result.counts["thread_days"] == 2
+        assert frames[0] == "validate" and "extract" in frames and frames[-1] == "open"
+        assert service.building is False
+        with get_client(sync_client=True) as client:
+            run = client.read_flow_run(state.state_details.flow_run_id)
+        assert run.state is not None and run.state.is_completed()
+        service.close()
+
+    def test_a_fresh_bundle_clears_the_flag(self, service: GraphService, tmp_path: Path) -> None:
+        from varagity.pipeline import graph_restore_flow
+
+        flags = FakeFlagStore()
+        result = graph_restore_flow(
+            self.bundle(service, tmp_path, stale=False),
+            run_id="r1",
+            service=service,
+            settings_store=flags,
+        )
+        assert result.stale is False
+        assert flags.graph_writes == [False]
+        service.close()
+
+    def test_a_failed_graph_restore_writes_no_flag(
+        self, service: GraphService, tmp_path: Path
+    ) -> None:
+        """★ Only a completed restore may say what the graph now is."""
+        import zipfile
+
+        from varagity.backup.bundle import BundleDamaged
+        from varagity.pipeline import graph_restore_flow
+
+        bundle = self.bundle(service, tmp_path, stale=True)
+        name = "lightrag/kv_store_doc_status.json"
+        with zipfile.ZipFile(bundle) as archive:
+            original = archive.read(name)
+        # Same length, other bytes: only the sha256 can tell.
+        tampered = original.replace(b"processed", b"PROCESSED")
+        damaged = rezip(bundle, {name: tampered}, reseal=False)
+        flags = FakeFlagStore()
+        with pytest.raises(BundleDamaged, match="kv_store_doc_status.json"):
+            graph_restore_flow(damaged, run_id="r1", service=service, settings_store=flags)
+        assert flags.graph_writes == []
+        service.close()
+
+    def test_the_flow_finds_the_process_service_and_opens_its_own_settings_store(
+        self, service: GraphService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from varagity.pipeline import graph_restore_flow
+
+        backup_flow_module = importlib.import_module("varagity.pipeline.backup_flow")
+        bundle = self.bundle(service, tmp_path, stale=False)
+        opened: list[str] = []
+        flags = FakeFlagStore()
+
+        class OwnedSettings:
+            def __enter__(self) -> FakeFlagStore:
+                opened.append("settings")
+                return flags
+
+            def __exit__(self, *exc: object) -> None:
+                opened.append("settings closed")
+
+        monkeypatch.setattr(backup_flow_module, "AppSettingsStore", OwnedSettings)
+        monkeypatch.setattr(backup_flow_module, "get_graph_service", lambda: service)
+        graph_restore_flow(bundle, run_id="r1")
+        assert opened == ["settings", "settings closed"]
+        assert flags.graph_writes == [False]
+        service.close()
+
+    def test_the_flow_carries_no_retries(self) -> None:
+        """A failed restore put the previous graph back; the user presses Restore again."""
+        from varagity.pipeline import graph_restore_flow
+
+        assert graph_restore_flow.retries in (0, None)

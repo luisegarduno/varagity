@@ -47,6 +47,12 @@ export const queryKeys = {
   settings: ["settings"] as const,
   documents: ["documents"] as const,
   /**
+   * Every graph key at once — status, documents, slices, entities — by
+   * prefix. Never a query's own key: it exists to invalidate them all, which
+   * a graph restore does (the whole graph was just replaced).
+   */
+  graph: ["graph"] as const,
+  /**
    * The graph's size + build state. Disjoint from `graphDocuments`: a
    * build changes the graph but not the corpus directory, and an upload
    * the other way round.

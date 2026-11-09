@@ -20,10 +20,11 @@ Failure surfaces split by stream state: dependency outages and bad
 references are caught by dependencies *before* the stream opens (clean
 structured ``503``/``404``/``422``) — and so is a corpus mid-restore, which
 answers ``503 corpus_restoring`` rather than retrieve from tables that are
-being replaced (ADR-019); anything after the 200 flushed is an in-band
-``error`` event. A client disconnect cancels this generator, whose
-cleanup flips the bridge's abort flag; the flow notices between tokens and
-closes the LLM stream, freeing the GPU (spec_v2 §4.3 cancellation).
+being replaced, or open a graph whose workdir is being swapped (ADR-019);
+anything after the 200 flushed is an in-band ``error`` event. A client
+disconnect cancels this generator, whose cleanup flips the bridge's abort
+flag; the flow notices between tokens and closes the LLM stream, freeing
+the GPU (spec_v2 §4.3 cancellation).
 """
 
 import asyncio
@@ -452,12 +453,15 @@ async def prepare_chat(
 
     Checks run cheapest-first: body shape (FastAPI, 422 — an unknown
     ``corpus`` never gets past it) → retrieval-method resolution (422) →
-    chat-engine resolution (override or settings, 422) → the graph degrade
-    decision, which picks *which* corpus answers and so which dependencies
-    the turn even needs → that corpus mid-restore (503) → dependency
-    reachability (503, *before* the stream opens) → conversation existence
-    (404), whose store round-trip doubles as the history load for the chat
-    engine (bounded by ``CONDENSE_HISTORY_TURNS``).
+    chat-engine resolution (override or settings, 422) → a graph turn while
+    the graph is mid-restore (503, before the session is opened — a lazy
+    open could otherwise wait out the swap, or read a graph about to be
+    replaced) → the graph degrade decision, which picks *which* corpus
+    answers and so which dependencies the turn even needs → that corpus
+    mid-restore (503) → dependency reachability (503, *before* the stream
+    opens) → conversation existence (404), whose store round-trip doubles as
+    the history load for the chat engine (bounded by
+    ``CONDENSE_HISTORY_TURNS``).
 
     A graph turn resolves the chunk retriever too: it is cheap, and it is
     what answers the turn if the graph degrades.
@@ -484,8 +488,9 @@ async def prepare_chat(
             ``422 unknown_chat_engine`` for an override naming no
             registered implementation; ``503 corpus_restoring`` while a
             backup restore replaces the corpus that would answer (a graph
-            turn the graph answers is unaffected by a document restore);
-            ``503 <service>_unreachable`` for a down dependency; ``404
+            turn the graph answers is unaffected by a document restore, and
+            a document turn by a graph restore); ``503
+            <service>_unreachable`` for a down dependency; ``404
             conversation_not_found`` for an unknown ``conversation_id``.
     """
     settings = get_settings()
@@ -510,7 +515,14 @@ async def prepare_chat(
         ) from error
 
     corpus = payload.corpus or "rag"
-    # The degrade decision comes first because it decides *what* to preflight:
+    # A graph turn while the graph restores is refused before the session is
+    # touched: the restore closes it, swaps the workdir and reopens it, and a
+    # lazy open here would either wait out the swap or read a graph that is
+    # about to be replaced. (With the kill switch off the turn degrades to
+    # the documents without touching the graph, so only they matter then.)
+    if corpus == "graph" and settings.GRAPH_ENABLED:
+        _refuse_while_restoring(gates, "graph")
+    # The degrade decision comes next because it decides *what* to preflight:
     # a graph turn never touches Elasticsearch, a degraded one always does.
     # Opening the session dials no service — it initializes local storages —
     # so nothing here depends on the check that follows it.
@@ -519,18 +531,7 @@ async def prepare_chat(
     # from the documents — must not be mid-restore: its tables are empty or
     # half-loaded until the restore commits, and retrieval would either wait
     # behind the restore or answer from nothing.
-    answering = "graph" if graph is not None else "rag"
-    if gates[answering].holder == "restore":
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "corpus_restoring",
-                "message": (
-                    f"the {_CORPUS_NOUNS[answering]} is being restored from a backup — "
-                    "ask again when the restore finishes"
-                ),
-            },
-        )
+    _refuse_while_restoring(gates, "graph" if graph is not None else "rag")
     await (graph_preflight() if graph is not None else services_preflight())
 
     history: list[Turn] = []
@@ -570,6 +571,31 @@ async def prepare_chat(
         graph_service=graph,
         graph_mode=settings.GRAPH_QUERY_MODE,
     )
+
+
+def _refuse_while_restoring(gates: dict[str, CorpusGate], corpus: str) -> None:
+    """Answer ``503 corpus_restoring`` while a backup restore holds ``corpus``.
+
+    Args:
+        gates: The process's per-corpus write gates (a restore holds its
+            corpus's gate for the whole run).
+        corpus: The corpus the turn would read (``"rag"`` | ``"graph"``).
+
+    Raises:
+        HTTPException: ``503 corpus_restoring``, naming the corpus — a wait,
+            not a fault: ask again once the restore finishes.
+    """
+    if gates[corpus].holder == "restore":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "corpus_restoring",
+                "message": (
+                    f"the {_CORPUS_NOUNS[corpus]} is being restored from a backup — "
+                    "ask again when the restore finishes"
+                ),
+            },
+        )
 
 
 def _swallow_outcome(future: "asyncio.Future[_TurnOutcome]") -> None:

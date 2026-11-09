@@ -30,13 +30,21 @@ chunk RAG. An iMessage `chat.db` is extracted into a knowledge graph (LightRAG,
 retrieval-only; the repo writes the answers) by a resumable, API-only build; a chat turn
 targets it via `ChatRequest.corpus`, and `/graph` draws the whole thing.
 
+**Corpus backups** (ADR-019) export each corpus to one zip in its reserved
+`varagity-exports/` folder (`docs/` or `graph-docs/`, so bundles survive `down -v` in the
+bind mounts) and restore it with no model call: RAG gets its rows, blurbs and vectors back
+plus a BM25 index rebuilt from them; the graph gets its whole workdir swapped back in
+(manifest, size summary and LLM cache included). Export & restore live on each `/corpus`
+tab (API + GUI only, no CLI command) and stream progress over the same replaying SSE shape
+as ingest and the graph build.
+
 Where things live:
 - `spec.md` / `spec_v2.md` / `spec_v3.md` — the v1/v2/v3 designs (§ references in
   docstrings point at them), untracked under `thoughts/shared/tasks/<feature-or-version>/`
   (`tasks/v1/`…`tasks/v3/`; feature specs like `spec_codebase_map.md` and
   `graphrag/spec_graphrag.md` sit beside them).
 - `golden-docs/` — **as-built** documentation, rendered by MkDocs (`uv run mkdocs serve`):
-  architecture, data model, pipelines, runbook, ADRs 001–018, Python API reference;
+  architecture, data model, pipelines, runbook, ADRs 001–019, Python API reference;
   `golden-docs/map.md` frames `golden-docs/assets/map/`, a **committed Vite build** of
   the web map (`web/docs-map/`) — regenerate with `bun run build:docs-map`;
   `golden-docs/api.md` is the HTTP contract + SSE protocols, rendered from the
@@ -70,8 +78,8 @@ over the same Prefect flows:
 5. **prefect** (`:4200`) — flow/task tracking UI; SQLite backing store.
 6. **api** (`:8000`) — FastAPI (`varagity/api/`, built from `Dockerfile.api`): SSE chat
    streaming, conversation CRUD, corpus upload/ingest + runtime settings routes,
-   the graph corpus/build/status/export routes, health/config, `/metrics`; invokes the
-   flows in-process. Also the **single writer** of the graph: mounts `./graph-docs`
+   the graph corpus/build/status/export routes, corpus backup export/restore routes,
+   health/config, `/metrics`; invokes the flows in-process. Also the **single writer** of the graph: mounts `./graph-docs`
    (bind, the message archives) and the `graphdata` volume (`/app/graph-data`, the
    extracted graph) — the eleventh storage surface, api-only.
 7. **web** (`:3000`) — the Next.js GUI (`web/`); the only browser-facing surface, talks
@@ -295,6 +303,28 @@ never point a host process at the live graph while the api container is up). See
 - Graph citations must be **bracket-form only** (`[SOURCE: <doc_key>]`): `web/lib/citations.ts`
   captures a line-initial form too, which breaks on graph labels — mind it when touching
   the graph answer prompt.
+- `varagity-exports/` at the top of `DOCS_PATH` and `GRAPH_DOCS_PATH` is **reserved** for
+  backup bundles (ADR-019): ingest discovery and the graph build's scan skip it (a bundle is
+  never a source), the graph source listing hides it, uploads refuse it (`reserved_path`),
+  and the graph delete 404s it. Never
+  put corpus files there, and never edit a bundle by hand — `bundle.json` records every
+  member's sha256, so Restore refuses a damaged bundle (`422 bundle_invalid`), and one from
+  another embedding model/dim, graph engine or engine major.minor is refused
+  (`422 bundle_incompatible`), never converted.
+- **Restore replaces, never merges**, and calls no model. RAG truncates and reloads both
+  tables in one transaction, then rebuilds BM25 from the restored rows; the graph swaps its
+  whole workdir, so `graphdata` needs room for two graphs mid-swap (an interrupted swap is
+  healed when the API next builds its `GraphService` — never create
+  `lightrag.{restore,previous,replaced}-*` folders by hand). While it runs, chat against
+  that corpus answers `503 corpus_restoring` and its deletes `409 corpus_busy`. The stale
+  flag comes from the bundle (a RAG restore also flags ingest-settings drift). Chat history
+  and settings-drawer overrides are in neither bundle.
+- **One writer per corpus**: ingest, graph build, export and restore exclude each other
+  through the per-corpus `CorpusGate` (`409 corpus_busy`) — but the gate is **in-process**.
+  Its cross-process half is RAG's Postgres advisory lock: every ingest holds it shared, a
+  restore holds it exclusive, so a CLI `ingest` (or `chat`, which ingests on startup)
+  during a restore exits with one "being restored" line, and Restore during a CLI ingest
+  answers `409 corpus_busy`. The graph needs no such lock: the API is its only writer.
 - Preview endpoints degrade per-document (`available:false` + `reason`; the page GET turns
   the reason into a 404 code), never 500 — host-mode runs without LibreOffice lose only
   PPTX previews (`conversion_unavailable`). `PREVIEW_*` settings are env-only (not in the

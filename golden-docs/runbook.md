@@ -455,7 +455,12 @@ the sledgehammer — it wipes the working directory and re-indexes everything
 — and it is the **only** thing that clears the graph-stale flag that a
 deleted source file sets.
 
-**6 · Reset the graph** (keeping the source archives, which are a host
+**6 · Back it up.** A graph that took days to build is worth a backup:
+Export on the tab writes the whole working directory into
+`graph-docs/varagity-exports/`, and Restore brings it back in seconds — see
+[Backups](#the-message-graph).
+
+**7 · Reset the graph** (keeping the source archives, which are a host
 bind):
 
 ```bash
@@ -581,14 +586,19 @@ floor.
 
 ## Backups
 
-`docker compose down -v` wipes the processed document corpus along with the
-volumes ([below](#volumes-and-resets)): the chunk rows, their contextual
-blurbs and embeddings, and the BM25 index. The source folders survive
-because they are host binds — and so does a **backup bundle**, which is
-written into a reserved folder inside one (`docs/varagity-exports/`,
-[Data model](data-model.md#backup-bundles)). Restoring a bundle brings the
-corpus back with no parsing, chunking, contextualizing or embedding. Both
-live on `/corpus` → Documents → **Export & restore**, or against the API:
+`docker compose down -v` wipes both processed corpora along with the volumes
+([below](#volumes-and-resets)): the chunk rows, their contextual blurbs and
+embeddings, the BM25 index, and the extracted message graph. The source
+folders survive because they are host binds — and so does a **backup
+bundle**, which is written into a reserved folder inside one
+(`docs/varagity-exports/` or `graph-docs/varagity-exports/`,
+[Data model](data-model.md#backup-bundles); the design is
+[ADR-019](adr/ADR-019-corpus-backups.md)). Restoring a bundle brings the
+corpus back with no parsing, chunking, contextualizing, embedding or graph
+extraction. Both live on each `/corpus` tab's **Export & restore** panel, or
+against the API.
+
+### The document corpus
 
 ```bash
 # export: writes docs/varagity-exports/varagity-rag-<UTC yyyymmdd-HHMM>.zip
@@ -646,6 +656,86 @@ curl -sN localhost:8000/api/backups/rag/status
 - **Not in a bundle:** chat history, conversation folders and
   settings-drawer overrides (they live in `pgdata`, which `down -v` wipes).
 
+### The message graph
+
+```bash
+# export: writes graph-docs/varagity-exports/varagity-graph-<UTC yyyymmdd-HHMM>.zip
+curl -sX POST localhost:8000/api/backups/graph/export
+curl -sN localhost:8000/api/backups/graph/status  # snapshot → pack (bytes) → finalize
+
+# the folder, with each bundle's verdict and the engine version that wrote it
+curl -s localhost:8000/api/backups/graph | jq '.[] | {name, restorable, reason, engine: .manifest.engine}'
+
+# restore one — this REPLACES the graph's working directory
+curl -sX POST localhost:8000/api/backups/graph/restore \
+  -H 'content-type: application/json' -d '{"name": "varagity-graph-20261108-1315.zip"}'
+curl -sN localhost:8000/api/backups/graph/status  # validate → extract (bytes) → swap → open
+```
+
+- **What it holds.** The engine's working directory verbatim — the graph,
+  its vector indexes, the doc-status resume ledger, the LLM response cache
+  a later incremental build rebuilds shared entities from, the build
+  manifest (so the next Build stays a diffing upsert) and the size summary.
+  A restored graph builds on exactly where the exported one left off.
+- **Export while it answers.** The export copies the files under the
+  graph's write lock: Build and Re-build wait (`409 corpus_busy`), graph
+  chat and `/graph` keep answering. It needs postgres (for the stale flag)
+  and no model service. Deleting a source mid-export is fine — the bundle
+  records the stale flag as it stands once the copy ends.
+- **Restore is extract, swap, open.** The bundle is extracted beside the
+  live workdir, on the `graphdata` volume, then swapped in: the session
+  closes, the two folders are renamed, and the restored graph is opened.
+  If it won't open, the previous graph goes back and reopens, and the run
+  fails saying so. While it runs, a graph question answers `503
+  corpus_restoring` (the composer says "being restored"), Build waits, and
+  deleting a graph source answers `409 corpus_busy` (the restore ends by
+  writing the bundle's own stale flag). A graph turn already streaming at
+  the moment of the swap may end in an error — ask again. The graph-stale
+  flag comes back exactly as it was exported.
+- **`graphdata` needs room for two graphs** during a restore: the
+  extracted copy sits beside the live one until the swap commits (the live
+  graph here is about 270 MB on disk). A full volume fails the restore
+  cleanly — the staging copy is removed and the live graph is untouched.
+- **Engine versions are strict.** A graph bundle restores only on the same
+  engine at the same **major.minor** version (`lightrag-hku 1.5.x` here); a
+  `1.4.9` bundle lists with that reason and its Restore is refused
+  (`422 bundle_incompatible`). After upgrading the engine across a minor
+  version, export again.
+- **A crash mid-swap heals itself.** The swap parks folders beside the
+  workdir (`lightrag.restore-<run>`, `lightrag.previous-<run>`); if the API
+  dies mid-swap, the next start finishes the job — the previous graph moves
+  back unless the swap had already committed (the moment the restored graph
+  opened). Leave those folders alone; and as always, never point a second
+  process at `graphdata`.
+- **`GRAPH_ENABLED=false`** answers `403 graph_disabled` on the graph's
+  list, export, restore and download (the status stream keeps reporting).
+
+### The wiped-stack drill
+
+The acceptance test for the whole feature, and the thing to rehearse before
+you need it:
+
+1. **Export both corpora** from `/corpus` (Documents, then Message graph) —
+   or with the two `POST …/export` calls above — and **copy both bundles
+   off the machine**. They sit in the bind mounts and survive `down -v`, but
+   a backup only on the disk it backs up is not a backup.
+2. **Wipe and restart:**
+
+    ```bash
+    docker compose down -v && docker compose up -d --wait
+    ```
+
+3. **Restore each corpus.** Each `/corpus` tab lists its bundle (they never
+   left the folders); with nothing to replace, Restore starts at once,
+   without a confirmation. Time the graph restore — seconds to minutes,
+   where its original build took days.
+4. **Ask each corpus a question.** A document question and a graph question
+   both answer with citations from the restored data.
+5. **What doesn't come back:** chat history, conversation folders and
+   settings-drawer overrides lived only in `pgdata`. Re-apply any overrides
+   you depend on — and note that until you do, a bundle made under other
+   ingest settings restores flagged stale.
+
 ## Volumes and resets
 
 | Volume | Holds | Reset effect |
@@ -656,13 +746,14 @@ curl -sN localhost:8000/api/backups/rag/status
 | `prefect` | the Prefect server's SQLite backing store | run history lost |
 | `prometheus_data` | scraped time-series history | metric history lost — dashboards start empty |
 | `grafana_data` | Grafana's internal state (sessions, preferences) | harmless — the datasource + dashboards re-provision at boot |
-| `graphdata` | the extracted message graph (graphml + vector indexes + document statuses + our two sidecars), api-only | the graph is gone — a full rebuild from `./graph-docs` costs [hours](#graph-corpus-operations) |
+| `graphdata` | the extracted message graph (graphml + vector indexes + document statuses + our two sidecars), api-only | the graph is gone — a full rebuild from `./graph-docs` costs [hours](#graph-corpus-operations), a [restore from a backup](#the-message-graph) seconds |
 
 `docker compose down -v` drops all of them — the full factory reset, and
 since stage 2 that **includes the message graph**. The two host binds
 (`./docs`, `./graph-docs`) are not volumes and always survive — and with
-them any backup bundles in `docs/varagity-exports/`
-([above](#backups)).
+them any backup bundles in `docs/varagity-exports/` and
+`graph-docs/varagity-exports/` ([above](#backups)), which bring both corpora
+back without a rebuild ([the drill](#the-wiped-stack-drill)).
 
 ### Schema migrations run on API startup
 

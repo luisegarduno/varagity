@@ -26,7 +26,10 @@ forces:
   (parsing a multi-gigabyte database is a build's job, not a GET's).
 * **Deleting a source file flags the graph stale.** The graph still holds
   that file's messages — only a ``reingest`` rebuild retracts them — so the
-  flag is set and the tab says so (stage-2 decision #16).
+  flag is set and the tab says so (stage-2 decision #16). A delete is
+  refused (``409 corpus_busy``) while a backup restore holds the graph: the
+  restore ends by writing the flag its bundle recorded, which would silently
+  undo the delete's.
 * **The reserved ``varagity-exports/`` folder is not corpus** (ADR-019): the
   graph's backup bundles live there, so the listing never shows them, the
   delete never removes one (it would flag the graph stale for a file that
@@ -58,7 +61,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
-from varagity.api.corpus_gate import CorpusBusy
+from varagity.api.corpus_gate import CorpusBusy, CorpusGate, get_corpus_gates
 from varagity.api.deps import get_app_settings_store, get_graph_build_preflight
 from varagity.api.graph_runner import (
     GraphBuildAlreadyRunning,
@@ -113,6 +116,7 @@ _MAX_EXPORT_DEPTH = 5
 RunnerDep = Annotated[GraphBuildRunner, Depends(get_graph_build_runner)]
 ServiceDep = Annotated[GraphService, Depends(get_graph_service)]
 SettingsStoreDep = Annotated[AppSettingsStore, Depends(get_app_settings_store)]
+GatesDep = Annotated[dict[str, CorpusGate], Depends(get_corpus_gates)]
 
 # Sidecars a live SQLite database keeps beside itself. They carry the most
 # recent messages, so they must be uploadable — but they are not databases
@@ -340,9 +344,11 @@ def _prune_empty_parents(directory: Path, graph_root: Path) -> None:
 
 @router.delete(
     "/api/graph/documents/{name:path}",
-    responses={404: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
-def delete_graph_document(name: str, store: SettingsStoreDep) -> GraphDocumentDeleteResponse:
+def delete_graph_document(
+    name: str, store: SettingsStoreDep, gates: GatesDep
+) -> GraphDocumentDeleteResponse:
     """Remove one file from the graph corpus directory and flag the graph stale.
 
     Deleting the *source* does not retract what the graph already extracted
@@ -353,17 +359,26 @@ def delete_graph_document(name: str, store: SettingsStoreDep) -> GraphDocumentDe
     Args:
         name: The file's path relative to ``GRAPH_DOCS_PATH``.
         store: The per-request app-settings store (the stale flag).
+        gates: The process's per-corpus write gates.
 
     Returns:
         What was removed and whether the graph is now flagged stale.
 
     Raises:
-        HTTPException: ``404 graph_document_not_found`` when no such file
-            lives inside ``GRAPH_DOCS_PATH`` — which covers a path trying to
-            escape it, since an escaping path is not a file this route has,
-            and anything in the reserved ``varagity-exports/`` folder (a
-            backup bundle is not a graph source, whatever path reaches it).
+        HTTPException: ``409 corpus_busy`` while a backup restore holds the
+            graph (it ends by writing the bundle's own stale flag, which
+            would undo this one — checked before anything is touched);
+            ``404 graph_document_not_found`` when no such file lives inside
+            ``GRAPH_DOCS_PATH`` — which covers a path trying to escape it,
+            since an escaping path is not a file this route has, and
+            anything in the reserved ``varagity-exports/`` folder (a backup
+            bundle is not a graph source, whatever path reaches it).
     """
+    if gates["graph"].holder == "restore":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "corpus_busy", "message": str(CorpusBusy("graph", "restore"))},
+        )
     graph_root = Path(get_settings().GRAPH_DOCS_PATH).resolve()
     target = resolve_contained(graph_root / name, graph_root)
     if target is None or not target.is_file() or is_exports_path(target.relative_to(graph_root)):

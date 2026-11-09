@@ -743,23 +743,26 @@ graph-docs/varagity-exports/varagity-graph-20261108-1315.zip
 
 ### Restoring a bundle
 
-A restore **replaces** the corpus with the bundle's rows; nothing is merged,
-and nothing is re-parsed, re-chunked, re-contextualized or re-embedded.
-Today only the RAG corpus restores: graph bundles are listed with the same
-cheap verdict and can be downloaded, but `POST /api/backups/graph/restore`
-is not offered yet. How a restore reads the bundle back:
+A restore **replaces** the corpus with the bundle's contents; nothing is
+merged, and nothing is re-parsed, re-chunked, re-contextualized, re-embedded
+or re-extracted ([ADR-019](adr/ADR-019-corpus-backups.md)). How a restore
+reads the bundle back:
 
 - **Two depths of checking.** Every listed bundle gets the *cheap verdict*
   (`inspect_bundle`): the zip directory and `bundle.json` only. The format
   version, the corpus, the member allowlist (exactly the three RAG members;
-  for a graph bundle, [the pattern above](#the-graph-bundle)), the zip-slip
-  rules (no `..`, absolute path, backslash or symlink entry),
-  each member's recorded size against the zip's, the vector matrix's size
-  against `counts.chunks × embedding_dim × 4`, and finally the embedding
-  model and dimension against this stack's. A restore then adds the sha256
-  of every member (`verify_bundle`) and checks the digests again while it
-  streams the members into `COPY`, so even a file swapped after verification
-  can't commit. A mismatch in the model, dimension, corpus or version is
+  for a graph bundle, [the pattern above](#the-graph-bundle), with at least
+  one file), the zip-slip rules (no `..`, absolute path, backslash or
+  symlink entry), each member's recorded size against the zip's, the vector
+  matrix's size against `counts.chunks × embedding_dim × 4`, then the
+  embedding model and dimension against this stack's — and for a graph
+  bundle the engine that wrote its files: it must be the engine
+  `GRAPH_ENGINE` selects, from the same package, at the same major.minor
+  version as this stack's (`running_engine_format()`, the engine's own
+  report). A restore then adds the sha256 of every member (`verify_bundle`)
+  and checks the digests again while it reads the members — into `COPY`,
+  or onto disk — so even a file swapped after verification can't go live.
+  A mismatch in the model, dimension, engine, corpus or version is
   **refused, never converted** (`bundle_incompatible`); anything unsound or
   damaged is `bundle_invalid`.
 - **Re-rooting.** Each document's `source` becomes
@@ -777,6 +780,29 @@ is not offered yet. How a restore reads the bundle back:
   settings as `drift` before you restore.
 - **The BM25 index is rebuilt from the restored rows** — every one of its
   fields is a copy of a `chunks` column ([below](#elasticsearch-index)).
+
+A graph bundle restores as a whole working directory:
+
+- **Extract beside, then swap.** The bundle's `<engine>/` files are
+  extracted into `<workdir>.restore-<run>` — a sibling of the workdir on the
+  same `graphdata` volume — each synced to disk. `GraphService.replace_workdir`
+  then closes the session, renames the live workdir to
+  `<workdir>.previous-<run>` and the staged folder into its place, and opens
+  it. The workdir is never half-written: it is the old folder or the new
+  one, and readers that arrive mid-swap wait for it.
+- **The commit point.** Once the restored graph has opened, the previous
+  one is renamed to `<workdir>.replaced-<run>` and deleted. A failure before
+  that puts the previous graph back and reopens it; a crash before it is
+  rolled back when the next process constructs its `GraphService`, and a
+  crash after it leaves only debris, which that construction removes.
+- **Everything comes back.** The manifest (so the next build stays a
+  diffing upsert — a re-exported `chat.db` still costs only its changed
+  days), the size summary (so the status route and the gauges read the
+  restored sizes at once), the doc-status ledger (a build that was resuming
+  when exported resumes after the restore), and the LLM cache.
+- **The stale flag is the bundle's own.** `_graph_stale` takes the bundle's
+  `stale`, written once the swap committed: the graph is exactly what was
+  exported, so it is stale exactly when it was then.
 
 ## Golden eval dataset
 

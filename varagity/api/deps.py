@@ -389,11 +389,14 @@ def get_graph_build_preflight() -> Callable[[], Awaitable[None]]:
 # restore replaces the rows in postgres and rebuilds the BM25 index in
 # Elasticsearch from them. A graph export copies files the API itself owns
 # (the graph self-stores) and opens no engine session — postgres only, for
-# the graph-stale flag the bundle records.
+# the graph-stale flag the bundle records; a graph restore swaps those files
+# and opens the engine on them (loading local files, no model call) —
+# postgres only again, for the flag it writes.
 BACKUP_REQUIRED_SERVICES: dict[tuple[str, str], tuple[str, ...]] = {
     ("rag", "export"): ("postgres",),
     ("rag", "restore"): ("postgres", "elasticsearch"),
     ("graph", "export"): ("postgres",),
+    ("graph", "restore"): ("postgres",),
 }
 
 

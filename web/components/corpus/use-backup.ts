@@ -53,9 +53,10 @@ export interface BackupRunHandle {
  * mount (a live, finished, or absent run all render correctly), re-attach
  * after a successful start, and invalidate the corpus's `["backups", …]`
  * list when a run ends — a finished export has a new bundle to show. A
- * finished RAG restore also invalidates the document table and the
- * settings catalog: the rows were replaced, and the restore rewrote the
- * stale flag the banner reads.
+ * finished restore also invalidates what it replaced, and the settings
+ * catalog, whose stale flags the restore rewrote: for RAG the document
+ * table; for the graph every `["graph", …]` key — its status and sizes, its
+ * source listing, and the `/graph` view's cached slices and entities.
  *
  * `enabled: false` holds the bundle list back — the graph tab passes it
  * until the status poll says the graph is on, since a disabled graph's
@@ -97,8 +98,10 @@ export function useBackupRun(
         }
         if (next.run !== null && next.run.state !== "running") {
           void queryClient.invalidateQueries({ queryKey: queryKeys.backups(corpus) });
-          if (next.run.operation === "restore" && corpus === "rag") {
-            void queryClient.invalidateQueries({ queryKey: queryKeys.documents });
+          if (next.run.operation === "restore") {
+            void queryClient.invalidateQueries({
+              queryKey: corpus === "graph" ? queryKeys.graph : queryKeys.documents,
+            });
             void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
           }
         }

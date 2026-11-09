@@ -141,3 +141,34 @@ describe("backup queries", () => {
     expect(matched).toEqual([queryKeys.backups("rag")]);
   });
 });
+
+describe("the graph prefix", () => {
+  it("reaches every graph key a restore must refresh — and nothing else", () => {
+    // A finished graph restore invalidates ["graph"]: the status, the
+    // sources, and /graph's cached slices and entities all show a graph
+    // that no longer exists.
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.graphStatus, {});
+    client.setQueryData(queryKeys.graphDocuments, []);
+    client.setQueryData(queryKeys.graphExport(5000), {});
+    client.setQueryData(queryKeys.graphEntity("BOB"), {});
+    client.setQueryData(queryKeys.backups("graph"), []);
+    client.setQueryData(queryKeys.documents, []);
+    client.setQueryData(queryKeys.settings, {});
+
+    const matched = client
+      .getQueryCache()
+      .findAll({ queryKey: queryKeys.graph })
+      .map((query) => query.queryKey);
+
+    expect(matched).toHaveLength(4);
+    expect(matched).toEqual(
+      expect.arrayContaining([
+        queryKeys.graphStatus,
+        queryKeys.graphDocuments,
+        queryKeys.graphExport(5000),
+        queryKeys.graphEntity("BOB"),
+      ]),
+    );
+  });
+});

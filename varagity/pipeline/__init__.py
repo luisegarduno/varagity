@@ -24,6 +24,7 @@ os.environ.setdefault("PREFECT_API_URL", get_settings().PREFECT_API_URL)
 
 from varagity.pipeline.backup_flow import (  # noqa: E402
     graph_export_flow,
+    graph_restore_flow,
     rag_export_flow,
     rag_restore_flow,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "graph_eval_flow",
     "graph_export_flow",
     "graph_query_stream_flow",
+    "graph_restore_flow",
     "ingest_flow",
     "ocr_benchmark_flow",
     "query_flow",

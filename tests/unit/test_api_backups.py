@@ -52,7 +52,7 @@ from varagity.api.deps import get_backup_preflight, get_vector_store
 from varagity.api.main import create_app
 from varagity.api.routes import backups as backups_routes
 from varagity.api.routes.backups import DamagedBundles, get_damaged_bundles
-from varagity.backup.graph import GraphExportReport, export_graph
+from varagity.backup.graph import GraphExportReport, GraphRestore, export_graph, restore_graph
 from varagity.backup.rag import (
     CHUNKS_MEMBER,
     RagExport,
@@ -62,6 +62,7 @@ from varagity.backup.rag import (
     restore_rag,
 )
 from varagity.graph.base import GRAPH_ENGINE_REGISTRY
+from varagity.graph.records import EngineFormat
 from varagity.graph.service import GraphService
 
 TICK = 0.02  # worker-thread scheduling slack for wait loops
@@ -354,13 +355,18 @@ class TestRunnerWiring:
             assert get_backup_runners()[corpus] is runners[corpus]
             assert runners[corpus]._gate is get_corpus_gates()[corpus]
 
-    def test_each_corpus_exports_with_its_own_flow(self) -> None:
-        from varagity.pipeline.backup_flow import graph_export_flow, rag_export_flow
+    def test_each_corpus_exports_and_restores_with_its_own_flows(self) -> None:
+        from varagity.pipeline.backup_flow import (
+            graph_export_flow,
+            graph_restore_flow,
+            rag_export_flow,
+            rag_restore_flow,
+        )
 
-        assert BackupRunner("rag", gate=CorpusGate("rag"))._export_flow is rag_export_flow
+        rag = BackupRunner("rag", gate=CorpusGate("rag"))
+        assert (rag._export_flow, rag._restore_flow) == (rag_export_flow, rag_restore_flow)
         graph = BackupRunner("graph", gate=CorpusGate("graph"))
-        assert graph._export_flow is graph_export_flow
-        assert graph._restore_flow is None  # the graph's restore lands in phase 4
+        assert (graph._export_flow, graph._restore_flow) == (graph_export_flow, graph_restore_flow)
 
     def test_a_corpus_without_an_export_flow_is_refused_at_construction(self) -> None:
         with pytest.raises(KeyError):
@@ -604,12 +610,12 @@ class TestRoutes:
         [
             ("GET", "/api/backups/everything"),
             ("POST", "/api/backups/everything/export"),
+            ("POST", "/api/backups/everything/restore"),
             ("GET", "/api/backups/everything/status"),
             ("GET", "/api/backups/everything/files/x.zip"),
-            ("POST", "/api/backups/graph/restore"),  # the graph's restore lands in phase 4
         ],
     )
-    async def test_unknown_corpora_and_a_graph_restore_are_validation_errors(
+    async def test_unknown_corpora_are_validation_errors(
         self, docs_root: Path, method: str, path: str
     ) -> None:
         response = await request(
@@ -719,13 +725,6 @@ class TestRestoreRunner:
         with pytest.raises(ValueError, match="an export takes none"):
             runner.start("export", "x.zip")
         assert runner.snapshot() is None
-
-    def test_a_corpus_without_a_restore_refuses_one(self, docs_root: Path) -> None:
-        runner = BackupRunner(
-            "graph", gate=CorpusGate("graph"), export_flow=scripted_flow(docs_root)
-        )
-        with pytest.raises(ValueError, match="the graph corpus has no restore"):
-            runner.start("restore", "g.zip")
 
     async def test_the_flow_gets_the_settings_provider_not_a_snapshot(
         self, docs_root: Path
@@ -1035,8 +1034,23 @@ def scripted_graph_flow(
     return flow
 
 
+def scripted_graph_restore_flow(
+    service: GraphService, *, hold: threading.Event | None = None
+) -> Callable[..., GraphRestore]:
+    """A graph-restore-flow double: the real restore over the given service, the bundle's flag."""
+
+    def flow(bundle: Path, *, run_id: str, on_progress: Any = None) -> GraphRestore:
+        if hold is not None:
+            assert hold.wait(timeout=5)
+        result = restore_graph(service, bundle, run_id=run_id, on_progress=on_progress)
+        return replace(result, stale=result.manifest.stale)
+
+    return flow
+
+
 def make_graph_runner(service: GraphService, **kwargs: Any) -> BackupRunner:
     flow = kwargs.pop("flow", None) or scripted_graph_flow(service)
+    kwargs.setdefault("restore_flow", scripted_graph_restore_flow(service))
     kwargs.setdefault("gate", CorpusGate("graph"))
     return BackupRunner("graph", export_flow=flow, **kwargs)
 
@@ -1296,3 +1310,245 @@ class TestDisabledGraph:
             graph_app(docs_root, make_graph_runner(graph_stack)), "GET", "/api/backups/rag"
         )
         assert response.status_code == 200
+
+
+# ── the graph restore (phase 4) ───────────────────────────────────────────
+
+
+def graph_bundle(service: GraphService, tmp_path: Path, *, stale: bool = False) -> Path:
+    """Build the service's graph and export it into the graph's exports folder."""
+    build_workdir(service.workdir)
+    exports = tmp_path / "graph-docs" / "varagity-exports"
+    return export_graph(service, exports, read_stale=lambda: stale).bundle.path
+
+
+def workdir_bytes(service: GraphService) -> dict[str, bytes]:
+    return {path.name: path.read_bytes() for path in sorted(service.workdir.iterdir())}
+
+
+async def graph_restore(app: FastAPI, name: str) -> httpx.Response:
+    return await request(app, "POST", "/api/backups/graph/restore", json={"name": name})
+
+
+class TestGraphRestore:
+    async def test_graph_restore_round_trip(
+        self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
+    ) -> None:
+        """★ 202 → validate · extract · swap · open replayed → the workdir is the bundle's again."""
+        bundle = graph_bundle(graph_stack, tmp_path)
+        exported = workdir_bytes(graph_stack)
+        (graph_stack.workdir / "kv_store_full_docs.json").write_bytes(b'{"since": "the backup"}')
+        runner = make_graph_runner(graph_stack)
+        app = graph_app(docs_root, runner)
+
+        started = await graph_restore(app, bundle.name)
+        assert started.status_code == 202
+        body = started.json()
+        assert (body["corpus"], body["operation"]) == ("graph", "restore")
+        assert body["bundle"] == bundle.name  # named from the start
+        await wait_terminal(runner)
+
+        events = parse_sse(await stream_body(app, "/api/backups/graph/status"))
+        stages = [data["stage"] for name, data in events if name == "progress"]
+        assert stages[0] == "validate"
+        assert stages.index("extract") < stages.index("swap") < stages.index("open")
+        extracting = [
+            data for name, data in events if name == "progress" and data["stage"] == "extract"
+        ]
+        assert extracting[-1]["current"] == extracting[-1]["total"] > 0  # counted in bytes
+        logs = [data["message"] for name, data in events if name == "log"]
+        assert any(f"from {bundle.name}" in line for line in logs)
+        final = events[-1][1]["run"]
+        assert final["state"] == "completed"
+        assert final["summary"]["counts"] == {
+            "thread_days": 2,
+            "messages": 3,
+            "entities": 5,
+            "relations": 3,
+        }
+        assert final["summary"]["stale"] is False
+        assert final["saved_to"] is None
+        assert workdir_bytes(graph_stack) == exported
+        graph_stack.close()
+
+    async def test_the_restored_flag_is_the_bundles(
+        self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
+    ) -> None:
+        bundle = graph_bundle(graph_stack, tmp_path, stale=True)
+        runner = make_graph_runner(graph_stack)
+        assert (await graph_restore(graph_app(docs_root, runner), bundle.name)).status_code == 202
+        await wait_terminal(runner)
+        snapshot = runner.snapshot()
+        assert snapshot is not None and snapshot.summary is not None
+        assert snapshot.summary.stale is True
+        graph_stack.close()
+
+    async def test_the_runner_hands_the_flow_its_run_id(
+        self, docs_root: Path, graph_stack: GraphService
+    ) -> None:
+        """The run id names the folders the swap parks beside the workdir."""
+        seen: list[tuple[str, str]] = []
+
+        def flow(bundle: Path, *, run_id: str, on_progress: Any = None) -> None:
+            seen.append((bundle.name, run_id))
+
+        runner = make_graph_runner(graph_stack, restore_flow=flow)
+        started = runner.start("restore", "g.zip")
+        await wait_terminal(runner)
+        assert seen == [("g.zip", started.run_id)]
+
+    async def test_a_bundle_from_another_engine_version_is_422_incompatible(
+        self,
+        docs_root: Path,
+        graph_stack: GraphService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """★ A lightrag-hku 1.4.9 bundle lists with its reason and is refused, never converted."""
+        monkeypatch.setitem(GRAPH_ENGINE_REGISTRY, "lightrag", FakeEngine())  # runs 1.5.4
+        old = EngineFormat(name="lightrag", package="lightrag-hku", version="1.4.9")
+        monkeypatch.setitem(GRAPH_ENGINE_REGISTRY, "_old_probe", FakeEngine(storage=old))
+        writer = GraphService("_old_probe", workdir=build_workdir(tmp_path / "old" / "lightrag"))
+        exports = tmp_path / "graph-docs" / "varagity-exports"
+        bundle = export_graph(writer, exports, read_stale=lambda: False).bundle.path
+        runner = make_graph_runner(graph_stack)
+        app = graph_app(docs_root, runner)
+        reason = "Written by lightrag-hku 1.4.9 — this stack runs 1.5.4, whose files differ."
+
+        (entry,) = (await request(app, "GET", "/api/backups/graph")).json()
+        assert entry["restorable"] is False
+        assert entry["reason"] == reason
+        assert entry["manifest"]["engine"]["version"] == "1.4.9"
+
+        response = await graph_restore(app, bundle.name)
+        assert response.status_code == 422
+        error = response.json()["error"]
+        assert error["code"] == "bundle_incompatible"
+        assert error["message"] == f"cannot restore {bundle.name}: {reason}"
+        assert runner.snapshot() is None  # refused before any run existed
+
+    async def test_a_damaged_graph_bundle_is_422_invalid_and_then_lists_as_damaged(
+        self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
+    ) -> None:
+        bundle = graph_bundle(graph_stack, tmp_path)
+        name = "lightrag/kv_store_doc_status.json"
+        with zipfile.ZipFile(bundle) as archive:
+            original = archive.read(name)
+        damaged = rezip(bundle, {name: original.replace(b"processed", b"PROCESSED")}, reseal=False)
+        bundle.unlink()
+        runner = make_graph_runner(graph_stack)
+        app = graph_app(docs_root, runner)
+
+        (entry,) = (await request(app, "GET", "/api/backups/graph")).json()
+        assert entry["restorable"] is True  # the cheap verdict can't see it
+
+        response = await graph_restore(app, damaged.name)
+        assert response.status_code == 422
+        error = response.json()["error"]
+        assert error["code"] == "bundle_invalid"
+        assert "kv_store_doc_status.json does not match its recorded sha256" in error["message"]
+
+        (entry,) = (await request(app, "GET", "/api/backups/graph")).json()
+        assert entry["restorable"] is False
+        assert entry["reason"].endswith("— the bundle is damaged.")
+
+    async def test_a_busy_graph_is_409_before_the_bundle_is_hashed(
+        self,
+        docs_root: Path,
+        graph_stack: GraphService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        bundle = graph_bundle(graph_stack, tmp_path)
+        hashed: list[str] = []
+        monkeypatch.setattr(
+            backups_routes, "verify_bundle", lambda path, corpus: hashed.append(path.name)
+        )
+        gate = CorpusGate("graph")
+        gate.claim("build")
+        response = await graph_restore(
+            graph_app(docs_root, make_graph_runner(graph_stack, gate=gate)), bundle.name
+        )
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "corpus_busy"
+        assert "a build is running" in error["message"]
+        assert hashed == []
+
+    async def test_a_restore_holds_the_graph_until_it_ends(
+        self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
+    ) -> None:
+        """One writer per corpus: an export (or build) waits for the restore."""
+        bundle = graph_bundle(graph_stack, tmp_path)
+        hold = threading.Event()
+        gate = CorpusGate("graph")
+        runner = make_graph_runner(
+            graph_stack,
+            gate=gate,
+            restore_flow=scripted_graph_restore_flow(graph_stack, hold=hold),
+        )
+        app = graph_app(docs_root, runner)
+        try:
+            assert (await graph_restore(app, bundle.name)).status_code == 202
+            assert gate.holder == "restore"
+            second = await request(app, "POST", "/api/backups/graph/export")
+            assert second.status_code == 409
+            assert "a restore is running" in second.json()["error"]["message"]
+        finally:
+            hold.set()
+        await wait_terminal(runner)
+        assert gate.holder is None
+        graph_stack.close()
+
+    async def test_the_documents_corpus_lock_never_holds_up_a_graph_restore(
+        self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
+    ) -> None:
+        """The advisory lock is RAG's cross-process half; the graph's only writer is the API."""
+        bundle = graph_bundle(graph_stack, tmp_path)
+        runner = make_graph_runner(graph_stack)
+        app = graph_app(docs_root, runner, lock_free=False)
+        assert (await graph_restore(app, bundle.name)).status_code == 202
+        await wait_terminal(runner)
+        graph_stack.close()
+
+    async def test_the_preflight_is_asked_about_the_graph_restore(
+        self, docs_root: Path, graph_stack: GraphService
+    ) -> None:
+        calls: list[tuple[str, str]] = []
+
+        async def down(corpus: str, operation: str) -> None:
+            calls.append((corpus, operation))
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "postgres_unreachable", "message": "postgres unreachable"},
+            )
+
+        response = await graph_restore(
+            graph_app(docs_root, make_graph_runner(graph_stack), preflight=down), "g.zip"
+        )
+        assert response.status_code == 503
+        assert calls == [("graph", "restore")]
+
+    async def test_an_unknown_graph_bundle_is_404(
+        self, docs_root: Path, graph_stack: GraphService
+    ) -> None:
+        runner = make_graph_runner(graph_stack)
+        response = await graph_restore(graph_app(docs_root, runner), "missing.zip")
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "bundle_not_found"
+        assert runner.snapshot() is None
+
+    async def test_a_graph_restore_answers_403_while_the_graph_is_off(
+        self,
+        docs_root: Path,
+        graph_stack: GraphService,
+        tmp_path: Path,
+        settings_env: Callable[..., None],
+    ) -> None:
+        bundle = graph_bundle(graph_stack, tmp_path)
+        settings_env(GRAPH_ENABLED="false")
+        runner = make_graph_runner(graph_stack)
+        response = await graph_restore(graph_app(docs_root, runner), bundle.name)
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "graph_disabled"
+        assert runner.snapshot() is None

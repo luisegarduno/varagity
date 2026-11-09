@@ -892,3 +892,161 @@ class TestGraphVerdicts:
 )
 def test_graph_file_names(name: str, ok: bool) -> None:
     assert is_graph_file_name(name) is ok
+
+
+# ── the graph engine verdicts (phase 4) ───────────────────────────────────
+
+
+@pytest.fixture
+def running_engine(
+    monkeypatch: pytest.MonkeyPatch, settings_env: Callable[..., None]
+) -> Callable[..., None]:
+    """Pin the engine this stack runs: GRAPH_ENGINE's registry entry, with a chosen format."""
+    from tests.unit.test_graph_service import FakeEngine
+    from varagity.graph.base import GRAPH_ENGINE_REGISTRY
+    from varagity.graph.records import EngineFormat
+
+    def pin(version: str = "1.5.4", package: str = "lightrag-hku") -> None:
+        settings_env(GRAPH_ENGINE="lightrag")
+        storage = EngineFormat(name="lightrag", package=package, version=version)
+        monkeypatch.setitem(GRAPH_ENGINE_REGISTRY, "lightrag", FakeEngine(storage=storage))
+
+    return pin
+
+
+def engine_craft(path: Path, **engine: str) -> Path:
+    """A graph bundle whose manifest records the given engine format (members under its name)."""
+    recorded = {**ENGINE, **engine}
+    folder = recorded["name"]
+    members = {f"{folder}/{name.split('/', 1)[1]}": data for name, data in graph_members().items()}
+    return graph_craft(path, members=members, manifest={"engine": recorded})
+
+
+class TestGraphEngineVerdicts:
+    def test_this_stacks_engine_format_restores(
+        self, tmp_path: Path, stack: None, running_engine: Callable[..., None]
+    ) -> None:
+        running_engine("1.5.4")
+        assert verdict_of(engine_craft(tmp_path / "g.zip"), "graph").restorable
+
+    def test_a_patch_release_reads_the_same_files(
+        self, tmp_path: Path, stack: None, running_engine: Callable[..., None]
+    ) -> None:
+        running_engine("1.5.10")
+        assert verdict_of(engine_craft(tmp_path / "g.zip", version="1.5.4"), "graph").restorable
+
+    def test_another_minor_version_is_incompatible(
+        self, tmp_path: Path, stack: None, running_engine: Callable[..., None]
+    ) -> None:
+        """★ A lightrag-hku 1.4.9 bundle is refused, never opened and trusted."""
+        running_engine("1.5.4")
+        verdict = verdict_of(engine_craft(tmp_path / "g.zip", version="1.4.9"), "graph")
+        assert isinstance(verdict.problem, BundleIncompatible)
+        assert (
+            verdict.reason
+            == "Written by lightrag-hku 1.4.9 — this stack runs 1.5.4, whose files differ."
+        )
+        assert verdict.manifest is not None  # still listed with what it holds
+
+    def test_another_major_version_is_incompatible(
+        self, tmp_path: Path, stack: None, running_engine: Callable[..., None]
+    ) -> None:
+        running_engine("2.0.0")
+        verdict = verdict_of(engine_craft(tmp_path / "g.zip", version="1.5.4"), "graph")
+        assert isinstance(verdict.problem, BundleIncompatible)
+
+    def test_another_package_is_incompatible(
+        self, tmp_path: Path, stack: None, running_engine: Callable[..., None]
+    ) -> None:
+        running_engine("1.5.4")
+        verdict = verdict_of(engine_craft(tmp_path / "g.zip", package="lightrag-fork"), "graph")
+        assert verdict.reason == (
+            "Written by lightrag-fork 1.5.4 — this stack's lightrag engine runs lightrag-hku "
+            "1.5.4, whose files differ."
+        )
+
+    def test_another_engine_is_incompatible(
+        self, tmp_path: Path, stack: None, running_engine: Callable[..., None]
+    ) -> None:
+        running_engine("1.5.4")
+        verdict = verdict_of(engine_craft(tmp_path / "g.zip", name="graphiti"), "graph")
+        assert isinstance(verdict.problem, BundleIncompatible)
+        assert verdict.reason == "Written by the graphiti graph engine — this stack runs lightrag."
+
+    @pytest.mark.parametrize(
+        ("recorded", "running", "ok"),
+        [("dev", "dev", True), ("dev", "1.5.4", False), ("1.5", "1.5.4", True)],
+    )
+    def test_a_version_without_a_numeric_prefix_is_compared_whole(
+        self,
+        tmp_path: Path,
+        stack: None,
+        running_engine: Callable[..., None],
+        recorded: str,
+        running: str,
+        ok: bool,
+    ) -> None:
+        running_engine(running)
+        verdict = verdict_of(engine_craft(tmp_path / "g.zip", version=recorded), "graph")
+        assert verdict.restorable is ok
+
+    def test_the_embedding_space_is_judged_before_the_engine(
+        self, tmp_path: Path, stack: None, running_engine: Callable[..., None]
+    ) -> None:
+        running_engine("1.5.4")
+        path = graph_craft(
+            tmp_path / "g.zip",
+            manifest={"embedding_model": "BAAI/bge-m3", "engine": {**ENGINE, "version": "1.4.9"}},
+        )
+        assert verdict_of(path, "graph").reason == (
+            "Embedded with BAAI/bge-m3 — this stack embeds with test-model."
+        )
+
+    def test_the_engine_never_judges_a_rag_bundle(
+        self, tmp_path: Path, stack: None, running_engine: Callable[..., None]
+    ) -> None:
+        running_engine("9.9.9")
+        assert verdict_of(craft(tmp_path / "r.zip"), "rag").restorable
+
+    def test_verification_refuses_an_incompatible_engine_before_hashing(
+        self, tmp_path: Path, stack: None, running_engine: Callable[..., None]
+    ) -> None:
+        running_engine("1.5.4")
+        with pytest.raises(BundleIncompatible, match="lightrag-hku 1.4.9"):
+            verify_bundle(engine_craft(tmp_path / "g.zip", version="1.4.9"), "graph")
+
+    def test_the_running_format_is_the_configured_engines_own(
+        self, running_engine: Callable[..., None]
+    ) -> None:
+        from varagity.backup.bundle import running_engine_format
+
+        running_engine("1.5.7")
+        assert running_engine_format().version == "1.5.7"
+
+    def test_the_shipped_engine_reports_the_installed_package(
+        self, settings_env: Callable[..., None]
+    ) -> None:
+        import importlib.metadata
+
+        from varagity.backup.bundle import running_engine_format
+
+        settings_env(GRAPH_ENGINE="lightrag")
+        running = running_engine_format()
+        assert (running.name, running.package) == ("lightrag", "lightrag-hku")
+        assert running.version == importlib.metadata.version("lightrag-hku")
+
+
+def test_an_empty_graph_bundle_is_not_a_backup(tmp_path: Path, stack: None) -> None:
+    """Restoring it would just throw the graph away."""
+    path = graph_craft(tmp_path / "g.zip", members={}, records=[])
+    verdict = verdict_of(path, "graph")
+    assert type(verdict.problem) is BundleInvalid
+    assert verdict.reason == "bundle.json records no files — an empty bundle is not a backup."
+
+
+@pytest.mark.parametrize(
+    ("version", "parsed"),
+    [("1.5.4", (1, 5)), ("1.5", (1, 5)), ("10.2.0rc1", (10, 2)), ("dev", "dev"), ("2", "2")],
+)
+def test_engine_versions_are_held_to_major_minor(version: str, parsed: object) -> None:
+    assert bundle_module._major_minor(version) == parsed
