@@ -5,10 +5,11 @@
  * This is the condensed graph adopted one-shot (26 nodes) from a 2026-07-20
  * foglamp scan of the repo; the scan artifact is not retained, so this
  * literal is the source of truth, edited by hand as the architecture moves
- * (the GraphRAG corpus joined 2026-08-13): one node per moving part, model
- * usage expressed as edges into the three `model` nodes (the renderer folds
- * those into on-card chips), and four groups (Ingestion · Query path ·
- * Graph corpus · Observability) drawn as containers.
+ * (the GraphRAG corpus joined 2026-08-13, corpus backups 2026-11-09): one
+ * node per moving part, model usage expressed as edges into the three
+ * `model` nodes (the renderer folds those into on-card chips), and four
+ * groups (Ingestion · Query path · Graph corpus · Observability) drawn as
+ * containers.
  *
  * Authored as a TS literal ending in `satisfies CodebaseMap` so the
  * `kind`/`EdgeKind` unions genuinely type-check — a JSON literal would widen
@@ -21,7 +22,7 @@ import type { CodebaseMap } from "./codebase-map";
 export const CODEBASE_MAP = {
   project: {
     name: "Varagity",
-    date: "2026-08-13",
+    date: "2026-11-09",
     tagline: "Contextual Retrieval RAG, fully self-hosted on local GPUs",
   },
   topModels: [
@@ -198,6 +199,15 @@ export const CODEBASE_MAP = {
         sourceRef: "varagity/eval/evaluate.py",
         detail:
           "Retrieval matrix, chunker sweep, OCR benchmark, multi-turn chat and graph-engine evals against golden datasets — defaults here are benchmark-decided (ADR-004, ADR-011, ADR-017).",
+      },
+      {
+        id: "backups",
+        label: "Corpus backups",
+        kind: "service",
+        sub: "export · restore · both corpora",
+        sourceRef: "varagity/pipeline/backup_flow.py",
+        detail:
+          "Bundles land in a reserved varagity-exports/ folder inside docs/ or graph-docs/, so they survive down -v. Restore replaces, never merges, and calls no model; one writer per corpus (ADR-019).",
       },
 
       {
@@ -444,6 +454,12 @@ export const CODEBASE_MAP = {
       { from: "graph-answerer", to: "llm", kind: "calls", label: "grounded prompt" },
       { from: "graph-qflow", to: "prefect", kind: "writes", label: "task runs" },
       { from: "api", to: "graph-engine", kind: "reads", label: "/graph export" },
+
+      { from: "corpus", to: "backups", kind: "triggers", label: "Export & restore panel" },
+      { from: "backups", to: "pg", kind: "writes", label: "read · replace rows" },
+      { from: "backups", to: "es", kind: "writes", label: "restore rebuilds BM25" },
+      { from: "backups", to: "graph-data", kind: "writes", label: "copy · swap workdir" },
+      { from: "backups", to: "prefect", kind: "writes", label: "flow runs" },
 
       { from: "prom", to: "api", kind: "reads", label: "/metrics 15s" },
       { from: "graf", to: "prom", kind: "reads" },

@@ -170,7 +170,7 @@ describe("condense", () => {
 
   it("folds the real map's three models into the expected cards", () => {
     const { nodes, chips } = condense(CODEBASE_MAP);
-    expect(nodes).toHaveLength(31);
+    expect(nodes).toHaveLength(32);
     expect(nodes.some((node) => node.kind === "model")).toBe(false);
     expect(chips.get("retrievers")?.map((chip) => chip.label)).toEqual([
       "multilingual-e5-large",
