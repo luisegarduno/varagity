@@ -91,10 +91,14 @@ function parseLabel(document: GraphDocument): string | null {
  * quietly (stage-2 decision #16).
  *
  * The export & restore panel (ADR-019) sits under the build: one operation
- * per corpus, so while an export runs the build controls are disabled (the
- * server would answer `409 corpus_busy`), and while a build runs, so is
- * Export. Graph chat keeps answering throughout — an export only holds the
- * graph's write lock.
+ * per corpus, so while an export or restore runs the build controls are
+ * disabled (the server would answer `409 corpus_busy`), and while a build
+ * runs, so are Export and Restore. Graph chat keeps answering through an
+ * export — it only holds the graph's write lock — but pauses for a restore
+ * (`503 corpus_restoring`), whose swap takes seconds. Restoring over a built
+ * graph asks first; onto an empty one (after `docker compose down -v`) it
+ * just starts. A finished restore refreshes every graph query, so the size,
+ * the sources and `/graph` all show the restored graph.
  */
 export function GraphCorpusView() {
   const queryClient = useQueryClient();
@@ -414,6 +418,7 @@ export function GraphCorpusView() {
           disabled={running}
           error={backup.error}
           onExport={() => void backup.startExport()}
+          onRestore={backup.startRestore}
         />
       )}
 

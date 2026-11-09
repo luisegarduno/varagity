@@ -314,6 +314,7 @@ def make_app(
     runner: GraphBuildRunner | None = None,
     service: object | None = None,
     store: FakeSettingsStore | None = None,
+    gates: dict[str, CorpusGate] | None = None,
 ) -> FastAPI:
     application = create_app()
     if runner is not None:
@@ -322,6 +323,12 @@ def make_app(
         application.dependency_overrides[get_graph_service] = lambda: service
     if store is not None:
         application.dependency_overrides[get_app_settings_store] = lambda: store
+    # Each app gets its own gates, so a claim one test makes never leaks
+    # into the process-wide pair another test reads.
+    own_gates = (
+        gates if gates is not None else {"rag": CorpusGate("rag"), "graph": CorpusGate("graph")}
+    )
+    application.dependency_overrides[get_corpus_gates] = lambda: own_gates
 
     async def _noop_preflight() -> None:
         return None
@@ -966,6 +973,37 @@ class TestDelete:
         assert response.json()["error"]["code"] == "graph_document_not_found"
         assert bundle.exists()
         assert store.graph_stale is False
+
+    async def test_a_delete_during_a_graph_restore_is_409_and_touches_nothing(
+        self, graph_root: Path, store: FakeSettingsStore
+    ) -> None:
+        """★ The restore ends by writing its bundle's stale flag — it would undo this delete's."""
+        write_chat_db(graph_root / "chat.db")
+        gates = {"rag": CorpusGate("rag"), "graph": CorpusGate("graph")}
+        gates["graph"].claim("restore")
+        response = await request(
+            make_app(store=store, gates=gates), "DELETE", "/api/graph/documents/chat.db"
+        )
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "corpus_busy"
+        assert "a restore is running" in error["message"]
+        assert (graph_root / "chat.db").exists()
+        assert store.graph_stale is False
+
+    @pytest.mark.parametrize("holder", ["export", "build"])
+    async def test_a_delete_beside_an_export_or_build_still_works(
+        self, graph_root: Path, store: FakeSettingsStore, holder: str
+    ) -> None:
+        """An export reads the flag last, so it records the delete; a build never cleared it."""
+        write_chat_db(graph_root / "chat.db")
+        gates = {"rag": CorpusGate("rag"), "graph": CorpusGate("graph")}
+        gates["graph"].claim(holder)  # type: ignore[arg-type]
+        response = await request(
+            make_app(store=store, gates=gates), "DELETE", "/api/graph/documents/chat.db"
+        )
+        assert response.status_code == 200
+        assert store.graph_stale is True
 
 
 class TestBuildRoute:

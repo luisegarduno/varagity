@@ -21,6 +21,9 @@ from tests.unit.test_graph_service import FAKE_FORMAT, FakeEngine
 from varagity.backup import graph as graph_backup
 from varagity.backup.bundle import (
     MANIFEST_NAME,
+    BundleDamaged,
+    BundleIncompatible,
+    BundleInvalid,
     NothingToExport,
     inspect_bundle,
     read_manifest,
@@ -28,15 +31,17 @@ from varagity.backup.bundle import (
 )
 from varagity.backup.graph import (
     GraphExportReport,
+    GraphRestore,
     export_graph,
     graph_counts,
     is_temp_file,
+    restore_graph,
     workdir_files,
 )
 from varagity.graph.base import GRAPH_ENGINE_REGISTRY
 from varagity.graph.manifest import ManifestDoc, WorkdirManifest, save_manifest, save_summary
 from varagity.graph.records import EngineFormat, GraphStats
-from varagity.graph.service import GraphBuildInProgress, GraphService
+from varagity.graph.service import GraphBuildInProgress, GraphService, GraphUnavailable
 
 DIM = 4
 
@@ -390,3 +395,215 @@ def test_a_real_workdir_lists_by_name_whatever_the_creation_order(tmp_path: Path
         "kv_store_full_docs.json",
         "vdb_chunks.json",
     ]
+
+
+# ── the graph restore (phase 4) ────────────────────────────────────────────
+
+
+def snapshot(workdir: Path) -> dict[str, bytes]:
+    """Every file in a workdir, by name — what a restore must reproduce byte for byte."""
+    return {path.name: path.read_bytes() for path in sorted(workdir.iterdir()) if path.is_file()}
+
+
+def rezip_member(bundle: Path, name: str, data: bytes) -> Path:
+    """Rewrite one member of a bundle, keeping its original ``bundle.json`` (now a lie)."""
+    with zipfile.ZipFile(bundle) as archive:
+        contents = {entry: archive.read(entry) for entry in archive.namelist()}
+    contents[name] = data
+    target = bundle.with_name(f"edited-{bundle.name}")
+    with zipfile.ZipFile(target, "w") as archive:
+        for entry, payload in contents.items():
+            archive.writestr(entry, payload)
+    return target
+
+
+def restore(service: GraphService, bundle: Path, **kwargs: Any) -> GraphRestore:
+    kwargs.setdefault("run_id", "r1")
+    return restore_graph(service, bundle, **kwargs)
+
+
+@pytest.fixture
+def exported(built: GraphService, stack: Path) -> tuple[Path, dict[str, bytes]]:
+    """A bundle of the built graph, and the workdir's files at the moment it was made."""
+    return export(built, stack).bundle.path, snapshot(built.workdir)
+
+
+class TestRestore:
+    def test_brings_the_exported_workdir_back_byte_for_byte(
+        self, built: GraphService, exported: tuple[Path, dict[str, bytes]], engine: FakeEngine
+    ) -> None:
+        """★ No model call, no re-extraction — the files the graph was, verbatim."""
+        bundle, before = exported
+        workdir = built.workdir
+        (workdir / "kv_store_full_docs.json").write_bytes(b'{"changed": "after the backup"}')
+        (workdir / "vdb_extra.json").write_bytes(b"{}")  # a namespace written since
+
+        result = restore(built, bundle)
+
+        assert snapshot(workdir) == before
+        assert sorted(path.name for path in workdir.parent.iterdir()) == ["lightrag"]
+        assert result.files == len(before)
+        assert result.counts == {"thread_days": 2, "messages": 3, "entities": 5, "relations": 3}
+        assert result.stats == GraphStats(entities=4, relations=3, communities=None)
+        assert result.bundle_name == bundle.name
+        assert result.size_bytes == bundle.stat().st_size
+        assert built.building is False
+        assert engine.opens == 1  # opened once, on the restored files
+        built.close()
+
+    def test_restores_onto_a_wiped_stack(
+        self, tmp_path: Path, engine: FakeEngine, stack: Path, built: GraphService
+    ) -> None:
+        bundle = export(built, stack).bundle.path
+        before = snapshot(built.workdir)
+        wiped = graph_service(tmp_path / "wiped" / "lightrag")
+        restore(wiped, bundle)
+        assert snapshot(wiped.workdir) == before
+        wiped.close()
+
+    def test_progress_walks_validate_extract_swap_open_counting_bytes(
+        self,
+        built: GraphService,
+        exported: tuple[Path, dict[str, bytes]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(graph_backup, "_COPY_BYTES", 16)  # many small blocks
+        bundle, before = exported
+        frames: list[tuple[str, int | None, int | None]] = []
+        restore(built, bundle, on_progress=lambda *frame: frames.append(frame))
+        total = sum(len(data) for data in before.values())
+        stages = [stage for stage, _, _ in frames]
+        assert stages[0] == "validate"
+        assert stages[-2:] == ["swap", "open"]
+        extracting = [frame for frame in frames if frame[0] == "extract"]
+        assert extracting[0] == ("extract", 0, total)
+        assert extracting[-1] == ("extract", total, total)
+        assert len(extracting) <= graph_backup._PROGRESS_FRAMES + 2  # throttled, not per block
+        built.close()
+
+    def test_the_stale_flag_rides_the_bundle(self, built: GraphService, stack: Path) -> None:
+        """The flow writes the bundle's own flag: the graph is what was exported."""
+        bundle = export(built, stack, read_stale=lambda: True).bundle.path
+        assert restore(built, bundle).manifest.stale is True
+        built.close()
+
+    def test_the_restore_logs_file_names_not_container_paths(
+        self,
+        built: GraphService,
+        exported: tuple[Path, dict[str, bytes]],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bundle, _ = exported
+        with caplog.at_level(logging.INFO, logger="varagity.backup.graph"):
+            restore(built, bundle)
+        # Only the backup package's lines are relayed into the panel's log.
+        lines = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name.startswith("varagity.backup")
+        ]
+        assert any(
+            "restoring 14 graph file(s)" in line and "lightrag-hku 1.5.4" in line for line in lines
+        )
+        assert any(f"from {bundle.name}" in line for line in lines)
+        assert all(str(built.workdir) not in line for line in lines)
+        built.close()
+
+
+class TestRestoreRefusals:
+    @pytest.mark.parametrize(
+        "entry", ["lightrag/../escaped.json", "/etc/escaped.json", "lightrag/nested/x.json"]
+    )
+    def test_unsafe_members_are_refused_before_anything_is_extracted(
+        self,
+        built: GraphService,
+        exported: tuple[Path, dict[str, bytes]],
+        tmp_path: Path,
+        entry: str,
+    ) -> None:
+        """★ Zip-slip never reaches the disk: refused before the staging folder exists."""
+        bundle, before = exported
+        with zipfile.ZipFile(bundle, "a") as archive:
+            archive.writestr(entry, b"{}")
+        with pytest.raises(BundleInvalid):
+            restore(built, bundle)
+        assert snapshot(built.workdir) == before
+        assert not built.staging_dir("r1").exists()
+        assert not (tmp_path / "graph-data" / "escaped.json").exists()
+
+    def test_a_member_damaged_after_verification_never_goes_live(
+        self, built: GraphService, exported: tuple[Path, dict[str, bytes]]
+    ) -> None:
+        """★ Each member's sha256 is checked again as it is extracted."""
+        bundle, before = exported
+        name = "lightrag/kv_store_doc_status.json"
+        with zipfile.ZipFile(bundle) as archive:
+            original = archive.read(name)
+        damaged = rezip_member(bundle, name, original.replace(b"processed", b"PROCESSED"))
+        assert inspect_bundle(
+            damaged, "graph"
+        ).restorable  # same sizes: the cheap verdict can't tell
+        with pytest.raises(BundleDamaged, match="kv_store_doc_status.json"):
+            restore(built, damaged)
+        assert snapshot(built.workdir) == before
+        assert sorted(path.name for path in built.workdir.parent.iterdir()) == ["lightrag"]
+
+    def test_a_bundle_from_another_engine_version_is_refused_untouched(
+        self, tmp_path: Path, stack: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old = EngineFormat(name="lightrag", package="lightrag-hku", version="1.4.9")
+        monkeypatch.setitem(GRAPH_ENGINE_REGISTRY, "_backup_probe", FakeEngine(storage=old))
+        service = graph_service(build_workdir(tmp_path / "graph-data" / "lightrag"))
+        bundle = export(service, stack).bundle.path
+        before = snapshot(service.workdir)
+        with pytest.raises(BundleIncompatible, match="lightrag-hku 1.4.9"):
+            restore(service, bundle)
+        assert snapshot(service.workdir) == before
+        assert not service.staging_dir("r1").exists()
+
+    def test_a_restored_graph_that_will_not_open_leaves_the_graph_as_it_was(
+        self,
+        built: GraphService,
+        exported: tuple[Path, dict[str, bytes]],
+        engine: FakeEngine,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bundle, before = exported
+        (built.workdir / "kv_store_full_docs.json").write_bytes(b'{"live": "since the backup"}')
+        live = snapshot(built.workdir)
+
+        def refuse_the_backup(workdir: Path) -> None:
+            if snapshot(workdir) == before:
+                raise RuntimeError("vdb embedding_dim mismatch")
+
+        engine.on_open = refuse_the_backup
+        with (
+            caplog.at_level(logging.WARNING, logger="varagity.backup.graph"),
+            pytest.raises(GraphUnavailable, match="embedding_dim mismatch"),
+        ):
+            restore(built, bundle)
+        assert snapshot(built.workdir) == live
+        assert sorted(path.name for path in built.workdir.parent.iterdir()) == ["lightrag"]
+        assert "the restored graph would not open, so the restore was undone" in caplog.text
+        built.close()
+
+    def test_a_held_write_lock_refuses_the_swap_untouched(
+        self, built: GraphService, exported: tuple[Path, dict[str, bytes]]
+    ) -> None:
+        bundle, before = exported
+        with built.writing(), pytest.raises(GraphBuildInProgress):
+            restore(built, bundle)
+        assert snapshot(built.workdir) == before
+        assert not built.staging_dir("r1").exists()  # the extracted files went with it
+
+    def test_a_staging_folder_already_there_is_never_reused_or_removed(
+        self, built: GraphService, exported: tuple[Path, dict[str, bytes]]
+    ) -> None:
+        bundle, before = exported
+        squatter = built.staging_dir("r1")
+        squatter.mkdir()
+        (squatter / "keep.json").write_text("{}")
+        with pytest.raises(FileExistsError):
+            restore(built, bundle)
+        assert (squatter / "keep.json").exists()
+        assert snapshot(built.workdir) == before

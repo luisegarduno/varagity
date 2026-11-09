@@ -169,6 +169,7 @@ nav:
       - ADR-016 HyDE retrieval method: adr/ADR-016-hyde-retrieval.md
       - ADR-017 GraphRAG engine: adr/ADR-017-graphrag-engine.md
       - ADR-018 Codebase map on the docs site: adr/ADR-018-docs-site-map.md
+      - ADR-019 Corpus backups: adr/ADR-019-corpus-backups.md
   - API reference:
       - reference/index.md
       - Configuration & logging: reference/config.md

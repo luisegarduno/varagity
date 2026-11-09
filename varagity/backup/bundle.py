@@ -20,9 +20,10 @@ Reading has two depths, because hashing is the expensive part:
 * :func:`inspect_bundle` is the **cheap verdict** every listed bundle gets —
   the zip's central directory and ``bundle.json`` alone: the format version,
   the corpus, the member allowlist and safety rules, each member's recorded
-  size against the zip's, and the embedding model and dimension against this
-  stack's. No data member is opened, so a folder of large bundles still lists
-  in milliseconds.
+  size against the zip's, the embedding model and dimension against this
+  stack's, and for a graph bundle the engine format its files are in. No
+  data member is opened, so a folder of large bundles still lists in
+  milliseconds.
 * :func:`verify_bundle` adds the sha256 of every member — what a restore
   runs before it touches a store, and the only check that sees a bundle
   damaged *inside* an intact zip. :func:`open_bundle` hands out the same
@@ -31,8 +32,9 @@ Reading has two depths, because hashing is the expensive part:
 
 Two refusals come out of both: :class:`BundleInvalid` (not a sound bundle;
 :class:`BundleDamaged` when only its bytes are wrong) and
-:class:`BundleIncompatible` (a sound bundle this stack must not restore — a
-mismatch is refused, never converted).
+:class:`BundleIncompatible` (a sound bundle this stack must not restore —
+another embedding space, or a graph engine format this stack's engine may
+not read — refused, never converted).
 
 This module knows the container, not the corpora: what goes *inside* a bundle
 is :mod:`varagity.backup.rag`'s and :mod:`varagity.backup.graph`'s business —
@@ -215,9 +217,11 @@ class BundleDamaged(BundleInvalid):
 class BundleIncompatible(BundleError):
     """A sound bundle this stack must not restore.
 
-    Another bundle format version, another corpus, or vectors from another
-    embedding model or dimension. Neither store checks the embedding model
-    (pgvector compares only the vector size), so restoring a mismatch would
+    Another bundle format version, another corpus, vectors from another
+    embedding model or dimension — or, for a graph bundle, files another
+    graph engine (or another major.minor version of this one) wrote. Neither
+    store checks the embedding model (pgvector compares only the vector
+    size, LightRAG only ``embedding_dim``), so restoring a mismatch would
     succeed and then retrieve the wrong passages — it is refused instead,
     never converted.
     """
@@ -904,8 +908,11 @@ class _MemberRule:
     folders: frozenset[str] = frozenset()
 
 
-def _graph_folder(manifest: BundleManifest) -> str:
+def graph_folder(manifest: BundleManifest) -> str:
     """The folder a graph bundle's files ride under: the name of the engine that wrote them.
+
+    Shared by the verdict's member rule and the restore, which extracts
+    ``<folder>/<file>`` into the workdir as ``<file>``.
 
     Args:
         manifest: The graph bundle's manifest.
@@ -943,7 +950,7 @@ def _member_rule(manifest: BundleManifest, corpus: Corpus) -> _MemberRule:
         BundleInvalid: If a graph manifest names no usable engine folder.
     """
     if corpus == "graph":
-        prefix = f"{_graph_folder(manifest)}/"
+        prefix = f"{graph_folder(manifest)}/"
 
         def in_folder(name: str) -> bool:
             return name.startswith(prefix) and is_graph_file_name(name[len(prefix) :])
@@ -996,6 +1003,10 @@ def _check_members(infos: list[zipfile.ZipInfo], manifest: BundleManifest, corpu
     unrecorded = sorted((rule.required | set(entries)) - recorded)
     if unrecorded:
         raise BundleInvalid(f"{MANIFEST_NAME} does not record {', '.join(unrecorded)}.")
+    if not recorded:
+        # Only the graph's rule can get here (RAG's members are required):
+        # restoring an empty workdir would just throw the graph away.
+        raise BundleInvalid(f"{MANIFEST_NAME} records no files — an empty bundle is not a backup.")
     for member in manifest.members:
         actual = entries[member.name].file_size
         if actual != member.size_bytes:
@@ -1056,13 +1067,92 @@ def _check_compatible(manifest: BundleManifest) -> None:
         )
 
 
+def running_engine_format() -> EngineFormat:
+    """The file format this stack's graph engine reads — what a graph bundle is held to.
+
+    The engine reports its own format (``GraphEngine.storage_format()``, read
+    from package metadata, so the engine library is never imported), which
+    keeps the backup code from hardcoding any library's name or version.
+
+    Returns:
+        ``GRAPH_ENGINE``'s registered engine's format.
+
+    Raises:
+        KeyError: If ``GRAPH_ENGINE`` names no registered engine (the config
+            validator makes this unreachable).
+    """
+    # Here rather than at the top: importing the engines package registers
+    # its adapters, which this module — imported by the API schemas — needs
+    # only once a graph bundle is actually judged.
+    from varagity.graph.engines import get_graph_engine
+
+    return get_graph_engine(get_settings().GRAPH_ENGINE).storage_format()
+
+
+def _major_minor(version: str) -> tuple[int, int] | str:
+    """The part of an engine version a bundle's files are held to.
+
+    A patch release keeps an engine's file format; a minor bump is where
+    LightRAG has changed what its files hold — and the files are copied
+    verbatim, so a mismatch is refused rather than opened and trusted.
+
+    Args:
+        version: An installed distribution's version (``1.5.4``).
+
+    Returns:
+        ``(major, minor)``, or the whole string when it has no numeric
+        ``major.minor`` prefix (compared verbatim then).
+    """
+    match = re.match(r"(\d+)\.(\d+)", version)
+    return (int(match[1]), int(match[2])) if match else version
+
+
+def _check_engine(manifest: BundleManifest) -> None:
+    """Refuse a graph bundle whose files this stack's graph engine may not read.
+
+    The bundle is the engine's workdir verbatim, so only the engine's own
+    file format decides: the engine must be the one ``GRAPH_ENGINE`` selects,
+    from the same package, at the same major and minor version. A mismatch
+    is refused, never converted.
+
+    Args:
+        manifest: The graph bundle's manifest (members already checked, so
+            it records an engine).
+
+    Raises:
+        BundleInvalid: If the manifest records no engine.
+        BundleIncompatible: On another engine, package, or major.minor
+            version.
+    """
+    engine = manifest.engine
+    if engine is None:  # pragma: no cover — the member rule refuses this first
+        raise BundleInvalid(f"{MANIFEST_NAME} does not record the graph engine that wrote it.")
+    expected = get_settings().GRAPH_ENGINE
+    if engine.name != expected:
+        raise BundleIncompatible(
+            f"Written by the {engine.name} graph engine — this stack runs {expected}."
+        )
+    running = running_engine_format()
+    if engine.package != running.package:
+        raise BundleIncompatible(
+            f"Written by {engine.package} {engine.version} — this stack's {expected} engine "
+            f"runs {running.package} {running.version}, whose files differ."
+        )
+    if _major_minor(engine.version) != _major_minor(running.version):
+        raise BundleIncompatible(
+            f"Written by {engine.package} {engine.version} — this stack runs "
+            f"{running.version}, whose files differ."
+        )
+
+
 def _inspect_archive(archive: zipfile.ZipFile, corpus: Corpus) -> BundleVerdict:
     """Judge an open bundle from its central directory and manifest alone.
 
     The checks run in the order that gives the most useful reason: how to
     read the file (format version), what it is (corpus), whether it is
     sound (members, sizes), and only then whether *this stack* can take it
-    (embedding model and dimension).
+    (embedding model and dimension; for a graph bundle, then the engine
+    that wrote its files).
 
     Args:
         archive: The open bundle.
@@ -1083,6 +1173,8 @@ def _inspect_archive(archive: zipfile.ZipFile, corpus: Corpus) -> BundleVerdict:
             )
         _check_members(archive.infolist(), manifest, corpus)
         _check_compatible(manifest)
+        if corpus == "graph":
+            _check_engine(manifest)
     except BundleError as error:
         return BundleVerdict(manifest=manifest, problem=error)
     return BundleVerdict(manifest=manifest)
@@ -1094,10 +1186,11 @@ def inspect_bundle(path: Path, corpus: Corpus) -> BundleVerdict:
     Reads the zip's central directory and ``bundle.json`` — never a data
     member — and checks everything those can tell: the format version, the
     corpus, the member allowlist and zip-slip rules, each member's recorded
-    size against the zip's, and the embedding model and dimension against
-    this stack's settings. What it can't see is a member damaged *inside*
-    an intact zip with unchanged sizes; :func:`verify_bundle` hashes for
-    that.
+    size against the zip's, the embedding model and dimension against this
+    stack's settings, and for a graph bundle the engine that wrote its files
+    against this stack's (:func:`running_engine_format`). What it can't see
+    is a member damaged *inside* an intact zip with unchanged sizes;
+    :func:`verify_bundle` hashes for that.
 
     Args:
         path: The bundle file.

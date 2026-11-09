@@ -23,3 +23,4 @@ conversation that produced it. Format: Context → Decision → Consequences.
 | [ADR-016](ADR-016-hyde-retrieval.md) | HyDE as a composing retriever, paired under rerank (default stays `hybrid`) | Accepted |
 | [ADR-017](ADR-017-graphrag-engine.md) | The GraphRAG engine + its storage/viz/degrade/defaults directives (bake-off-decided: LightRAG) | Accepted (amended) |
 | [ADR-018](ADR-018-docs-site-map.md) | The codebase map on the docs site — the `/map` view, Vite-built into a checked-in bundle and framed | Accepted |
+| [ADR-019](ADR-019-corpus-backups.md) | Corpus backups — one zip per backup in each corpus's reserved `varagity-exports/` folder, restored with no model call | Accepted |

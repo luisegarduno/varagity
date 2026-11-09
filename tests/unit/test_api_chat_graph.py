@@ -411,3 +411,49 @@ class TestDuringADocumentRestore:
         status, body = await post_chat(app, {"query": "q", "corpus": "graph"})
         assert status == 503
         assert json.loads(body)["error"]["code"] == "corpus_restoring"
+
+
+class TestDuringAGraphRestore:
+    """A graph restore holds off the turns the graph would answer — only those (ADR-019)."""
+
+    async def test_a_graph_turn_is_refused_before_the_session_opens(
+        self, app: FastAPI, graph_service: FakeGraphService, preflights: dict[str, int]
+    ) -> None:
+        """★ No lazy open waits out the swap, and nothing reads a graph about to be replaced."""
+        import json
+
+        app.state.gates["graph"].claim("restore")
+        status, body = await post_chat(app, {"query": "what about Bob?", "corpus": "graph"})
+        assert status == 503
+        error = json.loads(body)["error"]
+        assert error["code"] == "corpus_restoring"
+        assert "the message graph is being restored" in error["message"]
+        assert graph_service.opens == 0
+        assert graph_service.calls == []
+        assert preflights == {"chunk": 0, "graph": 0}
+
+    async def test_a_document_turn_is_unaffected(self, app: FastAPI) -> None:
+        app.state.gates["graph"].claim("restore")
+        status, body = await post_chat(app, {"query": "what is it?"})
+        assert status == 200
+        assert parse_sse(body)[-1][0] == "done"
+
+    async def test_with_the_kill_switch_off_the_turn_degrades_to_the_documents(
+        self, app: FastAPI, graph_service: FakeGraphService, settings_env: Any
+    ) -> None:
+        """It never touches the graph, so a graph restore is none of its business."""
+        settings_env(GRAPH_ENABLED="false")
+        app.state.gates["graph"].claim("restore")
+        events = await graph_turn(app)
+        assert events[-1][0] == "done"
+        assert events[0][1]["graph"] is None
+        assert graph_service.opens == 0
+
+    async def test_a_graph_export_does_not_hold_off_graph_chat(
+        self, app: FastAPI, graph_service: FakeGraphService
+    ) -> None:
+        """An export only holds the write lock — chat keeps answering while it copies."""
+        app.state.gates["graph"].claim("export")
+        events = await graph_turn(app)
+        assert events[-1][0] == "done"
+        assert graph_service.calls

@@ -14,18 +14,22 @@ import {
   backupStageUnit,
   countNoun,
   describeGraphHolding,
+  describeGraphReplacement,
   describeBundle,
   describeReplacement,
   describeStaleRestore,
   formatBytes,
   formatCount,
   formatDuration,
+  GRAPH_RESTORE_STEPS,
   graphIsEmpty,
   initialBackupView,
   MAX_BACKUP_LOG_LINES,
   reduceBackupEvent,
   RESTORE_STEPS,
+  restoredStaleNote,
   restoreSteps,
+  restoreStepsFor,
   restoreSummaryRows,
   type BackupView,
 } from "@/lib/backup-reducer";
@@ -620,5 +624,187 @@ describe("the graph's holding", () => {
     expect(describeGraphHolding(status())).toBeNull();
     expect(graphIsEmpty(status())).toBe(true);
     expect(graphIsEmpty(status({ entities: null, relations: null, message_guids: null }))).toBe(true);
+  });
+});
+
+// ── the graph restore (phase 4) ────────────────────────────────────────
+
+const GRAPH_RESTORING = "varagity-graph-20261108-1315.zip";
+
+function graphRestoreRun(state: BackupRun["state"], overrides?: Partial<BackupRun>): BackupRun {
+  return run(state, {
+    run_id: "gr1",
+    corpus: "graph",
+    operation: "restore",
+    bundle: GRAPH_RESTORING,
+    ...overrides,
+  });
+}
+
+/** The feed one graph restore emits: validate → extract (bytes) → swap → open. */
+function fullGraphRestoreEvents(): BackupEvent[] {
+  return [
+    { type: "status", data: { run: graphRestoreRun("running") } },
+    progress({ stage: "validate" }),
+    {
+      type: "log",
+      data: {
+        level: "INFO",
+        message: `restoring 14 graph file(s), 268,435,456 bytes, written by lightrag-hku 1.5.4, from ${GRAPH_RESTORING}`,
+      },
+    },
+    progress({ stage: "extract", current: 0, total: 256 * MB }),
+    progress({ stage: "extract", current: 182 * MB, total: 256 * MB }),
+    progress({ stage: "extract", current: 256 * MB, total: 256 * MB }),
+    progress({ stage: "swap" }),
+    progress({ stage: "open" }),
+    {
+      type: "status",
+      data: {
+        run: graphRestoreRun("completed", {
+          finished_at: "2026-11-08T13:20:09Z",
+          summary: {
+            counts: { thread_days: 799, messages: 64_592, entities: 5000, relations: 6680 },
+            size_bytes: 152 * MB,
+            wall_clock_s: 21.4,
+            stale: false,
+          },
+        }),
+      },
+    },
+  ];
+}
+
+describe("graph restore replays", () => {
+  it("a full graph restore rebuilds the terminal picture, every step done", () => {
+    const view = reduceAll(fullGraphRestoreEvents());
+    expect(view.run?.corpus).toBe("graph");
+    expect(view.run?.operation).toBe("restore");
+    expect(view.run?.bundle).toBe(GRAPH_RESTORING);
+    expect(view.stage).toBeNull();
+    expect(backupProgress(view)).toBeNull(); // terminal: no bar
+    expect(restoreSteps(view).map((step) => [step.label, step.state])).toEqual([
+      ["validate", "done"],
+      ["extract", "done"],
+      ["swap", "done"],
+      ["open", "done"],
+    ]);
+  });
+
+  it("mid-extract: the bar counts megabytes extracted", () => {
+    const view = reduceAll(fullGraphRestoreEvents().slice(0, 5));
+    expect(view.stage).toBe("extract");
+    expect(backupStageLabel(view)).toBe("extracting the graph's files");
+    expect(backupStageUnit(view.stage)).toBe("extracted");
+    expect(backupProgress(view)).toEqual({
+      done: "182.0 MB",
+      total: "256.0 MB",
+      unit: "extracted",
+      current: 182 * MB,
+      max: 256 * MB,
+      fraction: 182 / 256,
+    });
+    expect(restoreSteps(view).map((step) => step.state)).toEqual([
+      "done",
+      "now",
+      "pending",
+      "pending",
+    ]);
+  });
+
+  it("the swap and the open are uncounted steps of their own", () => {
+    const swapping = reduceAll(fullGraphRestoreEvents().slice(0, 7));
+    expect(backupStageLabel(swapping)).toBe("swapping the restored graph in");
+    expect(backupProgress(swapping)).toBeNull();
+    expect(restoreSteps(swapping)[2].state).toBe("now");
+    const opening = reduceAll(fullGraphRestoreEvents().slice(0, 8));
+    expect(backupStageLabel(opening)).toBe("opening the restored graph");
+    expect(restoreSteps(opening).map((step) => step.state)).toEqual([
+      "done",
+      "done",
+      "done",
+      "now",
+    ]);
+  });
+
+  it("a graph restore that would not open marks nothing done and keeps its error", () => {
+    const view = reduceAll([
+      ...fullGraphRestoreEvents().slice(0, 8),
+      {
+        type: "status",
+        data: {
+          run: graphRestoreRun("failed", {
+            error: "GraphUnavailable: could not open the 'lightrag' graph session",
+          }),
+        },
+      },
+    ]);
+    expect(view.run?.state).toBe("failed");
+    expect(restoreSteps(view).every((step) => step.state === "pending")).toBe(true);
+  });
+
+  it("replays to the same view however the feed is split", () => {
+    const events = fullGraphRestoreEvents();
+    expect(reduceAll(events.slice(5), reduceAll(events.slice(0, 5)))).toEqual(reduceAll(events));
+  });
+
+  it("each corpus walks its own steps", () => {
+    expect(restoreStepsFor("graph")).toBe(GRAPH_RESTORE_STEPS);
+    expect(restoreStepsFor("rag")).toBe(RESTORE_STEPS);
+    // A document restore still names its own strip.
+    expect(restoreSteps(reduceAll(fullRestoreEvents())).map((step) => step.label)).toEqual([
+      "validate",
+      "load rows",
+      "vector index",
+      "BM25 index",
+    ]);
+  });
+});
+
+describe("graph restore presentation", () => {
+  it("summarizes what the restored graph holds", () => {
+    const view = reduceAll(fullGraphRestoreEvents());
+    expect(restoreSummaryRows(view.run!.summary!)).toEqual([
+      ["thread-days", "799"],
+      ["messages", (64_592).toLocaleString()],
+      ["entities", (5000).toLocaleString()],
+      ["relations", (6680).toLocaleString()],
+      ["took", "21 s"],
+    ]);
+  });
+
+  it("says what a graph restore replaces, and with what", () => {
+    expect(
+      describeGraphReplacement("799 thread-days · 5,000 entities", graphManifest({ counts: { thread_days: 412 } })),
+    ).toBe(
+      "Replaces the current graph — 799 thread-days · 5,000 entities — with this backup's 412 thread-days. Nothing is re-extracted; graph chat pauses for the few seconds the swap takes.",
+    );
+    expect(describeGraphReplacement(null, null)).toMatch(
+      /^Replaces the current graph with this backup's graph\./,
+    );
+    expect(describeGraphReplacement(null, graphManifest({ counts: {} }))).toMatch(
+      /with this backup's graph\./,
+    );
+  });
+
+  it("warns only when the graph bundle was stale at export — it has no drift", () => {
+    const listed = (overrides: Partial<BundleManifest>): BundleOut => ({
+      name: GRAPH_RESTORING,
+      size_bytes: 152 * MB,
+      modified_at: "2026-11-08T13:15:00Z",
+      manifest: graphManifest(overrides),
+      restorable: true,
+      reason: null,
+      drift: [],
+    });
+    expect(describeStaleRestore(listed({}))).toBeNull();
+    expect(describeStaleRestore(listed({ stale: true }))).toBe(
+      "It was flagged stale when it was exported (a source had been removed) — the graph will be flagged stale until a re-build.",
+    );
+  });
+
+  it("words the stale note after a restore for its own corpus", () => {
+    expect(restoredStaleNote("graph")).toMatch(/graph is flagged stale — re-build to apply\.$/);
+    expect(restoredStaleNote("rag")).toMatch(/corpus is flagged stale — re-ingest to apply them\.$/);
   });
 });

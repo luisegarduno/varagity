@@ -19,7 +19,7 @@ One page per package:
 - [Stores](stores.md) — `ChunkRecord`, pgvector, Elasticsearch BM25,
   conversation persistence, app settings, the migration runner
 - [Backups](backup.md) — the backup bundle (manifest, all-or-nothing
-  writer, listing) and the RAG export from one corpus snapshot
+  writer, listing and verdicts), and the export and restore of both corpora
 - [Retrieval](retrieval.md) — semantic / bm25 / hybrid + fusion, and the
   `reranked` composition over them
 - [Chat engines](chat.md) — the `PreparedQuery` two-string split, the

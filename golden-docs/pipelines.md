@@ -372,18 +372,19 @@ picture one opened at the start did. `progress` frames walk
   `reingest=true` run — deleting a source file sets it, and the tab says so
   until a rebuild retracts those messages.
 
-## The backup flows (`rag-export` / `rag-restore` / `graph-export`)
+## The backup flows (`rag-export` / `rag-restore` / `graph-export` / `graph-restore`)
 
 `rag-export` (`varagity/pipeline/backup_flow.py`) writes the chunk corpus
 into a backup bundle ([Data model](data-model.md#backup-bundles)), and
 `rag-restore` turns a bundle back into the corpus; `graph-export` writes the
-message graph's workdir into one ([below](#the-graph-export-graph-export)).
-All three are thin `@flow` shells over the backup package
-(`varagity.backup.rag`'s `export_rag` and `restore_rag`,
-`varagity.backup.graph`'s `export_graph`), for the same reason
-`graph-build` is one: the work belongs to the backup package, while Prefect
-owns the *record* that a backup ran, how long it took, and whether it
-failed.
+message graph's workdir into one ([below](#the-graph-export-graph-export)),
+and `graph-restore` swaps a bundle's workdir back in
+([below](#the-graph-restore-graph-restore)). All four are thin `@flow`
+shells over the backup package (`varagity.backup.rag`'s `export_rag` and
+`restore_rag`, `varagity.backup.graph`'s `export_graph` and
+`restore_graph`), for the same reason `graph-build` is one: the work belongs
+to the backup package, while Prefect owns the *record* that a backup ran,
+how long it took, and whether it failed ([ADR-019](adr/ADR-019-corpus-backups.md)).
 
 ```mermaid
 flowchart LR
@@ -477,12 +478,50 @@ flowchart LR
   Export again. Progress travels as `snapshot` → `pack` (bytes copied of
   the files' total, about 50 frames) → `finalize`.
 
+### The graph restore (`graph-restore`)
+
+```mermaid
+flowchart LR
+    start(["graph_restore_flow(bundle, run_id)"]) --> validate["validate<br/>the bundle's verdict again"]
+    validate --> extract["extract<br/>&lt;engine&gt;/* → lightrag.restore-RUN · sha256 re-checked · synced"]
+    extract --> swap["swap<br/>write + open locks: close · lightrag → .previous-RUN · staged → lightrag"]
+    swap --> open["open<br/>session().stats() · commit: .previous → .replaced · delete it"]
+    open --> flag["write _graph_stale<br/>(the bundle's own)"]
+```
+
+- **No model call, no re-extraction.** The bundle *is* a workdir: its files
+  are extracted into a staging folder beside the live one, on the
+  `graphdata` volume, so the renames that follow are atomic. Each member's
+  sha256 is checked again as it is read and each file is synced, so a bundle
+  that changed since the route verified it can't go live. Progress counts
+  the bytes extracted.
+- **The swap holds both of the service's locks.**
+  `GraphService.replace_workdir` keeps the write lock for the whole swap (no
+  build, resume, delete or export can start) and the open lock around the
+  renames, so no lazy open — a status poll, a `/graph` read — can land on a
+  half-swapped folder; one that arrives mid-swap waits, then opens the
+  restored graph. Closing the session first finalizes the engine's storages
+  into the *old* files and resets LightRAG's process-global state, so the
+  open reads the new files from disk.
+- **The open is the check, and the commit follows it.** Opening asserts the
+  vectors' `embedding_dim`; if it (or reading the graph's size) fails, the
+  swap is undone — the previous graph returns and reopens, and the run
+  fails. Once it opened, renaming `.previous-RUN` to `.replaced-RUN` commits
+  the restore, and only then is the replaced graph deleted. A crash before
+  the commit is rolled back by the next process's `GraphService`
+  construction; one after it just has its debris removed.
+- **The stale flag is the bundle's own.** The graph is exactly what was
+  exported, so `_graph_stale` is set to the bundle's `stale` — written only
+  once the swap committed.
+- **No retries**: a failed restore left the previous graph in place, so the
+  user presses Restore again.
+
 ### API-triggered exports and restores
 
-`POST /api/backups/{corpus}/export` and `POST /api/backups/rag/restore` are
-the ingest runner's shape again: a daemon thread inside the API process, an
-immediate `202` handle, and `GET /api/backups/{corpus}/status` streaming the
-run as SSE with full backlog replay
+`POST /api/backups/{corpus}/export` and `POST /api/backups/{corpus}/restore`
+are the ingest runner's shape again: a daemon thread inside the API
+process, an immediate `202` handle, and `GET /api/backups/{corpus}/status`
+streaming the run as SSE with full backlog replay
 ([HTTP API](api.md#the-backup-status-stream-get-apibackupscorpusstatus)).
 Each corpus (`rag`, `graph`) has its own runner and gate, so a graph export
 and a RAG restore run side by side.
@@ -498,21 +537,27 @@ and a RAG restore run side by side.
   lock (above) is its cross-process half — the graph needs none, since the
   API is its only writer.
 - **A restore refuses before it starts.** The route checks the gate, hashes
-  every member of the bundle (`verify_bundle`), and checks the corpus lock
-  before the `202`, so a bad bundle or a busy corpus is a clean `422`/`409`,
-  never a failed run.
-- **What the runner hands the flow.** It captures the reingest-affecting
-  settings at start (in `app_settings`' env-string form) and passes them in,
-  so `varagity.backup` never imports the API layer. The flow reads the stale
-  flag itself, *after* those settings.
+  every member of the bundle (`verify_bundle` — for a graph bundle the
+  engine's format is judged too), and for RAG checks the corpus lock before
+  the `202`, so a bad bundle or a busy corpus is a clean `422`/`409`, never a
+  failed run.
+- **What the runner hands the flow.** For RAG it captures the
+  reingest-affecting settings at start (in `app_settings`' env-string form)
+  and passes them in — a *provider* of them to a restore — so
+  `varagity.backup` never imports the API layer; the export flow reads the
+  stale flag itself, *after* those settings. A graph restore gets the run's
+  id instead, which names the folders the swap parks beside the workdir.
 - **The saved path.** A completed run reports `bundle` and `saved_to`
   (`docs/varagity-exports/<name>` or `graph-docs/varagity-exports/<name>`),
   relative to the checkout. The API sees `/app/docs` in compose, but the
   user's file manager sees `./docs`, so the corpus folder's own name is the
   path that reads right in both modes.
+- **While a restore runs**, chat against that corpus answers `503
+  corpus_restoring` (a graph turn before its session is opened), and its
+  deletes answer `409 corpus_busy`.
 - **The graph's kill switch.** While `GRAPH_ENABLED=false`, the graph's
-  list, export and download answer `403 graph_disabled` (before any store is
-  touched); its status stream keeps reporting.
+  list, export, restore and download answer `403 graph_disabled` (before
+  any store is touched); its status stream keeps reporting.
 
 ## Evaluation flows
 
@@ -633,7 +678,8 @@ The HTTP API is a **peer front-end over the same flows** (spec_v2 §4.9):
 targets the graph — in a threadpool under the async edge (ADR-005), and
 `POST /api/ingest` / `POST /api/graph/build` run `ingest` / `graph-build` on
 a daemon thread ([above](#api-triggered-ingest)), as the backup routes run
-`rag-export` / `rag-restore`. Runs from either front-end land at the same
+`rag-export` / `rag-restore` / `graph-export` / `graph-restore`. Runs from
+either front-end land at the same
 Prefect UI. **The graph build is one flow the CLI cannot start** —
 single-writer storage means the API process owns it — and the backup flows
 are API-only by choice, so both corpora keep one shape.

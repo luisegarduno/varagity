@@ -29,9 +29,11 @@ import {
   backupProgress,
   backupStageLabel,
   describeBundle,
+  describeGraphReplacement,
   describeReplacement,
   describeStaleRestore,
   formatBytes,
+  restoredStaleNote,
   restoreSteps,
   restoreSummaryRows,
   type BackupView,
@@ -91,7 +93,11 @@ function CopyPathButton({ path }: { path: string }) {
   );
 }
 
-/** The restore's four steps — validate · load rows · vector index · BM25 index. */
+/**
+ * A restore's four steps — validate · load rows · vector index · BM25 index
+ * for the documents, validate · extract · swap · open for the graph (the
+ * run's own corpus picks the strip).
+ */
 function RestoreSteps({ view }: { view: BackupView }) {
   return (
     <ol
@@ -140,9 +146,10 @@ function RestoreSteps({ view }: { view: BackupView }) {
  * those bundles. A bundle the server's cheap verdict refuses says why and
  * can't be restored; restoring over a non-empty corpus asks first, naming
  * what will be replaced and whether the corpus will come back stale. A
- * running restore walks its four steps, with a chunk bar while it loads and
- * re-indexes; a finished one shows its summary. Without `onRestore` (the
- * graph tab, until its restore lands) the rows offer Download only.
+ * running restore walks its four steps — a chunk bar while a document
+ * restore loads and re-indexes, a megabyte bar while a graph restore
+ * extracts — and a finished one shows its summary. Without `onRestore` the
+ * rows offer Download only.
  *
  * Both tabs host it: a graph export packs the engine's workdir, so its bar
  * counts bytes (`182.0 MB / 256.0 MB packed`) where the RAG export's counts
@@ -168,7 +175,10 @@ export function BackupPanel({
   bundlesError?: string | null;
   /** What the corpus holds now (`"142 documents · 10,233 chunks"`); `null` when unknown. */
   holding: string | null;
-  /** The same as numbers, for the restore confirmation (`null` when unknown). */
+  /**
+   * The documents' holding as numbers, for their restore confirmation (`null`
+   * when unknown; the graph's confirmation words `holding` instead).
+   */
   current?: { documents: number; chunks: number } | null;
   /** The corpus is confirmed empty — nothing to export, nothing a restore would replace. */
   empty: boolean;
@@ -332,8 +342,7 @@ export function BackupPanel({
               {run.summary.stale && (
                 <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
                   <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-                  The restored rows don&apos;t match this stack&apos;s ingest settings, so the
-                  corpus is flagged stale — re-ingest to apply them.
+                  {restoredStaleNote(corpus)}
                 </p>
               )}
             </>
@@ -465,7 +474,9 @@ export function BackupPanel({
               Restore “{confirming?.name}”?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {describeReplacement(current, confirming?.manifest ?? null)}
+              {corpus === "graph"
+                ? describeGraphReplacement(holding, confirming?.manifest ?? null)
+                : describeReplacement(current, confirming?.manifest ?? null)}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {confirming && (

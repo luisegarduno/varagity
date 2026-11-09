@@ -1264,9 +1264,10 @@ class BundleOut(BaseModel):
         restorable: Whether nothing the cheap check sees refuses a restore.
         reason: Why the bundle can't be restored (``None`` when it can): an
             unreadable manifest, another format version or corpus, another
-            embedding model or dimension, an unsafe or unexpected member, a
-            member whose recorded size differs from the zip's, or a damage a
-            restore already found.
+            embedding model or dimension, a graph bundle another engine (or
+            another major.minor version of this one) wrote, an unsafe or
+            unexpected member, a member whose recorded size differs from the
+            zip's, or a damage a restore already found.
         drift: The reingest-affecting settings the bundle's rows were made
             under that differ from this stack's — restoring it flags the
             corpus stale. Empty when they match (or there is no manifest).
@@ -1301,14 +1302,18 @@ class BackupSummaryOut(BaseModel):
         counts: An export's: what the bundle holds — ``documents`` and
             ``chunks`` for a RAG bundle; ``thread_days``, ``messages`` and
             (when the graph reported them) ``entities`` and ``relations``
-            for a graph bundle. A restore's: what it wrote — ``documents``,
-            ``chunks``, and ``bm25`` (the chunks the rebuilt index holds).
+            for a graph bundle. A RAG restore's: what it wrote —
+            ``documents``, ``chunks``, and ``bm25`` (the chunks the rebuilt
+            index holds). A graph restore's: what the restored graph holds,
+            by its bundle's counts.
         size_bytes: The bundle's size on disk.
         wall_clock_s: Seconds from the snapshot to the published bundle (an
-            export), or from validation to a searchable index (a restore).
-        stale: A restore's: whether it left the corpus flagged stale (the
-            bundle was stale at export, or its rows were made under other
-            ingest settings). ``None`` for an export.
+            export), from validation to a searchable index (a RAG restore),
+            or from validation to an open graph (a graph restore).
+        stale: A restore's: whether it left the corpus flagged stale — for
+            RAG, the bundle was stale at export or its rows were made under
+            other ingest settings; for the graph, the bundle was stale at
+            export. ``None`` for an export.
     """
 
     counts: dict[str, int]
@@ -1375,19 +1380,24 @@ class BackupProgressEvent(BaseModel):
     ``finalize`` (the vector matrix, the manifest, the atomic rename). A
     graph export walks ``snapshot`` (take the graph's write lock, list its
     workdir) → ``pack`` (the workdir's files copied in, counted in **bytes**)
-    → ``finalize``. A restore walks ``validate`` (the bundle's verdict again)
-    → ``load`` (the replacing transaction's binary COPY, chunks loaded so
-    far) → ``index`` (the vector index rebuild and the commit — the restore
-    takes effect) → ``bm25`` (the BM25 index refilled from the restored
-    rows, chunks so far).
+    → ``finalize``. A RAG restore walks ``validate`` (the bundle's verdict
+    again) → ``load`` (the replacing transaction's binary COPY, chunks
+    loaded so far) → ``index`` (the vector index rebuild and the commit —
+    the restore takes effect) → ``bm25`` (the BM25 index refilled from the
+    restored rows, chunks so far). A graph restore walks ``validate`` →
+    ``extract`` (the bundle's files into a staging folder beside the
+    workdir, counted in **bytes**) → ``swap`` (the session closed, the
+    folders renamed) → ``open`` (the restored graph opened and checked).
 
     Attributes:
         stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (a
             RAG export), ``snapshot`` | ``pack`` | ``finalize`` (a graph
-            export), or ``validate`` | ``load`` | ``index`` | ``bm25`` (a
-            restore).
-        current: Rows (``pack``: bytes) done so far in a counted stage.
-        total: The stage's row (``pack``: byte) count.
+            export), ``validate`` | ``load`` | ``index`` | ``bm25`` (a RAG
+            restore), or ``validate`` | ``extract`` | ``swap`` | ``open`` (a
+            graph restore).
+        current: Rows (``pack``, ``extract``: bytes) done so far in a counted
+            stage.
+        total: The stage's row (``pack``, ``extract``: byte) count.
     """
 
     stage: Literal[
@@ -1400,6 +1410,9 @@ class BackupProgressEvent(BaseModel):
         "load",
         "index",
         "bm25",
+        "extract",
+        "swap",
+        "open",
     ]
     current: int | None = None
     total: int | None = None
@@ -1410,7 +1423,8 @@ class BackupLogEvent(BaseModel):
 
     Relayed ``varagity.backup`` log records (what was exported or restored,
     a swept partial, an embedding-model drift warning, a graph workdir entry
-    the export had to skip), so the panel shows what the server log would.
+    the export had to skip, a graph restore undone because the restored
+    graph would not open), so the panel shows what the server log would.
 
     Attributes:
         level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).

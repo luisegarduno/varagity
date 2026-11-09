@@ -18,6 +18,7 @@ import type {
   BundleManifest,
   BundleOut,
   GraphStatus,
+  TargetCorpus,
 } from "@/lib/api";
 
 /** One relayed `varagity.backup` log line. */
@@ -32,13 +33,14 @@ export interface BackupView {
   /**
    * The stage the run last reported — `snapshot` | `documents` | `chunks` |
    * `finalize` for a RAG export, `snapshot` | `pack` | `finalize` for a
-   * graph export, `validate` | `load` | `index` | `bm25` for a restore.
-   * `null` before the first frame and once terminal.
+   * graph export, `validate` | `load` | `index` | `bm25` for a RAG restore,
+   * `validate` | `extract` | `swap` | `open` for a graph restore. `null`
+   * before the first frame and once terminal.
    */
   stage: string | null;
-  /** Rows (`pack`: bytes) done so far in a counted stage (`null` otherwise). */
+  /** Rows (`pack`, `extract`: bytes) done so far in a counted stage (`null` otherwise). */
   current: number | null;
-  /** The counted stage's row (`pack`: byte) total (`null` otherwise). */
+  /** The counted stage's row (`pack`, `extract`: byte) total (`null` otherwise). */
   total: number | null;
   /** Relayed log tail, oldest first (capped). */
   logs: BackupLogLine[];
@@ -117,6 +119,12 @@ export function backupStageLabel(view: BackupView): string | null {
       return "building the vector index";
     case "bm25":
       return "rebuilding the BM25 index";
+    case "extract":
+      return "extracting the graph's files";
+    case "swap":
+      return "swapping the restored graph in";
+    case "open":
+      return "opening the restored graph";
     default:
       return view.stage;
   }
@@ -135,13 +143,15 @@ export function backupStageUnit(stage: string | null): string {
       return "chunks indexed";
     case "pack":
       return "packed";
+    case "extract":
+      return "extracted";
     default:
       return "rows";
   }
 }
 
-/** Stages that count bytes rather than rows — a graph export copies files. */
-const BYTE_STAGES: ReadonlySet<string> = new Set(["pack"]);
+/** Stages that count bytes rather than rows — a graph export or restore copies files. */
+const BYTE_STAGES: ReadonlySet<string> = new Set(["pack", "extract"]);
 
 /** A counted stage's progress, ready for the panel's bar and its caption. */
 export interface BackupProgress {
@@ -160,8 +170,9 @@ export interface BackupProgress {
 
 /**
  * Where a counted stage is — rows for every RAG stage, **bytes** for a graph
- * export's `pack`, so `182.0 MB / 256.0 MB packed` rather than a raw byte
- * count. `null` while the stage counts nothing.
+ * export's `pack` and a graph restore's `extract`, so `182.0 MB / 256.0 MB
+ * extracted` rather than a raw byte count. `null` while the stage counts
+ * nothing.
  */
 export function backupProgress(view: BackupView): BackupProgress | null {
   if (view.total === null || view.total <= 0) return null;
@@ -179,7 +190,7 @@ export function backupProgress(view: BackupView): BackupProgress | null {
   };
 }
 
-/** A restore's four stages, in order, as the panel's step strip names them. */
+/** A document-corpus restore's four stages, in order, as the panel's step strip names them. */
 export const RESTORE_STEPS = [
   { stage: "validate", label: "validate" },
   { stage: "load", label: "load rows" },
@@ -187,19 +198,36 @@ export const RESTORE_STEPS = [
   { stage: "bm25", label: "BM25 index" },
 ] as const;
 
+/** A graph restore's four stages: extract the files, swap them in, open them. */
+export const GRAPH_RESTORE_STEPS = [
+  { stage: "validate", label: "validate" },
+  { stage: "extract", label: "extract" },
+  { stage: "swap", label: "swap" },
+  { stage: "open", label: "open" },
+] as const;
+
 export type RestoreStepState = "done" | "now" | "pending";
 
+/** The step strip for one corpus's restore. */
+export function restoreStepsFor(
+  corpus: TargetCorpus,
+): readonly { stage: string; label: string }[] {
+  return corpus === "graph" ? GRAPH_RESTORE_STEPS : RESTORE_STEPS;
+}
+
 /**
- * Where a restore is, step by step: the steps before the reported stage are
- * done, the reported one is in progress, and a completed run has done them
- * all. (A failed run marks nothing done — its error says where it stopped.)
+ * Where a restore is, step by step — the run's own corpus picks the strip.
+ * The steps before the reported stage are done, the reported one is in
+ * progress, and a completed run has done them all. (A failed run marks
+ * nothing done — its error says where it stopped.)
  */
 export function restoreSteps(
   view: BackupView,
 ): { stage: string; label: string; state: RestoreStepState }[] {
+  const steps = restoreStepsFor(view.run?.corpus ?? "rag");
   const completed = view.run?.state === "completed";
-  const at = RESTORE_STEPS.findIndex((step) => step.stage === view.stage);
-  return RESTORE_STEPS.map((step, index) => ({
+  const at = steps.findIndex((step) => step.stage === view.stage);
+  return steps.map((step, index) => ({
     stage: step.stage,
     label: step.label,
     state:
@@ -216,13 +244,29 @@ export function formatDuration(seconds: number): string {
   return rest === 0 ? `${minutes} min` : `${minutes} min ${rest} s`;
 }
 
+/**
+ * The counts a restore summary shows, in order, with their labels — a
+ * document restore's rows and BM25 docs, a graph restore's thread-days and
+ * sizes. Anything else a summary carries is left out.
+ */
+const SUMMARY_COUNTS: [key: string, label: string][] = [
+  ["documents", "documents"],
+  ["chunks", "chunks"],
+  ["bm25", "BM25 docs"],
+  ["thread_days", "thread-days"],
+  ["messages", "messages"],
+  ["entities", "entities"],
+  ["relations", "relations"],
+];
+
 /** The "Restore summary" a completed restore renders, as `[label, value]` rows. */
 export function restoreSummaryRows(summary: BackupSummary): [string, string][] {
   const counts = summary.counts;
   const rows: [string, string][] = [];
-  if (counts.documents !== undefined) rows.push(["documents", counts.documents.toLocaleString()]);
-  if (counts.chunks !== undefined) rows.push(["chunks", counts.chunks.toLocaleString()]);
-  if (counts.bm25 !== undefined) rows.push(["BM25 docs", counts.bm25.toLocaleString()]);
+  for (const [key, label] of SUMMARY_COUNTS) {
+    const count = counts[key];
+    if (count !== undefined) rows.push([label, count.toLocaleString()]);
+  }
   rows.push(["took", formatDuration(summary.wall_clock_s)]);
   return rows;
 }
@@ -251,14 +295,35 @@ export function describeReplacement(
 }
 
 /**
- * Why restoring a bundle will flag the corpus stale, or `null` when it won't.
+ * The graph confirm dialog's description: what a graph restore replaces,
+ * and with what. `holding` is what the graph holds now (the panel's "Now:"
+ * line; `null` when unknown).
+ */
+export function describeGraphReplacement(
+  holding: string | null,
+  manifest: BundleManifest | null,
+): string {
+  const now = holding === null ? "the current graph" : `the current graph — ${holding} —`;
+  const contents = manifest === null ? "" : describeBundle(manifest).contents;
+  const incoming = contents === "" ? "this backup's graph" : `this backup's ${contents}`;
+  return `Replaces ${now} with ${incoming}. Nothing is re-extracted; graph chat pauses for the few seconds the swap takes.`;
+}
+
+/**
+ * Why restoring a bundle will flag its corpus stale, or `null` when it won't.
  *
  * `drift` is the server's list of reingest-affecting settings the bundle was
  * made under that differ from this stack's; the bundle's own values come
- * from its manifest.
+ * from its manifest. A graph bundle has no drift — it comes back exactly as
+ * stale as it was exported.
  */
 export function describeStaleRestore(bundle: BundleOut): string | null {
   const manifest = bundle.manifest ?? null;
+  if (manifest?.corpus === "graph") {
+    return manifest.stale
+      ? "It was flagged stale when it was exported (a source had been removed) — the graph will be flagged stale until a re-build."
+      : null;
+  }
   const parts: string[] = [];
   if (bundle.drift.length > 0) {
     const recorded = manifest?.ingest_settings ?? {};
@@ -272,6 +337,13 @@ export function describeStaleRestore(bundle: BundleOut): string | null {
   if (manifest?.stale) parts.push("it was already flagged stale when it was exported");
   if (parts.length === 0) return null;
   return `${parts.join("; ")} — the corpus will be flagged stale until a re-ingest.`;
+}
+
+/** The line under a finished restore that left its corpus flagged stale. */
+export function restoredStaleNote(corpus: TargetCorpus): string {
+  return corpus === "graph"
+    ? "The backup was already flagged stale when it was exported, so the graph is flagged stale — re-build to apply."
+    : "The restored rows don't match this stack's ingest settings (or were already stale when exported), so the corpus is flagged stale — re-ingest to apply them.";
 }
 
 /** Singular forms of the plural nouns a count is worded with. */

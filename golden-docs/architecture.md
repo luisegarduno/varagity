@@ -426,6 +426,67 @@ on-disk shapes are in the [data model](data-model.md#the-graph-workdir).
 become a structured `403 graph_disabled`, and a graph-targeted turn degrades
 to a document answer — reported on the turn, never silently.
 
+## Backups beside each corpus
+
+`docker compose down -v` deletes every named volume — the chunk rows and
+their vectors, the BM25 index, the extracted graph — while the host binds
+holding the sources survive. Each corpus therefore keeps its backups in a
+reserved folder **inside its own bind**, where they survive with the
+sources ([ADR-019](adr/ADR-019-corpus-backups.md)): one zip per backup,
+written by **Export** on the corpus tab and turned back into the corpus by
+**Restore**, with no model call either way.
+
+```mermaid
+flowchart LR
+    subgraph rag["document corpus"]
+        direction TB
+        pg[("pgvector<br/>documents · chunks")] -->|"rag-export<br/>one snapshot"| rz["docs/varagity-exports/<br/>varagity-rag-….zip"]
+        rz -->|"rag-restore<br/>one transaction · COPY"| pg
+        pg -->|"rows → streaming_bulk"| es[("Elasticsearch<br/>BM25 index")]
+    end
+    subgraph graph["message graph"]
+        direction TB
+        wd[("graphdata<br/>the engine's workdir")] -->|"graph-export<br/>under the write lock"| gz["graph-docs/varagity-exports/<br/>varagity-graph-….zip"]
+        gz -->|"graph-restore<br/>extract · swap · open"| wd
+    end
+```
+
+- **The bundles are never corpus.** `varagity-exports/` at a corpus root is
+  skipped by ingest discovery and the graph build's scan, hidden from the
+  Graph sources listing, and refused by both upload routes; nothing there
+  can be ingested, built from, listed or deleted as a source.
+- **A RAG bundle** is the `documents` and `chunks` rows with their vectors
+  as a raw float32 matrix; its restore replaces both tables in one Postgres
+  transaction, re-roots each `source` onto the restoring stack's
+  `DOCS_PATH`, and rebuilds the BM25 index from the rows. **A graph
+  bundle** is the engine's working directory, verbatim — LLM cache, build
+  manifest and size summary included — and its restore extracts it beside
+  the live workdir and swaps it in, putting the previous graph back if the
+  restored one won't open.
+- **One writer per corpus.** A per-corpus `CorpusGate`
+  (`varagity/api/corpus_gate.py`) is claimed by the ingest runner, the
+  graph build runner and the backup runner alike, so an ingest, build,
+  export or restore of the same corpus never overlap (`409 corpus_busy`,
+  naming the holder); the two corpora's operations run side by side. The
+  gate is in-process. For RAG — whose CLI ingests run in their own
+  processes — a Postgres advisory lock is its cross-process half: every
+  ingest holds it shared, a restore exclusive. The graph needs none: the
+  API process is its single writer.
+- **Strict compatibility.** A bundle from another embedding model or
+  dimension — or, for the graph, another engine or engine major.minor
+  version — is listed with its reason and refused, never converted: neither
+  store would notice, and retrieval would quietly return the wrong
+  passages.
+- **While a restore runs**, chat against that corpus answers `503
+  corpus_restoring`, and the corpus's deletes answer `409 corpus_busy`.
+
+The format is in the [data model](data-model.md#backup-bundles), the flows
+in [Pipelines](pipelines.md#the-backup-flows-rag-export-rag-restore-graph-export-graph-restore),
+the HTTP contract and its status stream in the
+[HTTP API](api.md#the-backup-status-stream-get-apibackupscorpusstatus), and
+the `curl` recipes and the wiped-stack drill in the
+[runbook](runbook.md#backups).
+
 ## The codebase map
 
 This page explains Varagity in prose and Mermaid fragments; the web GUI also
@@ -489,8 +550,11 @@ varagity/
 │   ├── records.py        # ChunkRecord, RetrievalTrace, RetrievedChunk
 │   ├── vector_store.py, bm25_store.py, schema.sql
 │   ├── conversation_store.py   # conversations / groups / messages / message_sources snapshots
-│   ├── app_settings_store.py   # persisted runtime overrides + the _corpus_stale flag
+│   ├── app_settings_store.py   # persisted runtime overrides + the _corpus_stale / _graph_stale flags
 │   └── migrate.py, migrations/ # idempotent NNN_*.sql runner (runs on API startup)
+├── backup/               # corpus backups (ADR-019): bundle.py (zip + bundle.json, the cheap
+│                         #   verdict, sha256 verification), rag.py (snapshot export, COPY
+│                         #   restore + BM25 rebuild), graph.py (workdir export, extract + swap)
 ├── retrieval/            # semantic.py, bm25.py (+ hydrate), hybrid.py, reranked.py, hyde.py
 ├── chat/                 # chat-engine registry (ADR-011): base.py (PreparedQuery, Turn),
 │                         #   simple.py, condense.py + prompts.py
@@ -500,23 +564,27 @@ varagity/
 │   ├── base.py, records.py  # engine seam + engine-independent records
 │   ├── engines/lightrag.py  # the adapter (imports the library inside session())
 │   ├── manifest.py       #   workdir sidecars: build diff + durable provenance + size cache
-│   ├── service.py        #   the process's one session; single-flight writes, unlocked reads
+│   ├── service.py        #   the process's one session; single-flight writes, unlocked reads,
+│   │                     #     the restore's workdir swap (+ its crash heal)
 │   └── answer.py         #   our grounded answer over the engine's evidence
 ├── preview/              # evidence-panel page previews (ADR-010): normalize, locate
 │                         #   (pdfium, one global lock), render, source gate, pptx→pdf
 ├── generation/           # answer.py — context prompt + grounded generation + QueryState
-├── pipeline/             # Prefect flows: ingest, query, query-stream, eval (thin @task adapters)
+├── pipeline/             # Prefect flows: ingest, query, query-stream, graph, backup, eval
+│                         #   (thin @task adapters)
 ├── observability/        # metrics.py (the Prometheus collector catalog, spec_v2 §6.2)
 │                         #   + corpus.py (store-derived corpus gauges — ADR-013)
 │                         #   + graph.py (workdir-derived graph gauges, same shape)
 ├── api/                  # the FastAPI front-end (spec_v2 §4)
 │   ├── main.py           # app factory + lifespan (migrations, override replay)
 │   ├── routes/           # system, conversations, groups, chat, settings, documents,
-│   │                     #   ingest, graph, metrics
+│   │                     #   ingest, graph, backups, metrics
 │   ├── schemas.py        # the wire contract (REST + SSE payloads → generated TS types)
 │   ├── streaming.py      # EventBridge — sync flow callbacks → SSE frames
 │   ├── ingest_runner.py  # one-at-a-time background ingest + status stream replay
 │   ├── graph_runner.py   # the same shape for graph builds (resumable, killable)
+│   ├── backup_runner.py  # the same shape for backup exports and restores, one per corpus
+│   ├── corpus_gate.py    # one writer per corpus across every runner → 409 corpus_busy
 │   └── runtime_settings.py, deps.py
 ├── eval/                 # golden set, 7-config matrix, chunker sweep, OCR benchmark, testcontainers
 ├── cli/                  # argparse subcommands: ingest / chat / eval [ocr]

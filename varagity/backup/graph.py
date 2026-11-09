@@ -37,9 +37,19 @@ copied, just before the manifest is sealed: a source deleted mid-export is
 then recorded. Only a completed rebuild clears the flag, and the corpus gate
 keeps rebuilds out for the whole export, so a late read is never less
 accurate than an early one.
+
+**A restore is extract, swap and open** (:func:`restore_graph`), with no
+model call. The bundle's files are extracted — each member's sha256 checked
+again as it is read — into a staging folder beside the workdir, on the same
+volume, and :meth:`~varagity.graph.service.GraphService.replace_workdir`
+swaps it in under the service's write and open locks, opens it, and puts
+the previous graph back if it won't open. The graph-stale flag the restore
+leaves is the bundle's own (the ``graph-restore`` flow writes it).
 """
 
 import logging
+import os
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -47,10 +57,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from varagity.backup.bundle import NothingToExport, WrittenBundle, is_graph_file_name, write_bundle
+from varagity.backup.bundle import (
+    BundleManifest,
+    NothingToExport,
+    WrittenBundle,
+    graph_folder,
+    inspect_bundle,
+    is_graph_file_name,
+    open_bundle,
+    write_bundle,
+)
 from varagity.config import get_settings
 from varagity.graph.manifest import load_summary
-from varagity.graph.service import GraphService
+from varagity.graph.records import GraphStats
+from varagity.graph.service import GraphService, GraphUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +80,13 @@ GraphExportStage = Literal["snapshot", "pack", "finalize"]
 GraphExportProgressCallback = Callable[[GraphExportStage, int | None, int | None], None]
 """``(stage, current, total)`` — how a graph export reports where it is (``pack`` counts bytes)."""
 
-# The workdir's files are copied into the bundle in slices this size.
+GraphRestoreStage = Literal["validate", "extract", "swap", "open"]
+"""The graph restore's progress stages, in order."""
+
+GraphRestoreProgressCallback = Callable[[GraphRestoreStage, int | None, int | None], None]
+"""``(stage, current, total)`` — how a graph restore reports progress (``extract`` counts bytes)."""
+
+# The workdir's files are copied into (and out of) a bundle in slices this size.
 _COPY_BYTES = 4 << 20
 
 # Progress frames for the byte-counted pack stage: a smooth bar over a few
@@ -186,21 +212,24 @@ def graph_counts(workdir: Path) -> dict[str, int]:
 
 
 class _ByteProgress:
-    """Throttled byte counts for the pack stage — about :data:`_PROGRESS_FRAMES` frames.
+    """Throttled byte counts for a copying stage — about :data:`_PROGRESS_FRAMES` frames.
 
     Args:
-        report: The export's progress callback.
+        report: The export's or restore's progress callback.
         total: The bytes the stage will copy (the files' sizes when listed).
+        stage: The stage being counted (an export's ``pack``, a restore's
+            ``extract``).
     """
 
-    def __init__(self, report: GraphExportProgressCallback, total: int) -> None:
+    def __init__(self, report: Callable[..., None], total: int, stage: str = "pack") -> None:
         self._report = report
+        self._stage = stage
         self._total = total
         self._step = max(1, total // _PROGRESS_FRAMES)
         self._done = 0
         self._reported = 0
         self._next = self._step
-        report("pack", 0, total)
+        report(stage, 0, total)
 
     def advance(self, size: int) -> None:
         """Count copied bytes, reporting when a frame boundary is crossed.
@@ -221,7 +250,7 @@ class _ByteProgress:
         """Send one frame (a file that grew since it was listed never overflows the bar)."""
         self._reported = self._done
         self._next = self._done + self._step
-        self._report("pack", self._done, max(self._total, self._done))
+        self._report(self._stage, self._done, max(self._total, self._done))
 
 
 def export_graph(
@@ -323,6 +352,158 @@ def export_graph(
         wall_clock_s,
     )
     return GraphExportReport(bundle=written, files=len(files), wall_clock_s=wall_clock_s)
+
+
+# ── restore ────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class GraphRestore:
+    """What one graph restore did.
+
+    Attributes:
+        bundle_name: The restored bundle's file name.
+        size_bytes: The bundle's size on disk.
+        manifest: Its manifest.
+        files: How many workdir files it restored.
+        stats: The restored graph's size, as its freshly opened session
+            reported it.
+        wall_clock_s: Seconds from validation to an open graph.
+        stale: The graph-stale flag the restore left — the bundle's own,
+            written by the ``graph-restore`` flow; ``None`` until it has.
+    """
+
+    bundle_name: str
+    size_bytes: int
+    manifest: BundleManifest
+    files: int
+    stats: GraphStats
+    wall_clock_s: float
+    stale: bool | None = None
+
+    @property
+    def counts(self) -> dict[str, int]:
+        """What the restored graph holds, by the bundle's manifest (its size summary at export).
+
+        Returns:
+            ``thread_days``, ``messages`` and — when the graph reported them
+            at export — ``entities`` and ``relations``.
+        """
+        return dict(self.manifest.counts)
+
+
+def restore_graph(
+    service: GraphService,
+    bundle: Path,
+    *,
+    run_id: str,
+    on_progress: GraphRestoreProgressCallback | None = None,
+) -> GraphRestore:
+    """Replace the message graph's working directory with a bundle's.
+
+    No model is called and nothing is re-extracted — the bundle *is* a
+    workdir:
+
+    1. ``validate`` — the cheap verdict again (the route verified the
+       bundle, every member's sha256 included, before the run; this guards a
+       direct call and a file swapped since);
+    2. ``extract`` — every file into a fresh staging folder beside the
+       workdir (:meth:`~varagity.graph.service.GraphService.staging_dir`, on
+       the same volume), each member's sha256 checked again as it is read
+       and each file synced to disk, so a bundle that changed after
+       verification can't go live;
+    3. ``swap`` and ``open`` —
+       :meth:`~varagity.graph.service.GraphService.replace_workdir` closes
+       the session, swaps the folders under the service's write and open
+       locks, and opens the restored graph; if it won't open, the previous
+       graph is put back.
+
+    Whatever is left of the staging folder is removed however the restore
+    ends; until the swap, the live graph is untouched.
+
+    Args:
+        service: The process's graph service (the workdir's single writer).
+        bundle: The bundle file.
+        run_id: The restore run's id (names the folders beside the workdir).
+        on_progress: Called with ``(stage, current, total)`` per stage;
+            ``extract`` counts bytes.
+
+    Returns:
+        What was restored, and how long it took.
+
+    Raises:
+        BundleInvalid: If the bundle is unsound or damaged (the live graph
+            is untouched).
+        BundleIncompatible: If this stack must not restore it (untouched).
+        varagity.graph.service.GraphBuildInProgress: If a write holds the
+            graph's write lock at the swap (untouched).
+        varagity.graph.service.GraphUnavailable: If the restored graph would
+            not open (the previous graph is back in place).
+        OSError: If a file can't be extracted or a folder can't be moved
+            (the previous graph stays, or is put back).
+    """
+    report: GraphRestoreProgressCallback = on_progress if on_progress is not None else _ignore
+    started = time.perf_counter()
+
+    report("validate", None, None)
+    manifest = inspect_bundle(bundle, "graph").manifest_or_raise()
+    folder = f"{graph_folder(manifest)}/"
+    engine = manifest.engine
+    size_bytes = bundle.stat().st_size
+    total = sum(member.size_bytes for member in manifest.members)
+    # File names only, as the export logs: these lines are relayed into the
+    # panel, where an in-container path would read as nonsense.
+    logger.info(
+        "restoring %d graph file(s), %s bytes, written by %s, from %s",
+        len(manifest.members),
+        f"{total:,}",
+        f"{engine.package} {engine.version}" if engine is not None else "an unknown engine",
+        bundle.name,
+    )
+    staged = service.staging_dir(run_id)
+    staged.mkdir(parents=True)  # a fresh folder, never one that already holds files
+    try:
+        progress = _ByteProgress(report, total, stage="extract")
+        with open_bundle(bundle, manifest) as source:
+            for member in manifest.members:
+                # The verdict held every member to "<folder><flat safe name>".
+                target = staged / member.name.removeprefix(folder)
+                with source.member(member.name) as stream, target.open("xb") as out:
+                    while block := stream.read(_COPY_BYTES):
+                        out.write(block)
+                        progress.advance(len(block))
+                    out.flush()
+                    os.fsync(out.fileno())
+        progress.finish()
+        report("swap", None, None)
+        try:
+            stats = service.replace_workdir(
+                staged, run_id, on_open=lambda: report("open", None, None)
+            )
+        except GraphUnavailable:
+            logger.warning(
+                "the restored graph would not open, so the restore was undone — the graph is "
+                "as it was before"
+            )
+            raise
+    finally:
+        # Gone already after a swap; a failed restore's extracted files otherwise.
+        shutil.rmtree(staged, ignore_errors=True)
+    wall_clock_s = time.perf_counter() - started
+    logger.info(
+        "restored %d graph file(s) from %s in %.1fs",
+        len(manifest.members),
+        bundle.name,
+        wall_clock_s,
+    )
+    return GraphRestore(
+        bundle_name=bundle.name,
+        size_bytes=size_bytes,
+        manifest=manifest,
+        files=len(manifest.members),
+        stats=stats,
+        wall_clock_s=wall_clock_s,
+    )
 
 
 def _ignore(stage: str, current: int | None, total: int | None) -> None:

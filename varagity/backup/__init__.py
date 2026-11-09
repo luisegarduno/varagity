@@ -15,13 +15,14 @@ the embedder.
   one consistent corpus snapshot, and how a restore turns it back into rows
   (and a rebuilt BM25 index) with no model call.
 * :mod:`varagity.backup.graph` — what a graph bundle holds (the engine's
-  working directory, verbatim) and how it is copied under the graph
-  service's write lock while chat keeps answering.
+  working directory, verbatim), how it is copied under the graph service's
+  write lock while chat keeps answering, and how a restore extracts it and
+  swaps it in for the live workdir with no model call.
 
 The package knows nothing about HTTP: the API's backup runner and routes
 (:mod:`varagity.api.backup_runner`, :mod:`varagity.api.routes.backups`)
-drive it through the ``rag-export``, ``rag-restore`` and ``graph-export``
-Prefect flows.
+drive it through the ``rag-export``, ``rag-restore``, ``graph-export`` and
+``graph-restore`` Prefect flows.
 """
 
 from varagity.backup.bundle import (
@@ -46,19 +47,23 @@ from varagity.backup.bundle import (
     corpus_root,
     display_path,
     exports_dir,
+    graph_folder,
     inspect_bundle,
     is_bundle_name,
     is_graph_file_name,
     list_bundles,
     open_bundle,
     read_manifest,
+    running_engine_format,
     verify_bundle,
     write_bundle,
 )
 from varagity.backup.graph import (
     GraphExportReport,
+    GraphRestore,
     export_graph,
     graph_counts,
+    restore_graph,
     workdir_files,
 )
 from varagity.backup.rag import (
@@ -89,6 +94,7 @@ __all__ = [
     "BundleWriter",
     "Corpus",
     "GraphExportReport",
+    "GraphRestore",
     "MemberStream",
     "NothingToExport",
     "RagExport",
@@ -102,6 +108,7 @@ __all__ = [
     "export_rag",
     "exports_dir",
     "graph_counts",
+    "graph_folder",
     "ingest_drift",
     "inspect_bundle",
     "is_bundle_name",
@@ -109,8 +116,10 @@ __all__ = [
     "list_bundles",
     "open_bundle",
     "read_manifest",
+    "restore_graph",
     "restore_rag",
     "restored_source",
+    "running_engine_format",
     "verify_bundle",
     "workdir_files",
     "write_bundle",

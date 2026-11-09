@@ -21,8 +21,9 @@ backlog to late joiners, the structured error envelope:
   bundle (``404 bundle_not_found``), the corpus busy here (``409``), the
   bundle unsound or damaged (``422 bundle_invalid`` — every member's sha256
   is checked here, before the ``202``) or not this stack's to restore (``422
-  bundle_incompatible``), an ingest in another process holding the corpus
-  lock (``409 corpus_busy``).
+  bundle_incompatible`` — another embedding space, or for the graph another
+  engine or engine version), and for RAG an ingest in another process
+  holding the corpus lock (``409 corpus_busy``).
 * ``GET /api/backups/{corpus}/status`` streams the run's ``status`` /
   ``progress`` / ``log`` events.
 * ``GET /api/backups/{corpus}/files/{name}`` returns a bundle as an
@@ -43,8 +44,7 @@ that can't reach the desktop; the bundle lands where the ticket wants it
 the panel shows that path with Copy-path and Download.
 
 ``corpus`` is ``rag`` or ``graph`` (``ChatRequest.corpus``'s vocabulary) on
-every route but the restore, which accepts only ``rag`` until the graph's
-restore lands. While ``GRAPH_ENABLED=false``, every graph route answers ``403
+every route. While ``GRAPH_ENABLED=false``, every graph route answers ``403
 graph_disabled`` — except the status stream, which (like the graph build's)
 keeps reporting, so the tab can still render whatever ran.
 """
@@ -95,9 +95,6 @@ router = APIRouter(tags=["backups"])
 
 BackupCorpus = Literal["rag", "graph"]
 """The corpora with backups — ``ChatRequest.corpus``'s vocabulary."""
-
-RestoreCorpus = Literal["rag"]
-"""The corpora a restore accepts (the graph's restore lands in a later phase)."""
 
 # The structured 500 code per corpus when its exports folder can't be
 # written — the same codes the corpus's upload route uses for its root.
@@ -436,6 +433,7 @@ def _corpus_busy(error: CorpusBusy) -> HTTPException:
     "/api/backups/{corpus}/restore",
     status_code=202,
     responses={
+        403: {"model": ErrorResponse},
         404: {"model": ErrorResponse},
         409: {"model": ErrorResponse},
         422: {"model": ErrorResponse},
@@ -443,7 +441,7 @@ def _corpus_busy(error: CorpusBusy) -> HTTPException:
     },
 )
 async def start_restore(
-    corpus: RestoreCorpus,
+    corpus: EnabledCorpusDep,
     payload: BackupRestoreRequest,
     runners: RunnersDep,
     preflight: PreflightDep,
@@ -452,19 +450,23 @@ async def start_restore(
 ) -> BackupRunOut:
     """Start a background restore of one bundle and return its handle.
 
-    **Restore replaces**: the corpus's rows in both stores become the
-    bundle's, re-rooted onto this stack's ``DOCS_PATH``, with no parsing,
-    chunking, contextualizing or embedding; the BM25 index is rebuilt from
-    the restored rows. Everything that can refuse the bundle runs first, so
-    a bad bundle answers ``422`` and never becomes a failed run — including
-    the sha256 of every member, which only this check (not the list) reads.
+    **Restore replaces**, with no model call. For RAG, the corpus's rows in
+    both stores become the bundle's, re-rooted onto this stack's
+    ``DOCS_PATH`` — nothing parsed, chunked, contextualized or embedded —
+    and the BM25 index is rebuilt from the restored rows. For the graph, the
+    engine's working directory becomes the bundle's — extracted beside the
+    live one and swapped in, the previous graph put back if the restored one
+    won't open — and nothing is re-extracted. Everything that can refuse the
+    bundle runs first, so a bad bundle answers ``422`` and never becomes a
+    failed run — including the sha256 of every member, which only this
+    check (not the list) reads.
 
     Args:
         corpus: The corpus to restore.
         payload: The bundle to restore, by name.
         runners: The process-wide backup runners.
         preflight: The awaitable reachability check (structured 503).
-        store: The per-request vector store (the corpus-lock check).
+        store: The per-request vector store (the RAG corpus-lock check).
         damaged: The process's remembered restore failures (a damaged
             bundle is recorded here, so the list then shows it damaged).
 
@@ -472,14 +474,16 @@ async def start_restore(
         The new run's snapshot (state ``running``).
 
     Raises:
-        HTTPException: ``503 postgres_unreachable`` / ``es_unreachable``
-            when a store the restore writes is down; ``404
-            bundle_not_found`` for a name that is not a bundle in the
+        HTTPException: ``403 graph_disabled`` for the graph while
+            ``GRAPH_ENABLED`` is false; ``503 postgres_unreachable`` /
+            ``es_unreachable`` when a store the restore writes is down;
+            ``404 bundle_not_found`` for a name that is not a bundle in the
             folder; ``409 corpus_busy`` while another operation holds the
-            corpus, or an ingest in another process holds the corpus lock;
-            ``422 bundle_invalid`` for an unsound or damaged bundle; ``422
-            bundle_incompatible`` for one from another embedding model or
-            dimension, corpus, or format version.
+            corpus, or (RAG) an ingest in another process holds the corpus
+            lock; ``422 bundle_invalid`` for an unsound or damaged bundle;
+            ``422 bundle_incompatible`` for one from another embedding model
+            or dimension, corpus, or format version — or, for the graph,
+            another engine or engine major.minor version.
     """
     await preflight(corpus, "restore")
     path = _bundle_path(corpus, payload.name)
@@ -506,7 +510,9 @@ async def start_restore(
             status_code=422,
             detail={"code": "bundle_invalid", "message": f"cannot restore {payload.name}: {error}"},
         ) from error
-    if not await run_in_threadpool(store.corpus_lock_free):
+    # The cross-process half of the gate is RAG's alone: the graph's only
+    # writer is this process, so its gate already says everything.
+    if corpus == "rag" and not await run_in_threadpool(store.corpus_lock_free):
         raise HTTPException(
             status_code=409,
             detail={
@@ -532,8 +538,10 @@ async def backup_status(
     Frames: ``status`` (snapshot; also terminal, with the summary — and an
     export's saved path), ``progress`` (a RAG export's ``snapshot`` →
     ``documents`` → ``chunks`` → ``finalize``; a graph export's ``snapshot``
-    → ``pack``, in bytes → ``finalize``; a restore's ``validate`` → ``load``
-    → ``index`` → ``bm25``), ``log`` (relayed ``varagity.backup`` lines).
+    → ``pack``, in bytes → ``finalize``; a RAG restore's ``validate`` →
+    ``load`` → ``index`` → ``bm25``; a graph restore's ``validate`` →
+    ``extract``, in bytes → ``swap`` → ``open``), ``log`` (relayed
+    ``varagity.backup`` lines).
     With no run in this API process the stream is a single idle ``status``
     frame; after a terminal run it replays that run and closes. Never
     refused for a disabled graph: a tab must still render what ran.
