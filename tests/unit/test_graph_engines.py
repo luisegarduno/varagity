@@ -10,6 +10,7 @@ by doubles so the only untested surface left is the lazy-import block inside
 """
 
 import asyncio
+import importlib.metadata
 import logging
 import os
 import sys
@@ -39,7 +40,13 @@ from varagity.graph.manifest import (
     load_summary,
     save_manifest,
 )
-from varagity.graph.records import BuildReport, GraphAnswer, GraphEvidence, GraphStats
+from varagity.graph.records import (
+    BuildReport,
+    EngineFormat,
+    GraphAnswer,
+    GraphEvidence,
+    GraphStats,
+)
 from varagity.graph.render import (
     doc_guid_index,
     guids_in_payload,
@@ -149,6 +156,27 @@ class TestRegistry:
         import varagity.graph.engines  # noqa: F401  (the import under test)
 
         assert "lightrag" not in sys.modules
+
+    def test_the_storage_format_is_read_without_importing_the_engine(self) -> None:
+        """★ The import-light guard, for the method a backup calls (ADR-019).
+
+        A graph bundle records the engine's file format, and the backups
+        list reads it — so it must come from package metadata, never from
+        importing ``lightrag``.
+        """
+        engine = GRAPH_ENGINE_REGISTRY["lightrag"]
+        storage = engine.storage_format()
+        assert storage == EngineFormat(
+            name="lightrag",
+            package="lightrag-hku",
+            version=importlib.metadata.version("lightrag-hku"),
+        )
+        assert "lightrag" not in sys.modules
+
+    def test_the_format_names_the_registry_key_and_so_the_workdir(self) -> None:
+        """A bundle's folder is the engine's name — the workdir's own name."""
+        assert lightrag_adapter.ENGINE_NAME in GRAPH_ENGINE_REGISTRY
+        assert GRAPH_ENGINE_REGISTRY["lightrag"].storage_format().name == "lightrag"
 
 
 class TestMergeBatches:

@@ -137,27 +137,37 @@ same granularity as the terminal's.
 
 ## The backup status stream — `GET /api/backups/{corpus}/status`
 
-`POST /api/backups/{corpus}/export` writes one backup bundle — a zip of the
-corpus's processed rows, see [Data model](data-model.md#backup-bundles) —
-into the corpus folder's reserved `varagity-exports/`. It returns `202` with
-a run handle (`BackupRunOut`) at once, and the tracked `rag-export` flow
-runs on a background thread, the same shape as ingest. Everything that can
-refuse an export is checked **before** the 202, so a refusal is a clean
-status, never a failed run:
+`POST /api/backups/{corpus}/export` writes one backup bundle into the corpus
+folder's reserved `varagity-exports/` — a zip of the corpus's processed rows
+for `rag`, of the engine's working directory, verbatim, for `graph` (see
+[Data model](data-model.md#backup-bundles)). It returns `202` with a run
+handle (`BackupRunOut`) at once, and the tracked `rag-export` or
+`graph-export` flow runs on a background thread, the same shape as ingest.
+Everything that can refuse an export is checked **before** the 202, so a
+refusal is a clean status, never a failed run:
 
-1. The preflight: `503 postgres_unreachable` (an export reads the rows and
-   the stale flag, and calls no model service).
-2. `422 nothing_to_export` when nothing is ingested.
-3. `500 docs_path_not_writable` when the exports folder can't be written.
-4. `409 corpus_busy` while any operation holds the corpus.
+1. `403 graph_disabled` for `graph` while `GRAPH_ENABLED=false` — checked
+   first, before any store is touched.
+2. The preflight: `503 postgres_unreachable` (an export reads the rows, or
+   for the graph only its stale flag, and calls no model service).
+3. `422 nothing_to_export` when nothing is ingested — or, for the graph,
+   when its workdir holds no file to copy (nothing has been built).
+4. `500 docs_path_not_writable` / `graph_docs_path_not_writable` when the
+   exports folder can't be written.
+5. `409 corpus_busy` while any operation holds the corpus.
 
 The last one is a per-corpus **write gate**, not a per-runner flag: one
-operation per corpus at a time — ingest, export and restore all claim it, so
-a second backup run is refused too. Only `rag` is a valid `{corpus}` today;
-anything else is a `422 validation_error`.
+operation per corpus at a time — ingest (RAG), build (graph), export and
+restore all claim their corpus's gate, so a second backup run is refused
+too, and so is a graph build during a graph export. Each corpus has its own
+gate: a graph export never waits for a RAG one. `{corpus}` is `rag` or
+`graph`; anything else is a `422 validation_error`. The graph's export holds
+the graph's write lock while it copies, so graph chat and `/graph` keep
+answering.
 
 `POST /api/backups/{corpus}/restore` with `{"name": "<bundle>"}` starts a
-restore the same way. A restore **replaces** the corpus: its rows in both
+restore the same way — for `rag` only so far (`graph` there is a `422
+validation_error`). A restore **replaces** the corpus: its rows in both
 stores become the bundle's, re-rooted onto this stack's `DOCS_PATH`, with no
 model call, and the BM25 index is rebuilt from them. Its refusals, in order,
 again all before the 202:
@@ -180,20 +190,22 @@ the document deletes answer `409 corpus_busy`.
 `GET /api/backups/{corpus}/status` has the ingest stream's **replay-from-frame-one**
 semantics. A subscriber gets the run's whole backlog, then live events until
 the terminal frame. With no backup run in this API process it is a single
-idle `status` frame (`run: null`).
+idle `status` frame (`run: null`). It is the one graph backup route a
+disabled graph still answers, like the build's own stream.
 
 | Event | Payload | Fields |
 |---|---|---|
-| `status` | `BackupStatusEvent` | `run` (`BackupRunOut`: `run_id`, `corpus`, `operation` `export`/`restore`, `state` `running`/`completed`/`failed`, timestamps, run-level `error`). A completed export adds `bundle` (the file name), `saved_to` (`docs/varagity-exports/<name>`, the checkout-relative path the panel's Copy path copies) and `summary` (`counts`, `size_bytes`, `wall_clock_s`). A restore names its `bundle` from the first frame; its `summary` counts what it wrote (`documents`, `chunks`, `bm25`) and adds `stale`, the corpus-stale flag it left. The first frame is the snapshot and the last is the terminal state. |
-| `progress` | `BackupProgressEvent` | `stage` — an export's `snapshot` \| `documents` \| `chunks` \| `finalize`, a restore's `validate` \| `load` \| `index` \| `bm25` — plus `current`/`total` rows for the counted stages (`documents`, `chunks`; `load` and `bm25` count chunks). Throttled to about 50 frames per stage, so a large corpus doesn't flood the stream. |
-| `log` | `BackupLogEvent` | `level`, `message`: relayed `varagity.backup` records. These include what was exported or restored, a swept partial from an interrupted export, and a warning when rows record an embedding model other than `EMBEDDING_MODEL`. |
+| `status` | `BackupStatusEvent` | `run` (`BackupRunOut`: `run_id`, `corpus`, `operation` `export`/`restore`, `state` `running`/`completed`/`failed`, timestamps, run-level `error`). A completed export adds `bundle` (the file name), `saved_to` (`docs/varagity-exports/<name>` or `graph-docs/varagity-exports/<name>`, the checkout-relative path the panel's Copy path copies) and `summary` (`counts`, `size_bytes`, `wall_clock_s`; a graph export's counts are `thread_days`, `messages`, `entities`, `relations`). A restore names its `bundle` from the first frame; its `summary` counts what it wrote (`documents`, `chunks`, `bm25`) and adds `stale`, the corpus-stale flag it left. The first frame is the snapshot and the last is the terminal state. |
+| `progress` | `BackupProgressEvent` | `stage` — a RAG export's `snapshot` \| `documents` \| `chunks` \| `finalize`, a graph export's `snapshot` \| `pack` \| `finalize`, a restore's `validate` \| `load` \| `index` \| `bm25` — plus `current`/`total` for the counted stages: rows for `documents` and `chunks`, chunks for `load` and `bm25`, and **bytes** for `pack` (the workdir's files copied of their total). Throttled to about 50 frames per stage, so a large corpus doesn't flood the stream. |
+| `log` | `BackupLogEvent` | `level`, `message`: relayed `varagity.backup` records. These include what was exported or restored, a swept partial from an interrupted export, a warning when rows record an embedding model other than `EMBEDDING_MODEL`, and a warning naming any graph workdir entry the export had to skip. |
 
 The terminal transition is atomic: the run turns terminal, its last frame
 joins the backlog, and the corpus is released together. A client that
 starts the next export as soon as it sees `completed` never races a
 spurious `corpus_busy`.
 
-The other two backup routes are plain:
+The other two backup routes are plain (both answer `403 graph_disabled` for
+a disabled graph):
 
 - `GET /api/backups/{corpus}` lists the folder's bundles, newest first. Each
   entry carries its `bundle.json` manifest, read alone through the zip's
@@ -202,13 +214,22 @@ The other two backup routes are plain:
   `reason` when it isn't (the same reasons a restore's 422 gives, worded for
   the panel), and `drift`, the reingest-affecting settings the bundle was
   made under that differ from this stack's (restoring it flags the corpus
-  stale; drift never refuses). The verdict reads only the zip directory and
-  the manifest, so a bundle damaged inside an intact zip lists as
-  restorable until its first restore refuses it.
+  stale; drift never refuses; always empty for the graph). The verdict
+  reads only the zip directory and the manifest, so a bundle damaged inside
+  an intact zip lists as restorable until its first restore refuses it. A
+  graph bundle's manifest also carries `engine`, the format its files are
+  in.
 - `GET /api/backups/{corpus}/files/{name}` returns one bundle as
   `application/zip` with `Content-Disposition: attachment`. The panel's
   Download is a plain link, so no cross-origin fetch (and no CORS) is
   involved.
+
+The graph build learns the gate too: `POST /api/graph/build` answers `409
+corpus_busy` while a graph backup holds the corpus (a second build keeps
+its `409 graph_build_running`), and the graph's corpus routes treat the
+reserved folder as not-corpus — `GET /api/graph/documents` never lists a
+bundle, and `DELETE /api/graph/documents/{name}` answers `404
+graph_document_not_found` for anything under `varagity-exports/`.
 
 ## The preview pair — degradable by design
 

@@ -38,11 +38,14 @@ function percent(done: number, total: number): number {
 export function GraphBuildPanel({
   view,
   disabled,
+  busyNote = null,
   onBuild,
   onRebuild,
 }: {
   view: GraphBuildView;
   disabled: boolean;
+  /** Why the controls are disabled when a graph backup holds the corpus. */
+  busyNote?: string | null;
   /** `message_limit` bounds the run to the newest N messages. */
   onBuild: (options: { messageLimit: number | null }) => void;
   /** Same bound — a typed limit applies to a from-scratch run too. */
@@ -137,10 +140,14 @@ export function GraphBuildPanel({
         )}
       </div>
 
+      {busyNote && <p className="text-xs text-muted-foreground">{busyNote}</p>}
+
       {run === null ? (
-        <p className="text-xs text-muted-foreground">
-          No build has run since the API started.
-        </p>
+        !busyNote && (
+          <p className="text-xs text-muted-foreground">
+            No build has run since the API started.
+          </p>
+        )
       ) : (
         <div className="flex flex-col gap-2">
           {/* role=status: run-state flips are announced politely; the

@@ -6,16 +6,21 @@ import type {
   BackupRun,
   BundleManifest,
   BundleOut,
+  GraphStatus,
 } from "@/lib/api";
 import {
+  backupProgress,
   backupStageLabel,
   backupStageUnit,
+  countNoun,
+  describeGraphHolding,
   describeBundle,
   describeReplacement,
   describeStaleRestore,
   formatBytes,
   formatCount,
   formatDuration,
+  graphIsEmpty,
   initialBackupView,
   MAX_BACKUP_LOG_LINES,
   reduceBackupEvent,
@@ -255,7 +260,7 @@ describe("formatting", () => {
   it("formats counts with a noun", () => {
     expect(formatCount(0, "documents")).toBe("0 documents");
     expect(formatCount(1, "chunks")).toBe("1 chunk");
-    expect(formatCount(1, "thread-days")).toBe("1 thread-days"); // unknown nouns pass through
+    expect(formatCount(1, "widgets")).toBe("1 widgets"); // unknown nouns pass through
   });
 
   it("formats byte sizes from bytes to gigabytes", () => {
@@ -452,5 +457,168 @@ describe("restore presentation", () => {
     expect(describeStaleRestore(listed({ manifest: manifest({ stale: true }) }))).toBe(
       "it was already flagged stale when it was exported — the corpus will be flagged stale until a re-ingest.",
     );
+  });
+});
+
+// ── the graph export (phase 3) ─────────────────────────────────────────
+
+const GRAPH_NAME = "varagity-graph-20261108-1315.zip";
+const MB = 1024 * 1024;
+
+function graphRun(state: BackupRun["state"], overrides?: Partial<BackupRun>): BackupRun {
+  return run(state, { run_id: "g1", corpus: "graph", ...overrides });
+}
+
+/** The feed one graph export emits: snapshot → pack (bytes) → finalize. */
+function fullGraphExportEvents(): BackupEvent[] {
+  return [
+    { type: "status", data: { run: graphRun("running") } },
+    progress({ stage: "snapshot" }),
+    {
+      type: "log",
+      data: { level: "INFO", message: "exporting 14 graph file(s), 268,435,456 bytes, written by lightrag-hku 1.5.4" },
+    },
+    progress({ stage: "pack", current: 0, total: 256 * MB }),
+    progress({ stage: "pack", current: 182 * MB, total: 256 * MB }),
+    progress({ stage: "pack", current: 256 * MB, total: 256 * MB }),
+    progress({ stage: "finalize" }),
+    {
+      type: "status",
+      data: {
+        run: graphRun("completed", {
+          bundle: GRAPH_NAME,
+          saved_to: `graph-docs/varagity-exports/${GRAPH_NAME}`,
+          finished_at: "2026-11-08T13:15:21Z",
+          summary: {
+            counts: { thread_days: 799, messages: 64_592, entities: 5000, relations: 6680 },
+            size_bytes: 152 * MB,
+            wall_clock_s: 21.4,
+          },
+        }),
+      },
+    },
+  ];
+}
+
+describe("graph export replays", () => {
+  it("a full graph export rebuilds the terminal picture", () => {
+    const view = reduceAll(fullGraphExportEvents());
+    expect(view.run?.state).toBe("completed");
+    expect(view.run?.corpus).toBe("graph");
+    expect(view.run?.saved_to).toBe(`graph-docs/varagity-exports/${GRAPH_NAME}`);
+    expect(view.stage).toBeNull();
+    expect(backupProgress(view)).toBeNull(); // terminal: no bar
+    expect(view.logs).toHaveLength(1);
+  });
+
+  it("mid-pack: the bar counts bytes, worded in megabytes", () => {
+    const view = reduceAll(fullGraphExportEvents().slice(0, 5));
+    expect(view.stage).toBe("pack");
+    expect(backupStageLabel(view)).toBe("packing the graph's files");
+    expect(backupStageUnit(view.stage)).toBe("packed");
+    expect(backupProgress(view)).toEqual({
+      done: "182.0 MB",
+      total: "256.0 MB",
+      unit: "packed",
+      current: 182 * MB,
+      max: 256 * MB,
+      fraction: 182 / 256,
+    });
+  });
+
+  it("replays to the same view however the feed is split", () => {
+    const events = fullGraphExportEvents();
+    const whole = reduceAll(events);
+    const joinedLate = reduceAll(events.slice(4), reduceAll(events.slice(0, 4)));
+    expect(joinedLate).toEqual(whole);
+  });
+
+  it("a graph export after a RAG run's frames starts from scratch", () => {
+    const afterRag = reduceAll(fullGraphExportEvents(), reduceAll(fullRunEvents()));
+    expect(afterRag).toEqual(reduceAll(fullGraphExportEvents()));
+  });
+});
+
+describe("backupProgress", () => {
+  it("words row-counted stages as locale-grouped counts", () => {
+    const view = { ...initialBackupView, stage: "load", current: 6200, total: 8977 };
+    expect(backupProgress(view)).toMatchObject({
+      done: (6200).toLocaleString(),
+      total: (8977).toLocaleString(),
+      unit: "chunks loaded",
+    });
+  });
+
+  it("is nothing for an uncounted stage", () => {
+    expect(backupProgress({ ...initialBackupView, stage: "index" })).toBeNull();
+    expect(backupProgress({ ...initialBackupView, stage: "pack", current: 0, total: 0 })).toBeNull();
+  });
+
+  it("never overflows when a file grew since it was listed", () => {
+    const view = { ...initialBackupView, stage: "pack", current: 300, total: 200 };
+    expect(backupProgress(view)?.fraction).toBe(1);
+  });
+});
+
+function graphManifest(overrides?: Partial<BundleManifest>): BundleManifest {
+  return manifest({
+    corpus: "graph",
+    counts: { thread_days: 799, messages: 64_592, entities: 5000, relations: 6680 },
+    ingest_settings: null,
+    engine: { name: "lightrag", package: "lightrag-hku", version: "1.5.4" },
+    ...overrides,
+  });
+}
+
+describe("describeBundle for a graph bundle", () => {
+  it("words the graph's counts and names the engine that wrote the files", () => {
+    expect(describeBundle(graphManifest())).toEqual({
+      contents: `799 thread-days · ${(64_592).toLocaleString()} messages · ${(5000).toLocaleString()} entities · ${(6680).toLocaleString()} relations`,
+      settings: "lightrag-hku 1.5.4",
+    });
+  });
+
+  it("leaves out what the graph never reported", () => {
+    expect(describeBundle(graphManifest({ counts: { thread_days: 1, messages: 1 } })).contents).toBe(
+      "1 thread-day · 1 message",
+    );
+    expect(describeBundle(graphManifest({ counts: {} })).contents).toBe("");
+  });
+
+  it("maps manifest keys to the nouns the UI uses", () => {
+    expect(countNoun("thread_days")).toBe("thread-days");
+    expect(countNoun("documents")).toBe("documents");
+    expect(formatCount(1, "entities")).toBe("1 entity");
+    expect(formatCount(1, "relations")).toBe("1 relation");
+  });
+});
+
+function status(overrides?: Partial<GraphStatus>): GraphStatus {
+  return { enabled: true, stale: false, building: false, documents: {}, ...overrides };
+}
+
+describe("the graph's holding", () => {
+  it("adds every status's thread-days and the summary's sizes", () => {
+    const built = status({
+      documents: { processed: 797, failed: 2 },
+      message_guids: 64_592,
+      entities: 5000,
+      relations: 6680,
+    });
+    expect(describeGraphHolding(built)).toBe(
+      `799 thread-days · ${(64_592).toLocaleString()} messages · ${(5000).toLocaleString()} entities · ${(6680).toLocaleString()} relations`,
+    );
+    expect(graphIsEmpty(built)).toBe(false);
+  });
+
+  it("skips what the graph would not say", () => {
+    // A first build killed partway: statuses on disk, no summary yet.
+    expect(describeGraphHolding(status({ documents: { pending: 3 } }))).toBe("3 thread-days");
+  });
+
+  it("an unbuilt graph holds nothing — nothing to export", () => {
+    expect(describeGraphHolding(status())).toBeNull();
+    expect(graphIsEmpty(status())).toBe(true);
+    expect(graphIsEmpty(status({ entities: null, relations: null, message_guids: null }))).toBe(true);
   });
 });

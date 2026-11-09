@@ -22,7 +22,11 @@ from varagity.config import get_settings
 # Must precede the prefect import chain below (see the module docstring).
 os.environ.setdefault("PREFECT_API_URL", get_settings().PREFECT_API_URL)
 
-from varagity.pipeline.backup_flow import rag_export_flow, rag_restore_flow  # noqa: E402
+from varagity.pipeline.backup_flow import (  # noqa: E402
+    graph_export_flow,
+    rag_export_flow,
+    rag_restore_flow,
+)
 from varagity.pipeline.eval_flow import (  # noqa: E402
     chat_eval_flow,
     eval_flow,
@@ -43,6 +47,7 @@ __all__ = [
     "eval_flow",
     "graph_build_flow",
     "graph_eval_flow",
+    "graph_export_flow",
     "graph_query_stream_flow",
     "ingest_flow",
     "ocr_benchmark_flow",

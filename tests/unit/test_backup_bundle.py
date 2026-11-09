@@ -34,6 +34,7 @@ from varagity.backup.bundle import (
     exports_dir,
     inspect_bundle,
     is_bundle_name,
+    is_graph_file_name,
     list_bundles,
     open_bundle,
     read_manifest,
@@ -566,14 +567,6 @@ class TestVerdicts:
         verdict = verdict_of(craft(tmp_path / "counts.zip", manifest={"counts": {}}))
         assert verdict.reason == "bundle.json does not record its document and chunk counts."
 
-    def test_a_corpus_without_restore_rules_is_incompatible(
-        self, tmp_path: Path, stack: None
-    ) -> None:
-        path = craft(tmp_path / "g.zip", manifest={"corpus": "graph"})
-        verdict = verdict_of(path, "graph")
-        assert isinstance(verdict.problem, BundleIncompatible)
-        assert verdict.reason == "This stack cannot restore message graph backups yet."
-
     def test_unreadable_files_get_a_reason_not_an_exception(self, tmp_path: Path) -> None:
         junk = tmp_path / "junk.zip"
         junk.write_bytes(b"not a zip at all")
@@ -700,3 +693,202 @@ class TestVerification:
         )
         with pytest.raises(BundleInvalid, match="Not a readable zip"), open_bundle(junk, manifest):
             pass
+
+
+# ── the graph allowlist (phase 3) ─────────────────────────────────────────
+
+ENGINE = {"name": "lightrag", "package": "lightrag-hku", "version": "1.5.4"}
+
+
+def graph_members() -> dict[str, bytes]:
+    """A few of a LightRAG workdir's files, under the engine's folder."""
+    return {
+        "lightrag/graph_chunk_entity_relation.graphml": b"<graphml/>",
+        "lightrag/kv_store_doc_status.json": b'{"t1::2026-01-01": {"status": "processed"}}',
+        "lightrag/vdb_entities.json": b'{"embedding_dim": 1024, "data": [], "matrix": ""}',
+        "lightrag/varagity_manifest.json": b'{"version": 1, "docs": {}}',
+    }
+
+
+def graph_craft(path: Path, **kwargs: Any) -> Path:
+    """Hand-build a graph bundle (the RAG ``craft`` with a graph manifest)."""
+    members = kwargs.pop("members", None)
+    manifest = {
+        "corpus": "graph",
+        "engine": ENGINE,
+        "counts": {"thread_days": 1, "messages": 2},
+        "ingest_settings": None,
+        **kwargs.pop("manifest", {}),
+    }
+    return craft(
+        path, members=graph_members() if members is None else members, manifest=manifest, **kwargs
+    )
+
+
+class TestGraphVerdicts:
+    def test_a_sound_graph_bundle_is_restorable_and_verifies(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        path = graph_craft(tmp_path / "g.zip")
+        verdict = verdict_of(path, "graph")
+        assert verdict.restorable, verdict.reason
+        assert verdict.manifest is not None
+        assert verdict.manifest.engine is not None
+        assert verdict.manifest.engine.version == "1.5.4"
+        assert verify_bundle(path, "graph").counts == {"thread_days": 1, "messages": 2}
+
+    def test_no_member_is_individually_required(self, tmp_path: Path, stack: None) -> None:
+        """A workdir holds only the namespaces its engine has written so far."""
+        members = {"lightrag/kv_store_doc_status.json": b"{}"}
+        assert verdict_of(graph_craft(tmp_path / "g.zip", members=members), "graph").restorable
+
+    def test_a_graph_bundle_must_record_its_engine(self, tmp_path: Path, stack: None) -> None:
+        path = graph_craft(tmp_path / "g.zip", manifest={"engine": None})
+        verdict = verdict_of(path, "graph")
+        assert type(verdict.problem) is BundleInvalid
+        assert verdict.reason == "bundle.json does not record the graph engine that wrote it."
+
+    @pytest.mark.parametrize("name", ["..", "light rag", ".lightrag", "a/b", ""])
+    def test_an_engine_name_that_cannot_be_a_folder_is_invalid(
+        self, tmp_path: Path, stack: None, name: str
+    ) -> None:
+        path = graph_craft(tmp_path / "g.zip", manifest={"engine": {**ENGINE, "name": name}})
+        assert verdict_of(path, "graph").reason == (
+            f"bundle.json records the graph engine {name!r}, which is not a folder name."
+        )
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "kv_store_full_docs.json",  # outside the engine folder
+            "other/kv_store_full_docs.json",  # another folder
+            "lightrag/nested/x.json",  # flat files only
+            "lightrag/.hidden.json",  # never hidden
+            "lightrag/with space.json",  # a name an engine never writes
+            "documents.jsonl",  # a RAG member
+        ],
+    )
+    def test_members_must_be_flat_safe_files_in_the_engine_folder(
+        self, tmp_path: Path, stack: None, entry: str
+    ) -> None:
+        path = graph_craft(tmp_path / "g.zip", members={**graph_members(), entry: b"x"})
+        verdict = verdict_of(path, "graph")
+        assert type(verdict.problem) is BundleInvalid
+        assert verdict.reason == f"Unexpected member(s): {entry}."
+
+    def test_a_file_the_manifest_never_hashed_is_invalid(self, tmp_path: Path, stack: None) -> None:
+        """An unrecorded member could never be verified, so it could never restore."""
+        members = graph_members()
+        records = [
+            {"name": name, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in members.items()
+            if name != "lightrag/vdb_entities.json"
+        ]
+        path = graph_craft(tmp_path / "g.zip", members=members, records=records)
+        assert verdict_of(path, "graph").reason == (
+            "bundle.json does not record lightrag/vdb_entities.json."
+        )
+
+    def test_a_hand_rezipped_bundles_folder_entry_is_tolerated(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        """``zip -r`` adds a ``lightrag/`` directory entry; it holds nothing to verify."""
+        path = graph_craft(tmp_path / "g.zip", extra=((zipfile.ZipInfo("lightrag/"), b""),))
+        assert verdict_of(path, "graph").restorable
+
+    def test_only_the_engine_folder_entry_is_tolerated(self, tmp_path: Path, stack: None) -> None:
+        path = graph_craft(tmp_path / "g.zip", extra=((zipfile.ZipInfo("other/"), b""),))
+        assert verdict_of(path, "graph").reason == "Unexpected member(s): other/."
+
+    def test_a_recorded_size_that_differs_from_the_zips_is_damage(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        members = graph_members()
+        records = [
+            {
+                "name": name,
+                "size_bytes": len(data) + (1 if name.endswith(".graphml") else 0),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+            for name, data in members.items()
+        ]
+        path = graph_craft(tmp_path / "g.zip", members=members, records=records)
+        reason = verdict_of(path, "graph").reason
+        assert reason is not None and reason.endswith("— the bundle is damaged.")
+
+    def test_a_graph_bundle_from_another_embedding_model_is_incompatible(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        path = graph_craft(tmp_path / "g.zip", manifest={"embedding_model": "BAAI/bge-m3"})
+        verdict = verdict_of(path, "graph")
+        assert isinstance(verdict.problem, BundleIncompatible)
+        assert verdict.reason == "Embedded with BAAI/bge-m3 — this stack embeds with test-model."
+
+    def test_the_corpora_cannot_stand_in_for_each_other(self, tmp_path: Path, stack: None) -> None:
+        graph = graph_craft(tmp_path / "g.zip")
+        assert verdict_of(graph, "rag").reason == (
+            "A message graph backup — it cannot restore the document corpus."
+        )
+        rag = craft(tmp_path / "r.zip")
+        assert verdict_of(rag, "graph").reason == (
+            "A document corpus backup — it cannot restore the message graph."
+        )
+
+    def test_the_rag_allowlist_is_untouched_by_the_graph_rule(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        path = craft(tmp_path / "r.zip", extra=(("lightrag/vdb_entities.json", b"{}"),))
+        assert verdict_of(path, "rag").reason == "Unexpected member(s): lightrag/vdb_entities.json."
+
+    def test_a_tampered_graph_member_is_damaged(self, tmp_path: Path, stack: None) -> None:
+        members = graph_members()
+        records = [
+            {"name": name, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in members.items()
+        ]
+        tampered = {**members, "lightrag/graph_chunk_entity_relation.graphml": b"<GRAPHML/>"}
+        path = graph_craft(tmp_path / "g.zip", members=tampered, records=records)
+        assert verdict_of(path, "graph").restorable  # same sizes: only the hash can tell
+        with pytest.raises(BundleDamaged, match="graph_chunk_entity_relation.graphml"):
+            verify_bundle(path, "graph")
+
+    def test_the_engine_format_round_trips_through_the_writer(self, exports: Path) -> None:
+        from varagity.graph.records import EngineFormat
+
+        engine = EngineFormat(**ENGINE)
+        with write_bundle(exports.parent / "graph-exports", "graph", created_at=WHEN) as writer:
+            with writer.member("lightrag/kv_store_doc_status.json") as sink:
+                sink.write(b"{}")
+            writer.seal(
+                **seal_defaults(counts={"thread_days": 1}, ingest_settings=None, engine=engine)
+            )
+        manifest = read_manifest(writer.result.path)
+        assert manifest.engine == engine
+        assert writer.result.name == "varagity-graph-20261108-1312.zip"
+
+    def test_a_rag_manifest_records_no_engine(self, exports: Path) -> None:
+        assert read_manifest(write_sample(exports)).engine is None
+
+
+@pytest.mark.parametrize(
+    ("name", "ok"),
+    [
+        ("kv_store_llm_response_cache.json", True),
+        ("graph_chunk_entity_relation.graphml", True),
+        ("varagity_graph_summary.json", True),
+        ("lightrag", True),
+        ("v1.5-x_y", True),
+        (".hidden", False),
+        ("..", False),
+        (".", False),
+        ("", False),
+        ("a/b.json", False),
+        ("a\\b.json", False),
+        ("with space.json", False),
+        ("ünïcode.json", False),
+        ("x" * 255, True),
+        ("x" * 256, False),
+    ],
+)
+def test_graph_file_names(name: str, ok: bool) -> None:
+    assert is_graph_file_name(name) is ok

@@ -19,6 +19,7 @@ from varagity.graph import service as graph_service
 from varagity.graph.base import GRAPH_ENGINE_REGISTRY
 from varagity.graph.records import (
     BuildReport,
+    EngineFormat,
     GraphAnswer,
     GraphEvidence,
     GraphExport,
@@ -96,16 +97,31 @@ class FakeSession:
         self.closed = True
 
 
+FAKE_FORMAT = EngineFormat(name="lightrag", package="lightrag-hku", version="1.5.4")
+"""What :class:`FakeEngine` says its files are (the shipped engine's shape)."""
+
+
 class FakeEngine:
     """Hands out :class:`FakeSession`s, or refuses to."""
 
-    def __init__(self, *, fail_open: bool = False, fail_close: bool = False, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        fail_open: bool = False,
+        fail_close: bool = False,
+        storage: EngineFormat = FAKE_FORMAT,
+        **kwargs: Any,
+    ) -> None:
         self.fail_open = fail_open
         self.fail_close = fail_close
+        self.storage = storage
         self.session_kwargs = kwargs
         self.opens = 0
         self.workdirs: list[Path] = []
         self.sessions: list[FakeSession] = []
+
+    def storage_format(self) -> EngineFormat:
+        return self.storage
 
     @contextmanager
     def session(self, workdir: Path) -> Iterator[FakeSession]:
@@ -339,6 +355,68 @@ class TestWriteLock:
         resolved, _ = service(registered, tmp_path, fail_open=True)
         with pytest.raises(GraphUnavailable):
             resolved.retrieve("q")
+
+    def test_writing_is_the_lock_every_write_takes(self, registered: Any, tmp_path: Path) -> None:
+        """★ A backup export holds it to keep the workdir still (ADR-019)."""
+        resolved, engine = service(registered, tmp_path)
+        with resolved.writing():
+            assert resolved.building is True
+            with pytest.raises(GraphBuildInProgress, match="holds its write lock"):
+                resolved.build([])
+            with pytest.raises(GraphBuildInProgress):
+                resolved.resume()
+            with pytest.raises(GraphBuildInProgress):
+                resolved.delete_documents(["a::1"])
+            with pytest.raises(GraphBuildInProgress):
+                resolved.writing()  # never re-entrant, never a wait
+            # Reads take no lock: chat answers while the files are copied.
+            assert resolved.stats() == GraphStats(entities=4, relations=3, communities=None)
+        assert resolved.building is False
+        assert resolved.resume().messages_seen == 3  # released on exit
+        resolved.close()
+        (session,) = engine.sessions
+        assert session.builds == [] and session.deleted == []
+
+    def test_a_build_in_flight_refuses_the_lock_to_anyone_else(
+        self, registered: Any, tmp_path: Path
+    ) -> None:
+        entered = threading.Event()
+        resolved, engine = service(registered, tmp_path, before_build=entered)
+        builder = threading.Thread(target=lambda: resolved.build([]))
+        builder.start()
+        try:
+            assert entered.wait(timeout=5)
+            with pytest.raises(GraphBuildInProgress):
+                resolved.writing()
+        finally:
+            engine.sessions[0].release.set()
+            builder.join(timeout=5)
+        with resolved.writing():
+            pass  # free again once the build returned
+        resolved.close()
+
+    def test_the_lock_is_released_when_the_block_raises(
+        self, registered: Any, tmp_path: Path
+    ) -> None:
+        resolved, _ = service(registered, tmp_path)
+        with pytest.raises(OSError, match="disk full"), resolved.writing():
+            raise OSError("disk full")
+        assert resolved.building is False
+
+
+class TestStorageFormat:
+    def test_the_service_passes_the_engines_format_through_without_opening(
+        self, registered: Any, tmp_path: Path
+    ) -> None:
+        """A backup records it; reading it must never open a session."""
+        resolved, engine = service(registered, tmp_path)
+        assert resolved.storage_format() == FAKE_FORMAT
+        assert engine.opens == 0
+
+    def test_each_engine_reports_its_own_format(self, registered: Any, tmp_path: Path) -> None:
+        other = EngineFormat(name="_probe", package="probe-graph", version="2.0.1")
+        resolved, _ = service(registered, tmp_path, storage=other)
+        assert resolved.storage_format() == other
 
 
 class TestSingleton:

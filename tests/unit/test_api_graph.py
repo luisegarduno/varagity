@@ -12,6 +12,7 @@ import asyncio
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ import pytest
 from fastapi import FastAPI
 
 from tests.sse import parse_sse
+from varagity.api.corpus_gate import CorpusBusy, CorpusGate, get_corpus_gates
 from varagity.api.deps import get_app_settings_store, get_graph_build_preflight
 from varagity.api.graph_runner import (
     EVENT_LOG,
@@ -40,7 +42,7 @@ from varagity.graph.records import (
     GraphExportEdge,
     GraphExportNode,
 )
-from varagity.graph.service import GraphUnavailable, get_graph_service
+from varagity.graph.service import GraphBuildInProgress, GraphUnavailable, get_graph_service
 from varagity.graph.sources.base import MessageBatch, SourceMessage
 from varagity.pipeline.graph_flow import GraphBatches
 
@@ -75,6 +77,8 @@ class FakeService:
         self.exports: list[tuple[str, int, int]] = []
         self.closes = 0
         self.opens = 0
+        self.lock = threading.Lock()
+        self.locked_events: list[str] = []
 
     @property
     def workdir(self) -> Path:
@@ -114,11 +118,23 @@ class FakeService:
             raise self.statuses_raise
         return dict(self.statuses)
 
+    @contextmanager
+    def writing(self) -> Iterator[None]:
+        """The real service's non-blocking write lock, in miniature."""
+        if not self.lock.acquire(blocking=False):
+            raise GraphBuildInProgress("held")
+        try:
+            yield
+        finally:
+            self.lock.release()
+
     def close(self) -> None:
         self.closes += 1
+        self.locked_events.append(f"close (locked={self.lock.locked()})")
 
     def session(self) -> object:
         self.opens += 1
+        self.locked_events.append(f"open (locked={self.lock.locked()})")
         return self
 
 
@@ -192,6 +208,9 @@ def scripted_flow(
 def make_runner(tmp_path: Path, **kwargs: Any) -> tuple[GraphBuildRunner, FakeService]:
     service = kwargs.pop("service", None) or FakeService(tmp_path / "lightrag")
     kwargs.setdefault("on_reingest_complete", lambda: None)
+    # Each test gets its own gate, so a run one test leaves behind can never
+    # refuse the next test's build (the ingest tests' rule).
+    kwargs.setdefault("gate", CorpusGate("graph"))
     runner = GraphBuildRunner(kwargs.pop("flow", scripted_flow()), service=service, **kwargs)
     return runner, service
 
@@ -339,6 +358,22 @@ class TestScan:
 
     def test_a_missing_root_is_empty_not_an_error(self, tmp_path: Path) -> None:
         assert scan_graph_corpus(tmp_path / "nope") == []
+
+    def test_the_reserved_exports_folder_is_never_scanned(self, tmp_path: Path) -> None:
+        """★ A backup bundle is never corpus (ADR-019) — only the root's own folder, any case."""
+        for name in (
+            "chat.db",
+            "varagity-exports/varagity-graph-20261108-1315.zip",
+            "varagity-exports/.varagity-graph-20261108-1316.zip.partial",
+            "Varagity-Exports/copied.zip",
+            "old/varagity-exports/other.db",
+        ):
+            (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / name).write_bytes(b"x")
+        assert [path.relative_to(tmp_path).as_posix() for path in scan_graph_corpus(tmp_path)] == [
+            "chat.db",
+            "old/varagity-exports/other.db",  # nested deeper: ordinary corpus
+        ]
 
 
 class TestBounds:
@@ -531,6 +566,9 @@ class TestRunnerLifecycle:
         await wait_terminal(runner)
         assert not workdir.exists()  # the fake reopen creates nothing
         assert (service.closes, service.opens) == (1, 1)
+        # Like every change to the workdir, the wipe holds the write lock.
+        assert service.locked_events == ["close (locked=True)", "open (locked=True)"]
+        assert not service.lock.locked()
 
     async def test_a_plain_build_never_touches_the_workdir(
         self, graph_root: Path, tmp_path: Path
@@ -608,6 +646,91 @@ class TestRunnerLifecycle:
         """Constructing a runner must not touch the engine registry."""
         runner = GraphBuildRunner()
         assert runner._service is None
+
+
+class TestCorpusGate:
+    """One writer per corpus: the build is the graph gate's other claimant (ADR-019)."""
+
+    async def test_a_build_holds_the_graph_gate_and_frees_it_before_its_terminal_frame(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        hold = threading.Event()
+        gate = CorpusGate("graph")
+        runner, _ = make_runner(tmp_path, flow=scripted_flow(gate=hold), gate=gate)
+        holder_at_terminal: list[object] = []
+
+        async def consume() -> None:
+            async for name, payload in runner.subscribe():
+                if name == EVENT_STATUS and payload.run.state != "running":
+                    holder_at_terminal.append(gate.holder)
+
+        runner.start()
+        assert gate.holder == "build"
+        consumer = asyncio.create_task(consume())
+        hold.set()
+        await asyncio.wait_for(consumer, timeout=5)
+        # A client that reacts to the terminal frame by starting an export
+        # must find the corpus already free.
+        assert holder_at_terminal == [None]
+        assert gate.holder is None
+
+    async def test_a_backup_holding_the_corpus_refuses_the_build(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        gate = CorpusGate("graph")
+        gate.claim("export")
+        runner, service = make_runner(tmp_path, gate=gate)
+        with pytest.raises(CorpusBusy, match="an export is running"):
+            runner.start()
+        assert gate.holder == "export"  # untouched by the refusal
+        assert runner.snapshot() is None  # no run was created
+        assert service.builds == []
+
+    async def test_a_second_build_keeps_its_own_code_ahead_of_the_gate(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        """graph_build_running stays the answer to a second build; corpus_busy means a backup."""
+        hold = threading.Event()
+        gate = CorpusGate("graph")
+        runner, _ = make_runner(tmp_path, flow=scripted_flow(gate=hold), gate=gate)
+        runner.start()
+        try:
+            with pytest.raises(GraphBuildAlreadyRunning):
+                runner.start()
+        finally:
+            hold.set()
+        await wait_terminal(runner)
+
+    async def test_a_failed_build_frees_the_corpus(self, graph_root: Path, tmp_path: Path) -> None:
+        gate = CorpusGate("graph")
+        runner, _ = make_runner(
+            tmp_path, flow=scripted_flow(fail_with=RuntimeError("gpu fell over")), gate=gate
+        )
+        runner.start()
+        await wait_terminal(runner)
+        assert gate.holder is None
+
+    async def test_a_thread_that_will_not_start_gives_the_corpus_back(
+        self, graph_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gate = CorpusGate("graph")
+        runner, _ = make_runner(tmp_path, gate=gate)
+
+        def refuse(self: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", refuse)
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            runner.start()
+        assert gate.holder is None
+        snapshot = runner.snapshot()
+        assert snapshot is not None and snapshot.state == "failed"
+        assert snapshot.error == "RuntimeError: can't start new thread"
+        events = await collect(runner)
+        assert events[-1][1].run.state == "failed"
+
+    def test_the_default_runner_claims_the_process_graph_gate(self) -> None:
+        assert GraphBuildRunner()._gate is get_corpus_gates()["graph"]
 
 
 # ── the routes ─────────────────────────────────────────────────────────
@@ -753,6 +876,30 @@ class TestList:
         response = await request(make_app(runner=runner), "GET", "/api/graph/documents")
         assert response.json() == []
 
+    async def test_backup_bundles_are_never_listed_as_sources(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        write_chat_db(graph_root / "chat.db")
+        exports = graph_root / "varagity-exports"
+        exports.mkdir()
+        (exports / "varagity-graph-20261108-1315.zip").write_bytes(b"PK")
+        runner, _ = make_runner(tmp_path)
+        response = await request(make_app(runner=runner), "GET", "/api/graph/documents")
+        assert [entry["relative_path"] for entry in response.json()] == ["chat.db"]
+
+    async def test_a_build_never_counts_a_bundle_as_scanned(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        write_chat_db(graph_root / "chat.db")
+        (graph_root / "varagity-exports").mkdir()
+        (graph_root / "varagity-exports" / "varagity-graph-20261108-1315.zip").write_bytes(b"PK")
+        runner, _ = make_runner(tmp_path)
+        runner.start()
+        await wait_terminal(runner)
+        snapshot = runner.snapshot()
+        assert snapshot is not None and snapshot.summary is not None
+        assert snapshot.summary.files_scanned == 1
+
 
 class TestDelete:
     async def test_deleting_a_source_flags_the_graph_stale(
@@ -795,6 +942,31 @@ class TestDelete:
         assert response.status_code == 404
         assert outside.exists()
 
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "varagity-exports/varagity-graph-20261108-1315.zip",
+            "Varagity-Exports/copy.zip",
+            "link.zip",
+        ],
+    )
+    async def test_a_backup_bundle_is_never_deleted_as_a_source(
+        self, graph_root: Path, store: FakeSettingsStore, name: str
+    ) -> None:
+        """★ Deleting one here would flag the graph stale for a file that was never a source."""
+        exports = graph_root / "varagity-exports"
+        exports.mkdir()
+        bundle = exports / "varagity-graph-20261108-1315.zip"
+        bundle.write_bytes(b"PK")
+        (graph_root / "Varagity-Exports").mkdir(exist_ok=True)  # one folder on a case-folding fs
+        (graph_root / "Varagity-Exports" / "copy.zip").write_bytes(b"PK")
+        (graph_root / "link.zip").symlink_to(bundle)  # a path that resolves into the folder
+        response = await request(make_app(store=store), "DELETE", f"/api/graph/documents/{name}")
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "graph_document_not_found"
+        assert bundle.exists()
+        assert store.graph_stale is False
+
 
 class TestBuildRoute:
     async def test_post_returns_a_202_run_handle(self, graph_root: Path, tmp_path: Path) -> None:
@@ -823,6 +995,20 @@ class TestBuildRoute:
         finally:
             gate.set()
         await wait_terminal(runner)
+
+    async def test_a_build_during_a_graph_export_is_a_structured_409(
+        self, graph_root: Path, tmp_path: Path
+    ) -> None:
+        """★ One writer per corpus: a backup holds the graph while it copies the workdir."""
+        gate = CorpusGate("graph")
+        gate.claim("export")
+        runner, service = make_runner(tmp_path, gate=gate)
+        response = await request(make_app(runner=runner), "POST", "/api/graph/build", json={})
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "corpus_busy"
+        assert "an export is running" in error["message"]
+        assert runner.snapshot() is None and service.builds == []
 
     async def test_build_while_disabled_is_a_structured_403(
         self, graph_root: Path, tmp_path: Path, settings_env: Callable[..., None]

@@ -51,6 +51,7 @@ from varagity.backup.bundle import (
     BundleSource,
     BundleWriter,
     MemberSink,
+    NothingToExport,
     WrittenBundle,
     inspect_bundle,
     open_bundle,
@@ -95,10 +96,6 @@ _FLUSH_BYTES = 1 << 20
 
 # The spool is copied into the bundle in slices this size.
 _COPY_BYTES = 4 << 20
-
-
-class NothingToExport(RuntimeError):
-    """Raised when the snapshot holds no documents — an empty bundle is not a backup."""
 
 
 class BM25RebuildFailed(RuntimeError):

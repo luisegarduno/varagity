@@ -2,7 +2,7 @@
   "components": {
     "schemas": {
       "BackupLogEvent": {
-        "description": "Payload of the backup-status SSE ``log`` event.\n\nRelayed ``varagity.backup`` log records (what was exported or restored,\na swept partial, an embedding-model drift warning), so the panel shows\nwhat the server log would.\n\nAttributes:\n    level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).\n    message: The formatted log message.",
+        "description": "Payload of the backup-status SSE ``log`` event.\n\nRelayed ``varagity.backup`` log records (what was exported or restored,\na swept partial, an embedding-model drift warning, a graph workdir entry\nthe export had to skip), so the panel shows what the server log would.\n\nAttributes:\n    level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).\n    message: The formatted log message.",
         "properties": {
           "level": {
             "title": "Level",
@@ -21,7 +21,7 @@
         "type": "object"
       },
       "BackupProgressEvent": {
-        "description": "Payload of the backup-status SSE ``progress`` event.\n\nAn export walks ``snapshot`` (open one consistent read of the corpus) \u2192\n``documents`` \u2192 ``chunks`` (rows written, with ``current``/``total``) \u2192\n``finalize`` (the vector matrix, the manifest, the atomic rename). A\nrestore walks ``validate`` (the bundle's verdict again) \u2192 ``load`` (the\nreplacing transaction's binary COPY, chunks loaded so far) \u2192 ``index``\n(the vector index rebuild and the commit \u2014 the restore takes effect) \u2192\n``bm25`` (the BM25 index refilled from the restored rows, chunks so far).\n\nAttributes:\n    stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (an\n        export) or ``validate`` | ``load`` | ``index`` | ``bm25`` (a\n        restore).\n    current: Rows written so far in a counted stage.\n    total: The stage's row count.",
+        "description": "Payload of the backup-status SSE ``progress`` event.\n\nA RAG export walks ``snapshot`` (open one consistent read of the corpus)\n\u2192 ``documents`` \u2192 ``chunks`` (rows written, with ``current``/``total``) \u2192\n``finalize`` (the vector matrix, the manifest, the atomic rename). A\ngraph export walks ``snapshot`` (take the graph's write lock, list its\nworkdir) \u2192 ``pack`` (the workdir's files copied in, counted in **bytes**)\n\u2192 ``finalize``. A restore walks ``validate`` (the bundle's verdict again)\n\u2192 ``load`` (the replacing transaction's binary COPY, chunks loaded so\nfar) \u2192 ``index`` (the vector index rebuild and the commit \u2014 the restore\ntakes effect) \u2192 ``bm25`` (the BM25 index refilled from the restored\nrows, chunks so far).\n\nAttributes:\n    stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (a\n        RAG export), ``snapshot`` | ``pack`` | ``finalize`` (a graph\n        export), or ``validate`` | ``load`` | ``index`` | ``bm25`` (a\n        restore).\n    current: Rows (``pack``: bytes) done so far in a counted stage.\n    total: The stage's row (``pack``: byte) count.",
         "properties": {
           "current": {
             "anyOf": [
@@ -40,6 +40,7 @@
               "snapshot",
               "documents",
               "chunks",
+              "pack",
               "finalize",
               "validate",
               "load",
@@ -85,7 +86,7 @@
         "type": "object"
       },
       "BackupRunOut": {
-        "description": "One backup run's state (``POST /api/backups/{corpus}/export`` or ``/restore``).\n\nAttributes:\n    run_id: The run handle.\n    corpus: The corpus being backed up or restored.\n    operation: What the run does \u2014 ``export`` writes a new bundle,\n        ``restore`` replaces the corpus with one.\n    state: ``running`` | ``completed`` | ``failed``.\n    bundle: An export's: the file it wrote (set once it is published \u2014\n        an export names nothing until its bundle is whole). A restore's:\n        the bundle it restores, from the start.\n    saved_to: Where an export's bundle landed, relative to the checkout\n        (``docs/varagity-exports/<name>``) \u2014 the path \"Copy path\"\n        copies, right in both host and compose mode. ``None`` for a\n        restore.\n    started_at: When the run started.\n    finished_at: When it reached a terminal state (``None`` while\n        running).\n    error: The run-level failure (``failed`` only).\n    summary: The final counters (``completed`` only).",
+        "description": "One backup run's state (``POST /api/backups/{corpus}/export`` or ``/restore``).\n\nAttributes:\n    run_id: The run handle.\n    corpus: The corpus being backed up or restored.\n    operation: What the run does \u2014 ``export`` writes a new bundle,\n        ``restore`` replaces the corpus with one.\n    state: ``running`` | ``completed`` | ``failed``.\n    bundle: An export's: the file it wrote (set once it is published \u2014\n        an export names nothing until its bundle is whole). A restore's:\n        the bundle it restores, from the start.\n    saved_to: Where an export's bundle landed, relative to the checkout\n        (``docs/varagity-exports/<name>``, or\n        ``graph-docs/varagity-exports/<name>`` for the graph) \u2014 the path\n        \"Copy path\" copies, right in both host and compose mode.\n        ``None`` for a restore.\n    started_at: When the run started.\n    finished_at: When it reached a terminal state (``None`` while\n        running).\n    error: The run-level failure (``failed`` only).\n    summary: The final counters (``completed`` only).",
         "properties": {
           "bundle": {
             "anyOf": [
@@ -206,7 +207,7 @@
         "type": "object"
       },
       "BackupSummaryOut": {
-        "description": "What a completed backup run did (terminal runs only).\n\nAttributes:\n    counts: An export's: what the bundle holds \u2014 ``documents`` and\n        ``chunks`` for a RAG bundle. A restore's: what it wrote \u2014\n        ``documents``, ``chunks``, and ``bm25`` (the chunks the rebuilt\n        index holds).\n    size_bytes: The bundle's size on disk.\n    wall_clock_s: Seconds from the snapshot to the published bundle (an\n        export), or from validation to a searchable index (a restore).\n    stale: A restore's: whether it left the corpus flagged stale (the\n        bundle was stale at export, or its rows were made under other\n        ingest settings). ``None`` for an export.",
+        "description": "What a completed backup run did (terminal runs only).\n\nAttributes:\n    counts: An export's: what the bundle holds \u2014 ``documents`` and\n        ``chunks`` for a RAG bundle; ``thread_days``, ``messages`` and\n        (when the graph reported them) ``entities`` and ``relations``\n        for a graph bundle. A restore's: what it wrote \u2014 ``documents``,\n        ``chunks``, and ``bm25`` (the chunks the rebuilt index holds).\n    size_bytes: The bundle's size on disk.\n    wall_clock_s: Seconds from the snapshot to the published bundle (an\n        export), or from validation to a searchable index (a restore).\n    stale: A restore's: whether it left the corpus flagged stale (the\n        bundle was stale at export, or its rows were made under other\n        ingest settings). ``None`` for an export.",
         "properties": {
           "counts": {
             "additionalProperties": {
@@ -306,7 +307,7 @@
         "type": "object"
       },
       "BundleManifestOut": {
-        "description": "A backup bundle's ``bundle.json``, as the backups list reports it (ADR-019).\n\nThe file format's own model (:class:`varagity.backup.bundle.BundleManifest`)\non the wire unchanged \u2014 the panel shows what a bundle holds (``counts``)\nand what it was made under (the embedding model and dimension, the\ningest settings, the stale flag) straight from the manifest.",
+        "description": "A backup bundle's ``bundle.json``, as the backups list reports it (ADR-019).\n\nThe file format's own model (:class:`varagity.backup.bundle.BundleManifest`)\non the wire unchanged \u2014 the panel shows what a bundle holds (``counts``)\nand what it was made under (the embedding model and dimension, a RAG\nbundle's ingest settings, a graph bundle's engine format, the stale\nflag) straight from the manifest.",
         "properties": {
           "corpus": {
             "enum": [
@@ -335,6 +336,16 @@
           "embedding_model": {
             "title": "Embedding Model",
             "type": "string"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EngineFormat"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "format": {
             "const": "varagity-backup",
@@ -937,6 +948,30 @@
           "usage"
         ],
         "title": "DoneEvent",
+        "type": "object"
+      },
+      "EngineFormat": {
+        "description": "Which engine wrote a graph's working directory, in which version of its files.\n\nA graph backup is the workdir verbatim (ADR-019), so it is only as\nportable as the engine's on-disk format: a bundle records this beside\nits files, and a restore holds it to the running engine's. The engine\nreports its own format (:meth:`~varagity.graph.base.GraphEngine.storage_format`)\n\u2014 the registry is pluggable, so nothing outside an adapter names a\nlibrary.\n\nAttributes:\n    name: The engine's registry name \u2014 what ``GRAPH_ENGINE`` selects, and\n        the name of its working directory (``lightrag``).\n    package: The distribution whose code reads and writes the files\n        (``lightrag-hku``).\n    version: That distribution's installed version (``1.5.4``).",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "package": {
+            "title": "Package",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "package",
+          "version"
+        ],
+        "title": "EngineFormat",
         "type": "object"
       },
       "ErrorBody": {
@@ -2991,7 +3026,7 @@
   "paths": {
     "/api/backups/{corpus}": {
       "get": {
-        "description": "List the backup bundles in a corpus's ``varagity-exports/`` folder.\n\nA directory read plus one small member per bundle \u2014 the manifest is\nfound through each zip's central directory, so a folder of large\nbundles lists in milliseconds. Each entry carries the cheap restore\nverdict (no hashing \u2014 a restore hashes, and a damage it finds is\nremembered here).\n\nArgs:\n    corpus: The corpus whose backups to list.\n    damaged: The process's remembered restore failures.\n\nReturns:\n    One entry per bundle file, newest first (empty when the folder does\n    not exist yet).",
+        "description": "List the backup bundles in a corpus's ``varagity-exports/`` folder.\n\nA directory read plus one small member per bundle \u2014 the manifest is\nfound through each zip's central directory, so a folder of large\nbundles lists in milliseconds. Each entry carries the cheap restore\nverdict (no hashing \u2014 a restore hashes, and a damage it finds is\nremembered here).\n\nArgs:\n    corpus: The corpus whose backups to list.\n    damaged: The process's remembered restore failures.\n\nReturns:\n    One entry per bundle file, newest first (empty when the folder does\n    not exist yet).\n\nRaises:\n    HTTPException: ``403 graph_disabled`` for the graph while\n        ``GRAPH_ENABLED`` is false.",
         "operationId": "list_backups_api_backups__corpus__get",
         "parameters": [
           {
@@ -2999,7 +3034,10 @@
             "name": "corpus",
             "required": true,
             "schema": {
-              "const": "rag",
+              "enum": [
+                "rag",
+                "graph"
+              ],
               "title": "Corpus",
               "type": "string"
             }
@@ -3020,6 +3058,16 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -3039,7 +3087,7 @@
     },
     "/api/backups/{corpus}/export": {
       "post": {
-        "description": "Start a background export and return its handle.\n\nThe bundle is written into ``<corpus root>/varagity-exports/`` as\n``varagity-<corpus>-<UTC yyyymmdd-HHMM>.zip`` (a same-minute repeat gets\na ``-2`` suffix \u2014 never a replace), from one consistent snapshot of the\ncorpus.\n\nArgs:\n    corpus: The corpus to export.\n    runners: The process-wide backup runners.\n    preflight: The awaitable reachability check (structured 503).\n    store: The per-request vector store (the nothing-to-export check).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``503 postgres_unreachable`` when the database is\n        down; ``422 nothing_to_export`` when nothing is ingested; ``500\n        docs_path_not_writable`` when the exports folder can't be\n        written; ``409 corpus_busy`` while any operation \u2014 another\n        export included \u2014 holds the corpus (the message names it).",
+        "description": "Start a background export and return its handle.\n\nThe bundle is written into ``<corpus root>/varagity-exports/`` as\n``varagity-<corpus>-<UTC yyyymmdd-HHMM>.zip`` (a same-minute repeat gets\na ``-2`` suffix \u2014 never a replace): for RAG, from one consistent\nsnapshot of the corpus; for the graph, the engine's workdir copied under\nthe graph's write lock, while graph chat keeps answering.\n\nArgs:\n    corpus: The corpus to export.\n    runners: The process-wide backup runners.\n    preflight: The awaitable reachability check (structured 503).\n    store: The per-request vector store (the RAG nothing-to-export\n        check).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``403 graph_disabled`` for the graph while\n        ``GRAPH_ENABLED`` is false; ``503 postgres_unreachable`` when\n        the database is down; ``422 nothing_to_export`` when nothing is\n        ingested (or, for the graph, nothing has been built); ``500\n        docs_path_not_writable`` / ``graph_docs_path_not_writable`` when\n        the exports folder can't be written; ``409 corpus_busy`` while\n        any operation \u2014 another export, an ingest or build, a restore \u2014\n        holds the corpus (the message names it).",
         "operationId": "start_export_api_backups__corpus__export_post",
         "parameters": [
           {
@@ -3047,7 +3095,10 @@
             "name": "corpus",
             "required": true,
             "schema": {
-              "const": "rag",
+              "enum": [
+                "rag",
+                "graph"
+              ],
               "title": "Corpus",
               "type": "string"
             }
@@ -3063,6 +3114,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "409": {
             "content": {
@@ -3113,25 +3174,28 @@
     },
     "/api/backups/{corpus}/files/{name}": {
       "get": {
-        "description": "Return one bundle as a file download.\n\nA plain ``GET`` answering with ``Content-Disposition: attachment``, so\nthe panel's Download is an ordinary link \u2014 the browser saves the file\n(and offers its own \"Show in folder\") without a cross-origin fetch.\n\nArgs:\n    corpus: The corpus the bundle belongs to.\n    name: The bundle's file name in the exports folder.\n\nReturns:\n    The bundle's bytes as ``application/zip``.\n\nRaises:\n    HTTPException: ``404 bundle_not_found`` when no such bundle lives in\n        the folder \u2014 which covers a name trying to escape it.",
+        "description": "Return one bundle as a file download.\n\nA plain ``GET`` answering with ``Content-Disposition: attachment``, so\nthe panel's Download is an ordinary link \u2014 the browser saves the file\n(and offers its own \"Show in folder\") without a cross-origin fetch.\n\nArgs:\n    corpus: The corpus the bundle belongs to.\n    name: The bundle's file name in the exports folder.\n\nReturns:\n    The bundle's bytes as ``application/zip``.\n\nRaises:\n    HTTPException: ``403 graph_disabled`` for the graph while\n        ``GRAPH_ENABLED`` is false; ``404 bundle_not_found`` when no such\n        bundle lives in the folder \u2014 which covers a name trying to\n        escape it.",
         "operationId": "download_backup_api_backups__corpus__files__name__get",
         "parameters": [
-          {
-            "in": "path",
-            "name": "corpus",
-            "required": true,
-            "schema": {
-              "const": "rag",
-              "title": "Corpus",
-              "type": "string"
-            }
-          },
           {
             "in": "path",
             "name": "name",
             "required": true,
             "schema": {
               "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "corpus",
+            "required": true,
+            "schema": {
+              "enum": [
+                "rag",
+                "graph"
+              ],
+              "title": "Corpus",
               "type": "string"
             }
           }
@@ -3147,6 +3211,16 @@
               }
             },
             "description": "The bundle, as a `Content-Disposition: attachment` download."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -3261,7 +3335,7 @@
     },
     "/api/backups/{corpus}/status": {
       "get": {
-        "description": "Stream the corpus's current (or last) backup run as SSE.\n\nFrames: ``status`` (snapshot; also terminal, with the summary \u2014 and an\nexport's saved path), ``progress`` (an export's ``snapshot`` \u2192\n``documents`` \u2192 ``chunks`` \u2192 ``finalize``; a restore's ``validate`` \u2192\n``load`` \u2192 ``index`` \u2192 ``bm25``), ``log`` (relayed ``varagity.backup``\nlines). With no run in this API process the stream is a single idle\n``status`` frame; after a terminal run it replays that run and closes.\n\nArgs:\n    corpus: The corpus whose backup run to follow.\n    runners: The process-wide backup runners.\n\nYields:\n    The framed events, oldest first, then live until terminal.",
+        "description": "Stream the corpus's current (or last) backup run as SSE.\n\nFrames: ``status`` (snapshot; also terminal, with the summary \u2014 and an\nexport's saved path), ``progress`` (a RAG export's ``snapshot`` \u2192\n``documents`` \u2192 ``chunks`` \u2192 ``finalize``; a graph export's ``snapshot``\n\u2192 ``pack``, in bytes \u2192 ``finalize``; a restore's ``validate`` \u2192 ``load``\n\u2192 ``index`` \u2192 ``bm25``), ``log`` (relayed ``varagity.backup`` lines).\nWith no run in this API process the stream is a single idle ``status``\nframe; after a terminal run it replays that run and closes. Never\nrefused for a disabled graph: a tab must still render what ran.\n\nArgs:\n    corpus: The corpus whose backup run to follow.\n    runners: The process-wide backup runners.\n\nYields:\n    The framed events, oldest first, then live until terminal.",
         "operationId": "backup_status_api_backups__corpus__status_get",
         "parameters": [
           {
@@ -3269,7 +3343,10 @@
             "name": "corpus",
             "required": true,
             "schema": {
-              "const": "rag",
+              "enum": [
+                "rag",
+                "graph"
+              ],
               "title": "Corpus",
               "type": "string"
             }
@@ -3912,7 +3989,7 @@
     },
     "/api/graph/build": {
       "post": {
-        "description": "Trigger a background graph build and return its handle.\n\n**This is also how a killed build resumes.** The engine keeps document\nstatuses on disk and re-selects every in-flight or failed document, so\npressing Build again after a crash finishes the work instead of\nrepeating it \u2014 the run's summary reports what it inherited as\n``resumed``. That is why ``reingest`` is a separate, explicit flag: it\nis the one path that throws the working directory away.\n\nArgs:\n    payload: ``reingest`` (wipe and re-index \u2014 the only thing that\n        clears the graph-stale flag), plus the ``message_limit`` /\n        ``since`` bounds that make a minutes-long spot check possible on\n        an archive whose full build runs for days.\n    runner: The process-wide graph build runner.\n    preflight: The awaitable reachability check (structured 503).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``403 graph_disabled`` when the kill switch is off;\n        ``409 graph_build_running`` while a build is in flight; ``503\n        <service>_unreachable`` when a required model service is down.",
+        "description": "Trigger a background graph build and return its handle.\n\n**This is also how a killed build resumes.** The engine keeps document\nstatuses on disk and re-selects every in-flight or failed document, so\npressing Build again after a crash finishes the work instead of\nrepeating it \u2014 the run's summary reports what it inherited as\n``resumed``. That is why ``reingest`` is a separate, explicit flag: it\nis the one path that throws the working directory away.\n\nArgs:\n    payload: ``reingest`` (wipe and re-index \u2014 the only thing that\n        clears the graph-stale flag), plus the ``message_limit`` /\n        ``since`` bounds that make a minutes-long spot check possible on\n        an archive whose full build runs for days.\n    runner: The process-wide graph build runner.\n    preflight: The awaitable reachability check (structured 503).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``403 graph_disabled`` when the kill switch is off;\n        ``409 graph_build_running`` while a build is in flight; ``409\n        corpus_busy`` while a graph backup holds the corpus (ADR-019 \u2014\n        the message names it); ``503 <service>_unreachable`` when a\n        required model service is down.",
         "operationId": "start_graph_build_api_graph_build_post",
         "requestBody": {
           "content": {
@@ -4021,7 +4098,7 @@
     },
     "/api/graph/documents": {
       "get": {
-        "description": "List every file in the graph corpus directory.\n\nA directory scan, not a table read: the graph's own record of what it\nindexed lives in the engine's workdir, and what this tab must show is\nwhat has been dropped in \u2014 sidecars and contacts files included. Files\nthe last build parsed also carry their ``doc_id`` and a parse summary;\nfiles no build has scanned carry ``None`` for both, because parsing a\nmulti-gigabyte database is a build's job.\n\nArgs:\n    runner: The process-wide graph build runner (holds the last scan).\n\nReturns:\n    One entry per file, in path order.",
+        "description": "List every file in the graph corpus directory.\n\nA directory scan, not a table read: the graph's own record of what it\nindexed lives in the engine's workdir, and what this tab must show is\nwhat has been dropped in \u2014 sidecars and contacts files included. Files\nthe last build parsed also carry their ``doc_id`` and a parse summary;\nfiles no build has scanned carry ``None`` for both, because parsing a\nmulti-gigabyte database is a build's job. The reserved\n``varagity-exports/`` folder's backup bundles are never listed.\n\nArgs:\n    runner: The process-wide graph build runner (holds the last scan).\n\nReturns:\n    One entry per file, in path order.",
         "operationId": "list_graph_documents_api_graph_documents_get",
         "responses": {
           "200": {
@@ -4097,7 +4174,7 @@
     },
     "/api/graph/documents/{name}": {
       "delete": {
-        "description": "Remove one file from the graph corpus directory and flag the graph stale.\n\nDeleting the *source* does not retract what the graph already extracted\nfrom it \u2014 that costs a rebuild \u2014 so this sets the graph-stale flag and\nthe tab surfaces it, rather than letting the graph and its corpus\ndiverge silently (stage-2 decision #16).\n\nArgs:\n    name: The file's path relative to ``GRAPH_DOCS_PATH``.\n    store: The per-request app-settings store (the stale flag).\n\nReturns:\n    What was removed and whether the graph is now flagged stale.\n\nRaises:\n    HTTPException: ``404 graph_document_not_found`` when no such file\n        lives inside ``GRAPH_DOCS_PATH`` \u2014 which covers a path trying to\n        escape it, since an escaping path is not a file this route has.",
+        "description": "Remove one file from the graph corpus directory and flag the graph stale.\n\nDeleting the *source* does not retract what the graph already extracted\nfrom it \u2014 that costs a rebuild \u2014 so this sets the graph-stale flag and\nthe tab surfaces it, rather than letting the graph and its corpus\ndiverge silently (stage-2 decision #16).\n\nArgs:\n    name: The file's path relative to ``GRAPH_DOCS_PATH``.\n    store: The per-request app-settings store (the stale flag).\n\nReturns:\n    What was removed and whether the graph is now flagged stale.\n\nRaises:\n    HTTPException: ``404 graph_document_not_found`` when no such file\n        lives inside ``GRAPH_DOCS_PATH`` \u2014 which covers a path trying to\n        escape it, since an escaping path is not a file this route has,\n        and anything in the reserved ``varagity-exports/`` folder (a\n        backup bundle is not a graph source, whatever path reaches it).",
         "operationId": "delete_graph_document_api_graph_documents__name__delete",
         "parameters": [
           {

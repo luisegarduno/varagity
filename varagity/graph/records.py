@@ -286,3 +286,26 @@ class GraphStats(BaseModel):
     entities: int | None = None
     relations: int | None = None
     communities: int | None = None
+
+
+class EngineFormat(BaseModel):
+    """Which engine wrote a graph's working directory, in which version of its files.
+
+    A graph backup is the workdir verbatim (ADR-019), so it is only as
+    portable as the engine's on-disk format: a bundle records this beside
+    its files, and a restore holds it to the running engine's. The engine
+    reports its own format (:meth:`~varagity.graph.base.GraphEngine.storage_format`)
+    — the registry is pluggable, so nothing outside an adapter names a
+    library.
+
+    Attributes:
+        name: The engine's registry name — what ``GRAPH_ENGINE`` selects, and
+            the name of its working directory (``lightrag``).
+        package: The distribution whose code reads and writes the files
+            (``lightrag-hku``).
+        version: That distribution's installed version (``1.5.4``).
+    """
+
+    name: str
+    package: str
+    version: str

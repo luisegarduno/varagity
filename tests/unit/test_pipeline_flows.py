@@ -22,13 +22,17 @@ from prefect.client.schemas.filters import FlowRunFilter
 from prefect.testing.utilities import prefect_test_harness
 from prometheus_client import REGISTRY
 
+from tests.unit.test_backup_graph import build_workdir
 from tests.unit.test_backup_rag import FakeRebuildBM25, FakeRestoreStore, rezip
 from tests.unit.test_backup_rag import FakeStore as FakeCorpusStore
 from tests.unit.test_backup_rag import chunk as backup_chunk
 from tests.unit.test_backup_rag import document as backup_document
+from tests.unit.test_graph_service import FAKE_FORMAT, FakeEngine
 from tests.unit.test_loader import FakeBM25, FakeEmbeddings, FakeStore
 from varagity.chat import PreparedQuery, Turn
+from varagity.graph.base import GRAPH_ENGINE_REGISTRY
 from varagity.graph.records import BuildReport
+from varagity.graph.service import GraphService
 from varagity.pipeline import ingest_flow, query_flow
 from varagity.pipeline.ingest_flow import (
     chunk_document_task,
@@ -854,3 +858,81 @@ class TestRagRestoreFlow:
         from varagity.pipeline import rag_restore_flow
 
         assert rag_restore_flow.retries in (0, None)
+
+
+class TestGraphExportFlow:
+    """The graph export's tracking shell — the backup package does the work (ADR-019)."""
+
+    @pytest.fixture
+    def service(
+        self, tmp_path: Path, settings_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+    ) -> GraphService:
+        settings_env(
+            EMBEDDING_MODEL="test-model",
+            EMBEDDING_DIM=2,
+            GRAPH_DOCS_PATH=str(tmp_path / "graph-docs"),
+            GRAPH_STORAGE_PATH=str(tmp_path / "graph-data"),
+        )
+        monkeypatch.setitem(GRAPH_ENGINE_REGISTRY, "_flow_probe", FakeEngine())
+        return GraphService(
+            "_flow_probe", workdir=build_workdir(tmp_path / "graph-data" / "lightrag")
+        )
+
+    def test_graph_export_is_a_tracked_flow_run(
+        self, service: GraphService, tmp_path: Path
+    ) -> None:
+        from varagity.backup.bundle import read_manifest
+        from varagity.pipeline import graph_export_flow
+
+        frames: list[str] = []
+        state = graph_export_flow(
+            tmp_path / "graph-docs" / "varagity-exports",
+            on_progress=lambda stage, current, total: frames.append(stage),
+            service=service,
+            stale=True,
+            return_state=True,
+        )
+        assert state.is_completed()
+        result = state.result()
+        assert graph_export_flow.name == "graph-export"
+        manifest = read_manifest(result.bundle.path)
+        assert (manifest.corpus, manifest.stale, manifest.engine) == ("graph", True, FAKE_FORMAT)
+        assert result.counts["thread_days"] == 2
+        assert frames[0] == "snapshot" and "pack" in frames and frames[-1] == "finalize"
+        assert service.building is False  # the write lock went back
+        with get_client(sync_client=True) as client:
+            run = client.read_flow_run(state.state_details.flow_run_id)
+        assert run.state is not None and run.state.is_completed()
+
+    def test_the_flow_reads_the_stale_flag_and_finds_the_process_service(
+        self, service: GraphService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unseeded, the flow asks app_settings for the graph flag and uses the singleton."""
+        from varagity.backup.bundle import read_manifest
+        from varagity.pipeline import graph_export_flow
+
+        backup_flow_module = importlib.import_module("varagity.pipeline.backup_flow")
+        opened: list[str] = []
+
+        class FlaggedSettings:
+            def __enter__(self) -> "FlaggedSettings":
+                opened.append("settings")
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                opened.append("settings closed")
+
+            def is_graph_stale(self) -> bool:
+                return True
+
+        monkeypatch.setattr(backup_flow_module, "AppSettingsStore", FlaggedSettings)
+        monkeypatch.setattr(backup_flow_module, "get_graph_service", lambda: service)
+        result = graph_export_flow(tmp_path / "graph-docs" / "varagity-exports")
+        assert read_manifest(result.bundle.path).stale is True
+        assert opened == ["settings", "settings closed"]
+
+    def test_the_flow_carries_no_retries(self) -> None:
+        """A failed export leaves no bundle; the user presses Export again."""
+        from varagity.pipeline import graph_export_flow
+
+        assert graph_export_flow.retries in (0, None)
