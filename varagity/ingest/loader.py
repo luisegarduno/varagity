@@ -26,6 +26,12 @@ each discovered document from both stores before ingesting it fresh. A file
 with no extractable text is never silently dropped: it gets a ``documents``
 row with ``n_chunks = 0``, a warning, and a dedicated summary count.
 
+Exclusion: a run holds the corpus's advisory lock **shared** from before its
+first write until it returns (ADR-019). Ingests overlap each other as they
+always have; a backup restore — which holds it exclusive — refuses an ingest
+up front with :class:`~varagity.stores.vector_store.CorpusLocked` (and is
+refused by one), whichever process each runs in.
+
 Orchestration seam: each spec §9 stage is a named module function
 (:func:`parse_document`, :func:`chunk_document`, :func:`contextualize_chunks`,
 :func:`embed_chunks`, :func:`store_chunks`), and the run loop invokes them
@@ -375,6 +381,8 @@ def ingest_corpus(
         psycopg.OperationalError: If the vector store is unreachable.
         elastic_transport.ConnectionError: If Elasticsearch is unreachable
             after retries (index creation at run start).
+        varagity.stores.vector_store.CorpusLocked: If a backup restore holds
+            the corpus — nothing was written.
     """
     settings = get_settings()
     verbose = check_verbose(settings.DEFAULT_VERBOSE if verbose is None else verbose)
@@ -408,54 +416,107 @@ def ingest_corpus(
     owns_bm25 = bm25 is None
     active_bm25 = bm25 if bm25 is not None else ElasticsearchBM25()
     try:
-        active_bm25.create_index()
-        client = embeddings if embeddings is not None else get_model("embedding")
-        # The LLM is only needed (and only resolved) when contextualizing.
-        llm_client: LLMClient | None = None
-        if settings.CONTEXTUALIZE:
-            llm_client = llm if llm is not None else get_model("default")
-        next_index = active_store.next_original_index()
-        with Progress(console=show.console, disable=verbose == 0) as progress:
-            task = progress.add_task("Ingesting", total=len(work))
-            for parser, path in work:
-                progress.update(task, description=f"Ingesting {path.name}")
-                try:
-                    outcome, n_chunks = _ingest_file(
-                        path=path,
-                        root=root,
-                        parser=parser,
-                        store=active_store,
-                        bm25=active_bm25,
-                        embeddings=client,
-                        llm=llm_client,
-                        settings=settings,
-                        next_index=next_index,
-                        reingest=reingest,
-                        progress=progress,
-                        verbose=verbose,
-                        stages=stages,
-                    )
-                except Exception:
-                    logger.exception("failed to ingest %s — continuing with the next file", path)
-                    summary.failed += 1
-                    _notify_file(on_file, path, "failed", 0)
-                else:
-                    if outcome == "ingested":
-                        summary.ingested += 1
-                    elif outcome == "skipped":
-                        summary.skipped += 1
-                    else:
-                        summary.no_text += 1
-                    summary.chunks += n_chunks
-                    next_index += n_chunks
-                    _notify_file(on_file, path, outcome, n_chunks)
-                progress.advance(task)
+        # Shared, for the whole run, before the first write (the index
+        # create): a restore can't empty the tables or rebuild the index
+        # under this run, and this run can't write into a restore.
+        with active_store.corpus_lock(exclusive=False):
+            _ingest_work(
+                work,
+                root=root,
+                store=active_store,
+                bm25=active_bm25,
+                embeddings=embeddings,
+                llm=llm,
+                settings=settings,
+                reingest=reingest,
+                verbose=verbose,
+                stages=stages,
+                on_file=on_file,
+                summary=summary,
+            )
     finally:
         if owns_store:
             active_store.close()
         if owns_bm25:
             active_bm25.close()
     return summary
+
+
+def _ingest_work(
+    work: list[tuple[Parser, Path]],
+    *,
+    root: Path,
+    store: ContextualVectorDB,
+    bm25: ElasticsearchBM25,
+    embeddings: EmbeddingsClient | None,
+    llm: LLMClient | None,
+    settings: Settings,
+    reingest: bool,
+    verbose: int,
+    stages: IngestStages,
+    on_file: Callable[[Path, str, int], None] | None,
+    summary: IngestSummary,
+) -> None:
+    """Run the per-file loop over both stores (the corpus lock already held).
+
+    Args:
+        work: ``(parser, path)`` per discovered file with a parser.
+        root: The corpus root.
+        store: The vector store.
+        bm25: The BM25 store (its index is created idempotently first).
+        embeddings: Embeddings client; resolved via the model registry when
+            ``None``.
+        llm: Chat client for contextualization; resolved via the model
+            registry when ``None`` and ``settings.CONTEXTUALIZE`` is on.
+        settings: Loaded application settings.
+        reingest: Delete each document's previous ingest before re-processing.
+        verbose: Validated console verbosity.
+        stages: Per-stage call seam.
+        on_file: Per-file outcome observer.
+        summary: The run's counters, updated in place.
+    """
+    bm25.create_index()
+    client = embeddings if embeddings is not None else get_model("embedding")
+    # The LLM is only needed (and only resolved) when contextualizing.
+    llm_client: LLMClient | None = None
+    if settings.CONTEXTUALIZE:
+        llm_client = llm if llm is not None else get_model("default")
+    next_index = store.next_original_index()
+    with Progress(console=show.console, disable=verbose == 0) as progress:
+        task = progress.add_task("Ingesting", total=len(work))
+        for parser, path in work:
+            progress.update(task, description=f"Ingesting {path.name}")
+            try:
+                outcome, n_chunks = _ingest_file(
+                    path=path,
+                    root=root,
+                    parser=parser,
+                    store=store,
+                    bm25=bm25,
+                    embeddings=client,
+                    llm=llm_client,
+                    settings=settings,
+                    next_index=next_index,
+                    reingest=reingest,
+                    progress=progress,
+                    verbose=verbose,
+                    stages=stages,
+                )
+            except Exception:
+                logger.exception("failed to ingest %s — continuing with the next file", path)
+                summary.failed += 1
+                _notify_file(on_file, path, "failed", 0)
+            else:
+                if outcome == "ingested":
+                    summary.ingested += 1
+                elif outcome == "skipped":
+                    summary.skipped += 1
+                else:
+                    summary.no_text += 1
+                summary.chunks += n_chunks
+                next_index += n_chunks
+                _notify_file(on_file, path, outcome, n_chunks)
+            progress.advance(task)
 
 
 def _notify_file(

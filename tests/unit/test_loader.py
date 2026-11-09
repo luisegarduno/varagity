@@ -3,7 +3,8 @@
 import logging
 import os
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,17 +13,34 @@ import pytest
 from varagity.ingest import loader as loader_module
 from varagity.ingest.loader import MIN_EXTRACTED_CHARS, file_timestamps, ingest_corpus
 from varagity.stores.records import ChunkRecord
+from varagity.stores.vector_store import CorpusLocked
 
 
 class FakeStore:
     """In-memory stand-in for ContextualVectorDB."""
 
-    def __init__(self, start_index: int = 0) -> None:
+    def __init__(self, start_index: int = 0, *, restoring: bool = False) -> None:
         self.start_index = start_index
         self.documents: dict[str, dict] = {}
         self.records: list[ChunkRecord] = []
         self.embeddings: list[list[float]] = []
         self.closed = False
+        # The corpus lock (ADR-019): ``restoring`` stands in for a restore
+        # holding it exclusively in another process.
+        self.restoring = restoring
+        self.lock_modes: list[str] = []
+        self.lock_held = False
+
+    @contextmanager
+    def corpus_lock(self, *, exclusive: bool) -> Iterator[None]:
+        if self.restoring:
+            raise CorpusLocked(exclusive=exclusive)
+        self.lock_modes.append("exclusive" if exclusive else "shared")
+        self.lock_held = True
+        try:
+            yield
+        finally:
+            self.lock_held = False
 
     def next_original_index(self) -> int:
         return self.start_index
@@ -749,3 +767,57 @@ def test_every_discovery_bucket_has_a_registered_parser() -> None:
     assert [attr for attr, _ in loader_module._BUCKET_PARSERS] == [f.name for f in fields(Buckets)]
     for _bucket, parser_name in loader_module._BUCKET_PARSERS:
         get_parser(parser_name)  # raises KeyError if unregistered
+
+
+class TestCorpusLock:
+    """Every ingest holds the corpus lock shared for its whole run (ADR-019)."""
+
+    def test_the_shared_lock_covers_every_write_and_is_released(
+        self, pinned_settings: None, corpus: Path
+    ) -> None:
+        store = FakeStore()
+        held_at: list[tuple[str, bool]] = []
+
+        class WatchingBM25(FakeBM25):
+            def create_index(self) -> bool:  # the run's first write
+                held_at.append(("create_index", store.lock_held))
+                return super().create_index()
+
+            def index_chunks(self, records: list[ChunkRecord]) -> int:
+                held_at.append(("index_chunks", store.lock_held))
+                return super().index_chunks(records)
+
+        summary = ingest_corpus(
+            str(corpus), store=store, bm25=WatchingBM25(), embeddings=FakeEmbeddings(), verbose=0
+        )
+        assert summary.ingested == 2
+        assert store.lock_modes == ["shared"]  # never exclusive: ingests overlap each other
+        assert held_at[0] == ("create_index", True)
+        assert all(held for _, held in held_at)
+        assert store.lock_held is False
+
+    def test_a_restore_holding_the_corpus_refuses_the_run_before_any_write(
+        self, pinned_settings: None, corpus: Path
+    ) -> None:
+        store = FakeStore(restoring=True)
+        bm25 = FakeBM25()
+        with pytest.raises(CorpusLocked, match="the corpus is being restored"):
+            ingest_corpus(
+                str(corpus), store=store, bm25=bm25, embeddings=FakeEmbeddings(), verbose=0
+            )
+        assert bm25.create_index_calls == 0
+        assert store.documents == {} and bm25.indexed == []
+
+    def test_an_owned_store_is_closed_after_a_refusal(
+        self, pinned_settings: None, corpus: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        created: list[FakeStore] = []
+
+        def restoring_store() -> FakeStore:
+            created.append(FakeStore(restoring=True))
+            return created[-1]
+
+        monkeypatch.setattr(loader_module, "ContextualVectorDB", restoring_store)
+        with pytest.raises(CorpusLocked):
+            ingest_corpus(str(corpus), embeddings=FakeEmbeddings(), verbose=0)
+        assert created[0].closed is True

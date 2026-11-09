@@ -16,6 +16,7 @@ import pytest
 from elastic_transport import ConnectionError as ESConnectionError
 from fastapi import FastAPI, UploadFile
 
+from varagity.api.corpus_gate import CorpusGate, get_corpus_gates
 from varagity.api.deps import get_bm25_store, get_vector_store
 from varagity.api.main import create_app
 from varagity.api.routes.documents import _safe_relative_path, _store_upload
@@ -98,12 +99,22 @@ def docs_root(tmp_path: Path, settings_env: Callable[..., None]) -> Path:
     return root
 
 
-def make_app(vector: FakeVectorStore | None = None, bm25: FakeBM25 | None = None) -> FastAPI:
+def make_app(
+    vector: FakeVectorStore | None = None,
+    bm25: FakeBM25 | None = None,
+    *,
+    holder: str | None = None,
+) -> FastAPI:
     application = create_app()
     if vector is not None:
         application.dependency_overrides[get_vector_store] = lambda: vector
     if bm25 is not None:
         application.dependency_overrides[get_bm25_store] = lambda: bm25
+    # Per-test gates; ``holder`` simulates an operation holding the corpus.
+    gates = {"rag": CorpusGate("rag"), "graph": CorpusGate("graph")}
+    if holder is not None:
+        gates["rag"].claim(holder)  # type: ignore[arg-type]
+    application.dependency_overrides[get_corpus_gates] = lambda: gates
     return application
 
 
@@ -641,6 +652,37 @@ class TestDelete:
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "es_unreachable"
         assert vector.deleted == []  # ES-first ordering: the marker survived
+
+
+class TestDeleteDuringABackup:
+    """A backup holding the corpus refuses both deletes before any store is touched (ADR-019)."""
+
+    @pytest.mark.parametrize(
+        ("holder", "phrase"), [("restore", "a restore is running"), ("export", "an export")]
+    )
+    async def test_single_and_bulk_deletes_are_corpus_busy(
+        self, docs_root: Path, holder: str, phrase: str
+    ) -> None:
+        vector = FakeVectorStore([make_info("d1", str(docs_root / "a.txt"))])
+        bm25 = FakeBM25()
+        app = make_app(vector=vector, bm25=bm25, holder=holder)
+        single = await request(app, "DELETE", "/api/documents/d1")
+        bulk = await request(app, "POST", "/api/documents/delete", json={"doc_ids": ["d1"]})
+        for response in (single, bulk):
+            assert response.status_code == 409
+            error = response.json()["error"]
+            assert error["code"] == "corpus_busy"
+            assert phrase in error["message"]
+        assert vector.deleted == [] and bm25.deleted == []
+        assert [info.doc_id for info in vector.documents] == ["d1"]
+
+    async def test_deletes_beside_an_ingest_work_as_they_always_have(self, docs_root: Path) -> None:
+        vector = FakeVectorStore([make_info("d1", str(docs_root / "a.txt"))])
+        response = await request(
+            make_app(vector=vector, bm25=FakeBM25(), holder="ingest"), "DELETE", "/api/documents/d1"
+        )
+        assert response.status_code == 200
+        assert vector.deleted == ["d1"]
 
 
 class TestBulkDelete:

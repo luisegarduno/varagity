@@ -5,16 +5,23 @@ import type {
   BackupProgressEvent,
   BackupRun,
   BundleManifest,
+  BundleOut,
 } from "@/lib/api";
 import {
   backupStageLabel,
   backupStageUnit,
   describeBundle,
+  describeReplacement,
+  describeStaleRestore,
   formatBytes,
   formatCount,
+  formatDuration,
   initialBackupView,
   MAX_BACKUP_LOG_LINES,
   reduceBackupEvent,
+  RESTORE_STEPS,
+  restoreSteps,
+  restoreSummaryRows,
   type BackupView,
 } from "@/lib/backup-reducer";
 
@@ -148,10 +155,10 @@ describe("reduceBackupEvent", () => {
   it("an unknown stage still moves the activity line (forward-compatible)", () => {
     const view = reduceBackupEvent(
       reduceAll(fullRunEvents().slice(0, 1)),
-      progress({ stage: "load" as BackupProgressEvent["stage"], current: 3, total: 9 }),
+      progress({ stage: "defragment" as BackupProgressEvent["stage"], current: 3, total: 9 }),
     );
-    expect(view.stage).toBe("load");
-    expect(backupStageLabel(view)).toBe("load");
+    expect(view.stage).toBe("defragment");
+    expect(backupStageLabel(view)).toBe("defragment");
   });
 
   it("caps the log tail", () => {
@@ -256,5 +263,194 @@ describe("formatting", () => {
     expect(formatBytes(1536)).toBe("1.5 KB");
     expect(formatBytes(52_428_800)).toBe("50.0 MB");
     expect(formatBytes(3 * 1024 ** 3)).toBe("3.0 GB");
+  });
+});
+
+// ── restore (phase 2) ──────────────────────────────────────────────────
+
+const RESTORING = "varagity-rag-20261019-0904.zip";
+
+function restoreRun(state: BackupRun["state"], overrides?: Partial<BackupRun>): BackupRun {
+  return run(state, { run_id: "r1", operation: "restore", bundle: RESTORING, ...overrides });
+}
+
+/** The feed one restore emits, as the runner orders it. */
+function fullRestoreEvents(): BackupEvent[] {
+  return [
+    { type: "status", data: { run: restoreRun("running") } },
+    progress({ stage: "validate" }),
+    { type: "log", data: { level: "INFO", message: `restoring 128 document(s) and 8977 chunk(s) from ${RESTORING}` } },
+    progress({ stage: "load", current: 0, total: 8977 }),
+    progress({ stage: "load", current: 6200, total: 8977 }),
+    progress({ stage: "load", current: 8977, total: 8977 }),
+    progress({ stage: "index" }),
+    progress({ stage: "bm25", current: 0, total: 8977 }),
+    progress({ stage: "bm25", current: 8977, total: 8977 }),
+    {
+      type: "status",
+      data: {
+        run: restoreRun("completed", {
+          finished_at: "2026-11-08T13:13:00Z",
+          summary: {
+            counts: { documents: 128, chunks: 8977, bm25: 8977 },
+            size_bytes: 45_822_976,
+            wall_clock_s: 52.4,
+            stale: true,
+          },
+        }),
+      },
+    },
+  ];
+}
+
+describe("restore replays", () => {
+  it("a full restore rebuilds the terminal picture, every step done", () => {
+    const view = reduceAll(fullRestoreEvents());
+    expect(view.run?.operation).toBe("restore");
+    expect(view.run?.bundle).toBe(RESTORING);
+    expect(view.run?.summary?.stale).toBe(true);
+    expect(view.stage).toBeNull();
+    expect(restoreSteps(view).map((step) => step.state)).toEqual([
+      "done",
+      "done",
+      "done",
+      "done",
+    ]);
+  });
+
+  it("mid-load: validate done, load in progress with its chunk counts", () => {
+    const view = reduceAll(fullRestoreEvents().slice(0, 5));
+    expect(view.stage).toBe("load");
+    expect([view.current, view.total]).toEqual([6200, 8977]);
+    expect(backupStageLabel(view)).toBe("loading rows");
+    expect(backupStageUnit(view.stage)).toBe("chunks loaded");
+    expect(restoreSteps(view).map((step) => step.state)).toEqual([
+      "done",
+      "now",
+      "pending",
+      "pending",
+    ]);
+  });
+
+  it("the index build is uncounted; the BM25 rebuild counts chunks", () => {
+    const indexing = reduceAll(fullRestoreEvents().slice(0, 7));
+    expect(indexing.stage).toBe("index");
+    expect(indexing.total).toBeNull();
+    expect(backupStageLabel(indexing)).toBe("building the vector index");
+    const rebuilding = reduceAll(fullRestoreEvents().slice(0, 9));
+    expect(backupStageLabel(rebuilding)).toBe("rebuilding the BM25 index");
+    expect(backupStageUnit(rebuilding.stage)).toBe("chunks indexed");
+    expect(restoreSteps(rebuilding)[3].state).toBe("now");
+  });
+
+  it("a failed restore marks nothing done and keeps its error", () => {
+    const view = reduceAll([
+      ...fullRestoreEvents().slice(0, 9),
+      {
+        type: "status",
+        data: {
+          run: restoreRun("failed", {
+            error: "BM25RebuildFailed: the rows are restored, but the BM25 index could not be rebuilt",
+          }),
+        },
+      },
+    ]);
+    expect(view.run?.state).toBe("failed");
+    expect(view.run?.error).toMatch(/^BM25RebuildFailed/);
+    expect(restoreSteps(view).every((step) => step.state === "pending")).toBe(true);
+  });
+
+  it("replays to the same view however the feed is split", () => {
+    const events = fullRestoreEvents();
+    expect(reduceAll(events.slice(5), reduceAll(events.slice(0, 5)))).toEqual(reduceAll(events));
+  });
+
+  it("an export after a restore starts from scratch", () => {
+    const restored = reduceAll(fullRestoreEvents());
+    const next = reduceBackupEvent(restored, {
+      type: "status",
+      data: { run: run("running", { run_id: "e2" }) },
+    });
+    expect(next.run?.operation).toBe("export");
+    expect(next.logs).toEqual([]);
+  });
+
+  it("labels the validate step", () => {
+    expect(backupStageLabel({ ...initialBackupView, stage: "validate" })).toBe(
+      "checking the bundle",
+    );
+    expect(RESTORE_STEPS.map((step) => step.label)).toEqual([
+      "validate",
+      "load rows",
+      "vector index",
+      "BM25 index",
+    ]);
+  });
+});
+
+describe("restore presentation", () => {
+  it("summarizes a completed restore", () => {
+    const view = reduceAll(fullRestoreEvents());
+    expect(restoreSummaryRows(view.run!.summary!)).toEqual([
+      ["documents", "128"],
+      ["chunks", (8977).toLocaleString()],
+      ["BM25 docs", (8977).toLocaleString()],
+      ["took", "52 s"],
+    ]);
+    expect(
+      restoreSummaryRows({ counts: {}, size_bytes: 0, wall_clock_s: 0.4 }),
+    ).toEqual([["took", "0 s"]]);
+  });
+
+  it("formats durations", () => {
+    expect(formatDuration(58.3)).toBe("58 s");
+    expect(formatDuration(60)).toBe("1 min");
+    expect(formatDuration(125)).toBe("2 min 5 s");
+  });
+
+  it("says what a restore replaces, and with what", () => {
+    expect(describeReplacement({ documents: 142, chunks: 10_233 }, manifest())).toBe(
+      `Replaces the 142 documents and ${(10_233).toLocaleString()} chunks in both stores with this backup's 142 documents and ${(10_233).toLocaleString()} chunks. Nothing is re-parsed, re-contextualized or re-embedded. Conversations keep their evidence snapshots.`,
+    );
+    expect(describeReplacement(null, null)).toMatch(
+      /^Replaces the current corpus in both stores with this backup's rows\./,
+    );
+    expect(
+      describeReplacement({ documents: 1, chunks: 1 }, manifest({ counts: { documents: 1, chunks: 1 } })),
+    ).toMatch(/^Replaces the 1 document and 1 chunk in both stores with this backup's 1 document and 1 chunk\./);
+  });
+
+  function listed(overrides?: Partial<BundleOut>): BundleOut {
+    return {
+      name: RESTORING,
+      size_bytes: 45_822_976,
+      modified_at: "2026-10-19T09:04:00Z",
+      manifest: manifest(),
+      restorable: true,
+      reason: null,
+      drift: [],
+      ...overrides,
+    };
+  }
+
+  it("has nothing to warn about for a bundle that matches the stack", () => {
+    expect(describeStaleRestore(listed())).toBeNull();
+  });
+
+  it("names the drifted settings with the bundle's own values", () => {
+    expect(describeStaleRestore(listed({ drift: ["CHUNK_SIZE", "CHUNKING_STRATEGY"] }))).toBe(
+      "It was made under CHUNK_SIZE=800, CHUNKING_STRATEGY=markdown_aware, which differ from this stack's settings — the corpus will be flagged stale until a re-ingest.",
+    );
+    expect(
+      describeStaleRestore(listed({ drift: ["NEW_KNOB"], manifest: manifest({ ingest_settings: null }) })),
+    ).toBe(
+      "It was made under NEW_KNOB unrecorded, which differ from this stack's settings — the corpus will be flagged stale until a re-ingest.",
+    );
+  });
+
+  it("warns when the bundle was already stale at export", () => {
+    expect(describeStaleRestore(listed({ manifest: manifest({ stale: true }) }))).toBe(
+      "it was already flagged stale when it was exported — the corpus will be flagged stale until a re-ingest.",
+    );
   });
 });

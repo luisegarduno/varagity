@@ -99,6 +99,15 @@ discovery/parse/chunk are local and deterministic, so they carry none (below).
   transaction last — the pg `documents` row is the idempotency marker, so a
   failure in between leaves the file re-attemptable (see
   [Data model](data-model.md#idempotency-re-ingestion-semantics)).
+- **The corpus lock, shared.** Every run holds the RAG corpus's Postgres
+  advisory lock *shared*, from before its first write (the BM25 index
+  create) until it returns. Ingests overlap each other exactly as before; a
+  backup restore holds the lock *exclusive* (below), so an ingest in **any**
+  process — the CLI's `ingest`, or `chat`'s startup ingest — and a restore
+  exclude each other. A refused run raises `CorpusLocked` before it writes
+  anything; the CLI prints one line and exits 1. The lock belongs to the
+  run's database session, so a killed process releases it with its
+  connection.
 - **Prometheus probe points**: `contextualize_chunks` feeds
   `varagity_contextualize_latency_seconds` per document (real blurb
   generation only — the `CONTEXTUALIZE=false` identity path doesn't count),
@@ -357,14 +366,15 @@ picture one opened at the start did. `progress` frames walk
   `reingest=true` run — deleting a source file sets it, and the tab says so
   until a rebuild retracts those messages.
 
-## The backup flow (`rag-export`)
+## The backup flows (`rag-export` / `rag-restore`)
 
 `rag-export` (`varagity/pipeline/backup_flow.py`) writes the chunk corpus
-into a backup bundle ([Data model](data-model.md#backup-bundles)). It is a
-thin `@flow` shell over `varagity.backup.rag.export_rag`, for the same
-reason `graph-build` is one: the work belongs to the backup package, while
-Prefect owns the *record* that a backup ran, how long it took, and whether
-it failed.
+into a backup bundle ([Data model](data-model.md#backup-bundles)), and
+`rag-restore` turns a bundle back into the corpus. Both are thin `@flow`
+shells over `varagity.backup.rag` (`export_rag`, `restore_rag`), for the
+same reason `graph-build` is one: the work belongs to the backup package,
+while Prefect owns the *record* that a backup ran, how long it took, and
+whether it failed.
 
 ```mermaid
 flowchart LR
@@ -391,18 +401,64 @@ flowchart LR
 - **API and GUI only.** There is deliberately no CLI export command. It
   matches the graph build's posture, and keeps one shape for both corpora.
 
-### API-triggered exports
+### The restore (`rag-restore`)
 
-`POST /api/backups/rag/export` is the ingest runner's shape again: a daemon
-thread inside the API process, an immediate `202` handle, and
-`GET /api/backups/rag/status` streaming the run as SSE with full backlog
-replay ([HTTP API](api.md#the-backup-status-stream-get-apibackupscorpusstatus)).
+```mermaid
+flowchart LR
+    start(["rag_restore_flow(bundle, ingest_settings)"]) --> validate["validate<br/>the bundle's verdict again"]
+    validate --> lock["corpus_lock(exclusive)<br/>advisory, until BM25 is done"]
+    lock --> txn["load · index — one transaction<br/>TRUNCATE · DROP INDEX · binary COPY ×2<br/>CREATE INDEX · ANALYZE · COMMIT"]
+    txn --> bm25["bm25<br/>recreate the index · streaming_bulk · refresh"]
+    bm25 --> flag["write _corpus_stale<br/>(bundle flag, or settings drift)"]
+```
+
+- **No model call.** Nothing is parsed, chunked, contextualized or embedded:
+  the bundle's lines stream straight into binary `COPY` (vectors in
+  pgvector's own binary form, bit for bit), each document's `source`
+  re-rooted onto this stack's `DOCS_PATH`.
+- **The commit is where the restore takes effect.** One transaction empties
+  `documents` and `chunks`, drops the HNSW index (its definition saved from
+  `pg_indexes`), loads both tables, rebuilds the index and analyzes. Any
+  failure before the commit — a malformed line, a constraint the bundle
+  breaks, a member whose sha256 turns out wrong as it is read — rolls back
+  and leaves the previous corpus untouched. `TRUNCATE` holds both tables
+  until then, so readers wait for the restored rows rather than seeing half.
+- **Then BM25, from the restored rows.** The index is deleted and created
+  anew with its mapping, and the rows stream in through
+  `helpers.streaming_bulk`. If Elasticsearch fails here the run fails, but
+  the rows are restored — restoring the same bundle again repairs the index.
+- **The exclusive corpus lock** is held from before the `TRUNCATE` until the
+  BM25 rebuild ends. Without it, a CLI ingest could write rows the rebuild
+  then misses, or index into the gap between the index's delete and its
+  re-create — where Elasticsearch would auto-create it with default mappings
+  that `create_index()` then keeps for good.
+- **The stale flag comes from the bundle**, written only after everything
+  succeeded: stale if the bundle was stale at export, or if its rows were
+  made under other reingest-affecting settings than this stack's. The runner
+  passes a *provider* of those settings, read when the flag is written, so a
+  settings change made mid-restore is judged against the restored rows too.
+- **No retries**, for the export's reason: a failure is either a rollback or
+  says what it left, so the user presses Restore again.
+
+### API-triggered exports and restores
+
+`POST /api/backups/rag/export` and `POST /api/backups/rag/restore` are the
+ingest runner's shape again: a daemon thread inside the API process, an
+immediate `202` handle, and `GET /api/backups/rag/status` streaming the run
+as SSE with full backlog replay
+([HTTP API](api.md#the-backup-status-stream-get-apibackupscorpusstatus)).
 
 - **The corpus gate.** `BackupRunner` (`varagity/api/backup_runner.py`)
   claims the corpus's `CorpusGate` (`varagity/api/corpus_gate.py`) for the
-  whole run. A second export is refused with `409 corpus_busy`, which names
-  the holder. The gate is the run's one-at-a-time rule. It is per *corpus*,
-  not per runner, so other operations can claim the same gate.
+  whole run, and so does the ingest runner. A second backup run, an ingest
+  during a backup, or a backup during an ingest is refused with `409
+  corpus_busy`, which names the holder (a second ingest keeps its own `409
+  ingest_already_running`). The gate is the one-at-a-time rule *inside* the
+  API process; the advisory corpus lock (above) is its cross-process half.
+- **A restore refuses before it starts.** The route checks the gate, hashes
+  every member of the bundle (`verify_bundle`), and checks the corpus lock
+  before the `202`, so a bad bundle or a busy corpus is a clean `422`/`409`,
+  never a failed run.
 - **What the runner hands the flow.** It captures the reingest-affecting
   settings at start (in `app_settings`' env-string form) and passes them in,
   so `varagity.backup` never imports the API layer. The flow reads the stale
@@ -519,7 +575,7 @@ chunk id to its acceptable fact-carrying set.
 
 | Command | Flow(s) | Behavior |
 |---|---|---|
-| `uv run main.py ingest [--reingest]` | `ingest` | One tracked ingest run; exit 1 if any file failed |
+| `uv run main.py ingest [--reingest]` | `ingest` | One tracked ingest run; exit 1 if any file failed — or, with one line, if a backup restore holds the corpus |
 | `uv run main.py chat` *(default)* | `ingest`, then `query` per question | Spec §13 startup sequence: ingest first, then the Q&A loop (`:quit` exits). Since v3 the loop threads an **in-memory history** into each turn (session-scoped, cleared by `:quit`, never persisted) so the configured chat engine can condense |
 | `uv run --group eval main.py eval` | `eval-matrix` (+ ingest subflows) | 7-config retrieval matrix + the chunker sweep, on ephemeral stores |
 | `uv run --group eval main.py eval ocr` | `eval-ocr` (+ ingest subflows) | OCR engine benchmark (CER/WER, pages/s, recall) |
@@ -530,6 +586,8 @@ The HTTP API is a **peer front-end over the same flows** (spec_v2 §4.9):
 `POST /api/chat` runs `query-stream` — or `graph-query-stream` when the turn
 targets the graph — in a threadpool under the async edge (ADR-005), and
 `POST /api/ingest` / `POST /api/graph/build` run `ingest` / `graph-build` on
-a daemon thread ([above](#api-triggered-ingest)). Runs from either front-end
-land at the same Prefect UI. **The graph build is the one flow the CLI
-cannot start**: single-writer storage means the API process owns it.
+a daemon thread ([above](#api-triggered-ingest)), as the backup routes run
+`rag-export` / `rag-restore`. Runs from either front-end land at the same
+Prefect UI. **The graph build is one flow the CLI cannot start** —
+single-writer storage means the API process owns it — and the backup flows
+are API-only by choice, so both corpora keep one shape.

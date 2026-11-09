@@ -18,7 +18,15 @@ from psycopg.types.json import Json
 
 from varagity.stores import vector_store
 from varagity.stores.records import ChunkRecord
-from varagity.stores.vector_store import ContextualVectorDB
+from varagity.stores.vector_store import (
+    CORPUS_LOCK_KEY,
+    ContextualVectorDB,
+    CorpusChunkRow,
+    CorpusDocumentRow,
+    CorpusIndexRow,
+    CorpusLocked,
+    CorpusTablesBusy,
+)
 
 INGESTED_AT = datetime(2026, 7, 21, 12, 0, 0, tzinfo=UTC)
 
@@ -45,11 +53,19 @@ class FakeConnection:
         self.batches: list[tuple[str, list[Any]]] = []
         self.server_cursors: list[tuple[str, bool, int, str]] = []
         self.streams: list[list[Any]] = []
+        self.copies: list[tuple[str, list[str], list[tuple[Any, ...]]]] = []
+        # Every statement, COPY and transaction boundary, in order.
+        self.events: list[str] = []
+        self.fail_on: dict[str, Exception] = {}
         self.transactions = 0
         self.closed = False
 
     def execute(self, sql: str, params: Any = None) -> FakeCursor:
         self.queries.append((sql, params))
+        self.events.append(" ".join(sql.split()))
+        for fragment, error in self.fail_on.items():
+            if fragment in sql:
+                raise error
         return self.results.pop(0) if self.results else FakeCursor()
 
     def cursor(self, name: str = "", *, binary: bool = False) -> Any:
@@ -75,12 +91,34 @@ class FakeConnection:
             def __iter__(self) -> Iterator[Any]:
                 return iter(connection.streams.pop(0))
 
+            @contextmanager
+            def copy(self, sql: str) -> Iterator[Any]:
+                types: list[str] = []
+                rows: list[tuple[Any, ...]] = []
+                connection.events.append(sql.split(" (")[0])  # "COPY <table>"
+
+                class _Copy:
+                    def set_types(self, names: list[str]) -> None:
+                        types.extend(names)
+
+                    def write_row(self, row: tuple[Any, ...]) -> None:
+                        rows.append(tuple(row))
+
+                yield _Copy()
+                connection.copies.append((sql, types, rows))
+
         return _Cursor()
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
         self.transactions += 1
-        yield
+        self.events.append("BEGIN")
+        try:
+            yield
+        except BaseException:
+            self.events.append("ROLLBACK")
+            raise
+        self.events.append("COMMIT")
 
     def close(self) -> None:
         self.closed = True
@@ -346,3 +384,181 @@ class TestCorpusSnapshot:
         conn = FakeConnection([FakeCursor(), FakeCursor(row=None)])
         with store_with(conn).iter_corpus() as snapshot:
             assert (snapshot.document_count, snapshot.chunk_count) == (0, 0)
+
+
+class TestCorpusLock:
+    """The RAG corpus's advisory lock (ADR-019): try-only, paired with its unlock."""
+
+    def test_an_ingest_takes_it_shared_and_gives_it_back(self) -> None:
+        conn = FakeConnection([FakeCursor(row=(True,))])
+        with store_with(conn).corpus_lock(exclusive=False):
+            conn.events.append("work")
+        assert conn.events == [
+            "SELECT pg_try_advisory_lock_shared(%s)",
+            "work",
+            "SELECT pg_advisory_unlock_shared(%s)",
+        ]
+        assert all(params == (CORPUS_LOCK_KEY,) for _, params in conn.queries)
+
+    def test_a_restore_takes_it_exclusive_and_releases_it_even_on_failure(self) -> None:
+        conn = FakeConnection([FakeCursor(row=(True,))])
+        with (
+            pytest.raises(RuntimeError, match="boom"),
+            store_with(conn).corpus_lock(exclusive=True),
+        ):
+            raise RuntimeError("boom")
+        assert conn.events == ["SELECT pg_try_advisory_lock(%s)", "SELECT pg_advisory_unlock(%s)"]
+
+    @pytest.mark.parametrize(
+        ("exclusive", "message"),
+        [
+            (True, "an ingest is running in another process"),
+            (False, "the corpus is being restored"),
+        ],
+    )
+    def test_a_refused_try_raises_and_unlocks_nothing(self, exclusive: bool, message: str) -> None:
+        conn = FakeConnection([FakeCursor(row=(False,))])
+        with (
+            pytest.raises(CorpusLocked, match=message) as caught,
+            store_with(conn).corpus_lock(exclusive=exclusive),
+        ):
+            pytest.fail("the block must not run")  # pragma: no cover
+        assert caught.value.exclusive is exclusive
+        assert len(conn.events) == 1  # the try only: never unlock what we don't hold
+
+    def test_an_unlock_on_a_dead_session_is_logged_not_raised(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        conn = FakeConnection([FakeCursor(row=(True,))])
+        conn.fail_on["pg_advisory_unlock"] = psycopg.OperationalError(
+            "server closed the connection"
+        )
+        with store_with(conn).corpus_lock(exclusive=True):
+            pass
+        assert "could not release the corpus lock" in caplog.text
+
+    def test_the_key_is_one_fixed_bigint(self) -> None:
+        assert int.from_bytes(b"VARAGITY", "big") == CORPUS_LOCK_KEY
+        assert 0 < CORPUS_LOCK_KEY < 2**63
+
+    def test_lock_free_tries_and_gives_back(self) -> None:
+        conn = FakeConnection([FakeCursor(row=(True,))])
+        assert store_with(conn).corpus_lock_free() is True
+        assert conn.events == ["SELECT pg_try_advisory_lock(%s)", "SELECT pg_advisory_unlock(%s)"]
+        held = FakeConnection([FakeCursor(row=(False,))])
+        assert store_with(held).corpus_lock_free() is False
+        assert held.events == ["SELECT pg_try_advisory_lock(%s)"]
+
+
+def _document(doc_id: str) -> CorpusDocumentRow:
+    return CorpusDocumentRow(doc_id, f"/abs/corpus/{doc_id}.md", "md", "deadbeef", 1, INGESTED_AT)
+
+
+def _chunk(doc_id: str, index: int) -> CorpusChunkRow:
+    return CorpusChunkRow(
+        chunk_id=f"{doc_id}::{index}",
+        doc_id=doc_id,
+        original_index=index,
+        chunk_index=index,
+        content=f"c{index}",
+        context=None,
+        contextualized_content=f"c{index}",
+        metadata={"source": f"/abs/corpus/{doc_id}.md"},
+        created_at=INGESTED_AT,
+        embedding=Vector([0.5, 0.25]),
+    )
+
+
+_HNSW_DEF = (
+    "CREATE INDEX chunks_embedding_hnsw ON public.chunks USING hnsw "
+    "(embedding vector_cosine_ops) WITH (m='24')"
+)
+
+
+class TestReplaceCorpus:
+    """The restore's write, in one transaction (ADR-019)."""
+
+    def test_statement_order(self) -> None:
+        """★ Empty → drop the index → COPY both → rebuild from the saved definition → ANALYZE."""
+        conn = FakeConnection([FakeCursor(), FakeCursor(), FakeCursor(row=(_HNSW_DEF,))])
+        indexing: list[str] = []
+        written = store_with(conn).replace_corpus(
+            [_document("docaaa")],
+            [_chunk("docaaa", 0), _chunk("docaaa", 1)],
+            on_indexing=lambda: indexing.append("now"),
+        )
+        assert written == (1, 2)
+        assert indexing == ["now"]
+        assert conn.events == [
+            "BEGIN",
+            "SET LOCAL lock_timeout = '30s'",
+            "TRUNCATE documents, chunks",
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = "
+            "'chunks_embedding_hnsw'",
+            "DROP INDEX chunks_embedding_hnsw",
+            "COPY documents",
+            "COPY chunks",
+            _HNSW_DEF,  # the saved definition, tuning and all
+            "ANALYZE documents",
+            "ANALYZE chunks",
+            "COMMIT",
+        ]
+
+    def test_rows_go_over_binary_copy_with_their_types(self) -> None:
+        conn = FakeConnection([FakeCursor(), FakeCursor(), FakeCursor(row=(_HNSW_DEF,))])
+        chunk = _chunk("docaaa", 0)
+        store_with(conn).replace_corpus([_document("docaaa")], [chunk])
+        (doc_sql, doc_types, doc_rows), (chunk_sql, chunk_types, chunk_rows) = conn.copies
+        assert "FROM STDIN (FORMAT binary)" in doc_sql and "FROM STDIN (FORMAT binary)" in chunk_sql
+        assert doc_types == ["text", "text", "text", "text", "int4", "timestamptz"]
+        assert doc_rows == [("docaaa", "/abs/corpus/docaaa.md", "md", "deadbeef", 1, INGESTED_AT)]
+        assert chunk_types[7] == "vector" and chunk_types[8] == "jsonb"
+        (row,) = chunk_rows
+        assert row[0] == "docaaa::0"
+        assert row[7] is chunk.embedding  # the Vector itself: dumped binary, bit for bit
+        assert row[8] == {"source": "/abs/corpus/docaaa.md"}
+
+    def test_a_lost_index_is_rebuilt_from_the_schema_definition(self) -> None:
+        conn = FakeConnection([FakeCursor(), FakeCursor(), FakeCursor(row=None)])
+        store_with(conn).replace_corpus([], [])
+        assert "DROP INDEX chunks_embedding_hnsw" not in conn.events
+        assert (
+            "CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops)"
+            in conn.events
+        )
+
+    def test_a_stream_that_raises_rolls_the_whole_replace_back(self) -> None:
+        conn = FakeConnection([FakeCursor(), FakeCursor(), FakeCursor(row=(_HNSW_DEF,))])
+
+        def damaged() -> Iterator[CorpusChunkRow]:
+            yield _chunk("docaaa", 0)
+            raise ValueError("chunks.jsonl does not match its recorded sha256")
+
+        with pytest.raises(ValueError, match="does not match"):
+            store_with(conn).replace_corpus([_document("docaaa")], damaged())
+        assert conn.events[-1] == "ROLLBACK"
+        assert "COMMIT" not in conn.events
+        assert not any(event.startswith("CREATE INDEX") for event in conn.events)
+
+    def test_tables_held_past_the_timeout_refuse_cleanly(self) -> None:
+        conn = FakeConnection()
+        conn.fail_on["TRUNCATE"] = psycopg.errors.LockNotAvailable("lock timeout")
+        with pytest.raises(CorpusTablesBusy, match="nothing was replaced"):
+            store_with(conn).replace_corpus([_document("docaaa")], [])
+        assert conn.events[-1] == "ROLLBACK"
+        assert conn.copies == []
+
+
+class TestIndexRows:
+    def test_the_five_bm25_fields_stream_through_a_server_side_cursor(self) -> None:
+        conn = FakeConnection()
+        conn.streams = [[("d::0", "d", 0, "c0", "x c0"), ("d::1", "d", 1, "c1", "x c1")]]
+        rows = list(store_with(conn).iter_index_rows())
+        assert rows == [
+            CorpusIndexRow("d::0", "d", 0, "c0", "x c0"),
+            CorpusIndexRow("d::1", "d", 1, "c1", "x c1"),
+        ]
+        ((name, binary, itersize, sql),) = conn.server_cursors
+        assert name and binary is False and itersize == 500
+        assert "embedding" not in sql and "ORDER BY original_index" in sql
+        assert conn.events[0] == "BEGIN" and conn.events[-1] == "COMMIT"

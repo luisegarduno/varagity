@@ -5,8 +5,9 @@
  *
  * The API's dependency preflight emits `<service>_unreachable` codes
  * (`es_unreachable`, `llamacpp_unreachable`, …); the client itself adds
- * `network_error` when the fetch never reached the API. Anything else is
- * unrecognized and surfaces its raw code + message.
+ * `network_error` when the fetch never reached the API. `corpus_restoring`
+ * is the corpus being replaced from a backup (ADR-019) — a wait, not a
+ * fault. Anything else is unrecognized and surfaces its raw code + message.
  */
 
 /** What the error banner renders for one chat failure. */
@@ -61,6 +62,15 @@ export function describeChatError(error: {
       title: `${name} is unreachable`,
       hint: "Is the stack up?",
       command: COMPOSE_UP,
+      action: "retry",
+      raw: false,
+    };
+  }
+  if (error.code === "corpus_restoring") {
+    return {
+      title: "The corpus is being restored",
+      hint: "A backup restore is replacing it — ask again once the restore finishes.",
+      command: null,
       action: "retry",
       raw: false,
     };

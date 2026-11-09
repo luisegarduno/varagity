@@ -680,6 +680,40 @@ read, not an unpack. Chat history, conversation folders and settings-drawer
 overrides are deliberately **not** in a bundle: it backs up the corpus, not
 the app.
 
+### Restoring a bundle
+
+A restore **replaces** the corpus with the bundle's rows; nothing is merged,
+and nothing is re-parsed, re-chunked, re-contextualized or re-embedded. How
+it reads the bundle back:
+
+- **Two depths of checking.** Every listed bundle gets the *cheap verdict*
+  (`inspect_bundle`): the zip directory and `bundle.json` only. The format
+  version, the corpus, the member allowlist (exactly the three RAG members),
+  the zip-slip rules (no `..`, absolute path, backslash or symlink entry),
+  each member's recorded size against the zip's, the vector matrix's size
+  against `counts.chunks × embedding_dim × 4`, and finally the embedding
+  model and dimension against this stack's. A restore then adds the sha256
+  of every member (`verify_bundle`) and checks the digests again while it
+  streams the members into `COPY`, so even a file swapped after verification
+  can't commit. A mismatch in the model, dimension, corpus or version is
+  **refused, never converted** (`bundle_incompatible`); anything unsound or
+  damaged is `bundle_invalid`.
+- **Re-rooting.** Each document's `source` becomes
+  `(DOCS_PATH / relative_path).resolve()`, exactly as ingest builds it, and
+  every chunk's `metadata.source` follows its document. `doc_id`,
+  `chunk_id`, `original_index`, the blurbs, the vectors and every timestamp
+  come back as exported. A document with no `relative_path` (ingested from
+  outside the corpus) keeps its absolute `source`. So a bundle exported in
+  compose (`/app/docs/…`) restores onto a host-mode `./docs` and back, and
+  the document list, page previews and "also remove the file" keep working.
+- **The stale flag is derived.** `_corpus_stale` is set when the bundle's
+  `stale` was, or when its `ingest_settings` differ from this stack's
+  reingest-affecting settings — the same "the corpus may not match the
+  current settings" the flag always means. The list reports those differing
+  settings as `drift` before you restore.
+- **The BM25 index is rebuilt from the restored rows** — every one of its
+  fields is a copy of a `chunks` column ([below](#elasticsearch-index)).
+
 ## Golden eval dataset
 
 `data/eval/golden_qa.jsonl` — one JSON object per line:

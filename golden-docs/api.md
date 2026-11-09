@@ -38,12 +38,15 @@ The code vocabulary, as built:
 | `modified_mismatch` | 422 | `POST /api/documents` when the `modified` form field (per-file last-modified epoch-ms; restamps each stored file's mtime so `file_modified_at` provenance survives the upload) doesn't pair 1:1 with `files`. Malformed *entries* are ignored per file, not errors. |
 | `too_many_files` / `batch_too_large` | 422 | `POST /api/documents` when the batch busts `UPLOAD_MAX_FILES` / `UPLOAD_MAX_TOTAL_MB` — rejected before any byte is written. Per-file problems (`invalid_path`, `path_too_deep`, `extension_not_allowed`, `file_too_large`, `reserved_path` — a path under, or a flat file named, the reserved `varagity-exports` backup folder — …) are **not** errors: they ride `UploadedFileOut.reason` inside the 201. |
 | `nothing_to_export` | 422 | `POST /api/backups/{corpus}/export` when the corpus holds no documents — an empty bundle is not a backup. |
-| `bundle_not_found` | 404 | `GET /api/backups/{corpus}/files/{name}` for any name that is not a bundle file inside the corpus's `varagity-exports/` folder — hidden and in-flight `.partial` files, non-`.zip` names, and names (or symlinks) leading out of the folder included. |
+| `bundle_invalid` | 422 | `POST /api/backups/{corpus}/restore` for a bundle that isn't sound: no readable `bundle.json`, an unsafe member (`..`, an absolute path, a symlink), an unexpected, missing or unrecorded member, a member whose recorded size differs from the zip's, a vector matrix that disagrees with the chunk count — or a member whose bytes don't match their recorded sha256 (*damaged*: the list then shows that bundle as damaged until the file changes). Nothing was touched. |
+| `bundle_incompatible` | 422 | `POST /api/backups/{corpus}/restore` for a sound bundle this stack must not restore: another bundle format version, another corpus, or vectors from another embedding model or dimension. Refused, never converted — neither store checks the model, so a mismatch would restore cleanly and then retrieve the wrong passages. |
+| `bundle_not_found` | 404 | `GET /api/backups/{corpus}/files/{name}` and `POST /api/backups/{corpus}/restore` for any name that is not a bundle file inside the corpus's `varagity-exports/` folder — hidden and in-flight `.partial` files, non-`.zip` names, and names (or symlinks) leading out of the folder included. |
 | `conversation_not_found` | 404 | `POST /api/chat` (pre-stream) and the conversation routes. |
 | `document_not_found` | 404 | `DELETE /api/documents/{doc_id}` and the two `…/preview/*` routes — the bulk `POST /api/documents/delete` reports unknown ids in `not_found` rather than failing the batch. |
 | `preview_disabled`, `unsupported_type`, `file_missing`, `file_changed`, `conversion_unavailable`, `conversion_failed`, `page_out_of_range` | 404 | `GET /api/documents/{doc_id}/preview/page/{page}` only — an `<img>` can't read a JSON envelope, so the page route turns each degrade reason into a 404 code. The locate route reports the same conditions inside a **200** envelope instead ([below](#the-preview-pair-degradable-by-design)). |
 | `ingest_already_running` | 409 | `POST /api/ingest` while a run is in flight (one run at a time). |
-| `corpus_busy` | 409 | `POST /api/backups/{corpus}/export` while another operation holds the corpus's write gate — a second export included. The message names the holder (`an export is running`). |
+| `corpus_busy` | 409 | One writer per corpus. `POST /api/backups/{corpus}/export` and `…/restore` while another operation holds the corpus's write gate — a second backup run included; `POST /api/ingest` while a backup export or restore holds the RAG gate; the two document delete routes while a backup export or restore holds it. A restore is also refused while an ingest *in another process* (a CLI `main.py ingest` / `chat`) holds the corpus's advisory lock. The message names the holder (`a restore is running`). |
+| `corpus_restoring` | 503 | `POST /api/chat`, before the stream opens, while a backup restore is replacing the corpus that would answer the turn (a graph turn the graph answers is unaffected by a document restore). Ask again once the restore finishes. |
 | `<service>_unreachable` | 503 | Dependency preflights and per-request store construction: `postgres_unreachable`, `es_unreachable`, `llamacpp_unreachable`, `infinity_unreachable`. |
 | `docs_path_not_writable` | 500 | `POST /api/documents` when `DOCS_PATH` rejects writes (the container-UID gotcha — see the runbook); `POST /api/backups/rag/export` when `docs/varagity-exports/` can't be created or written (the same gotcha, or a *file* squatting on the folder's name). |
 | `internal_error` | 500 | Any unhandled exception (enveloped by the middleware). |
@@ -89,7 +92,8 @@ with zero `stats` frames, so clients must treat their absence as normal.
 **Failure surfaces split by stream state.** Everything detectable before
 streaming is a clean structured status, checked cheapest-first: body shape
 (422 `validation_error`) → retrieval-method / chat-engine resolution (422
-`unknown_retrieval_method` / `unknown_chat_engine`) → dependency preflight (503
+`unknown_retrieval_method` / `unknown_chat_engine`) → the corpus that would
+answer being mid-restore (503 `corpus_restoring`) → dependency preflight (503
 `<service>_unreachable`, probing `postgres`, `elasticsearch`, `llamacpp`,
 `infinity` — prefect is deliberately absent: without a server, flows fall
 back to an ephemeral in-process API, so chat works untracked) → conversation
@@ -148,8 +152,30 @@ status, never a failed run:
 4. `409 corpus_busy` while any operation holds the corpus.
 
 The last one is a per-corpus **write gate**, not a per-runner flag: one
-operation per corpus at a time, a second export included. Only `rag` is a
-valid `{corpus}` today; anything else is a `422 validation_error`.
+operation per corpus at a time — ingest, export and restore all claim it, so
+a second backup run is refused too. Only `rag` is a valid `{corpus}` today;
+anything else is a `422 validation_error`.
+
+`POST /api/backups/{corpus}/restore` with `{"name": "<bundle>"}` starts a
+restore the same way. A restore **replaces** the corpus: its rows in both
+stores become the bundle's, re-rooted onto this stack's `DOCS_PATH`, with no
+model call, and the BM25 index is rebuilt from them. Its refusals, in order,
+again all before the 202:
+
+1. `503 postgres_unreachable` / `es_unreachable` — the two stores it writes.
+2. `404 bundle_not_found` — no such bundle in the folder.
+3. `409 corpus_busy` — another operation holds the corpus. Checked before the
+   expensive step below.
+4. `422 bundle_invalid` / `bundle_incompatible` — the bundle's verdict, plus
+   the sha256 of **every member** (the list never hashes; only this does). A
+   sha256 mismatch is remembered in-process by name, size and mtime, so the
+   list then reports that bundle as damaged.
+5. `409 corpus_busy` — an ingest in another process holds the corpus's
+   advisory lock.
+
+While a restore runs, `POST /api/chat` against that corpus answers `503
+corpus_restoring`, `GET /api/documents` waits for the restore's commit, and
+the document deletes answer `409 corpus_busy`.
 
 `GET /api/backups/{corpus}/status` has the ingest stream's **replay-from-frame-one**
 semantics. A subscriber gets the run's whole backlog, then live events until
@@ -158,9 +184,9 @@ idle `status` frame (`run: null`).
 
 | Event | Payload | Fields |
 |---|---|---|
-| `status` | `BackupStatusEvent` | `run` (`BackupRunOut`: `run_id`, `corpus`, `operation` `export`, `state` `running`/`completed`/`failed`, timestamps, run-level `error`). A completed export adds `bundle` (the file name), `saved_to` (`docs/varagity-exports/<name>`, the checkout-relative path the panel's Copy path copies) and `summary` (`counts`, `size_bytes`, `wall_clock_s`). The first frame is the snapshot and the last is the terminal state. |
-| `progress` | `BackupProgressEvent` | `stage` (`snapshot` \| `documents` \| `chunks` \| `finalize`), plus `current`/`total` rows for the two counted stages. Throttled to about 50 frames per stage, so a large corpus doesn't flood the stream. |
-| `log` | `BackupLogEvent` | `level`, `message`: relayed `varagity.backup` records. These include what was exported, a swept partial from an interrupted export, and a warning when rows record an embedding model other than `EMBEDDING_MODEL`. |
+| `status` | `BackupStatusEvent` | `run` (`BackupRunOut`: `run_id`, `corpus`, `operation` `export`/`restore`, `state` `running`/`completed`/`failed`, timestamps, run-level `error`). A completed export adds `bundle` (the file name), `saved_to` (`docs/varagity-exports/<name>`, the checkout-relative path the panel's Copy path copies) and `summary` (`counts`, `size_bytes`, `wall_clock_s`). A restore names its `bundle` from the first frame; its `summary` counts what it wrote (`documents`, `chunks`, `bm25`) and adds `stale`, the corpus-stale flag it left. The first frame is the snapshot and the last is the terminal state. |
+| `progress` | `BackupProgressEvent` | `stage` — an export's `snapshot` \| `documents` \| `chunks` \| `finalize`, a restore's `validate` \| `load` \| `index` \| `bm25` — plus `current`/`total` rows for the counted stages (`documents`, `chunks`; `load` and `bm25` count chunks). Throttled to about 50 frames per stage, so a large corpus doesn't flood the stream. |
+| `log` | `BackupLogEvent` | `level`, `message`: relayed `varagity.backup` records. These include what was exported or restored, a swept partial from an interrupted export, and a warning when rows record an embedding model other than `EMBEDDING_MODEL`. |
 
 The terminal transition is atomic: the run turns terminal, its last frame
 joins the backlog, and the corpus is released together. A client that
@@ -172,7 +198,13 @@ The other two backup routes are plain:
 - `GET /api/backups/{corpus}` lists the folder's bundles, newest first. Each
   entry carries its `bundle.json` manifest, read alone through the zip's
   central directory, or `manifest: null` for a zip that isn't a readable
-  Varagity backup.
+  Varagity backup — and the **cheap restore verdict**: `restorable`, the
+  `reason` when it isn't (the same reasons a restore's 422 gives, worded for
+  the panel), and `drift`, the reingest-affecting settings the bundle was
+  made under that differ from this stack's (restoring it flags the corpus
+  stale; drift never refuses). The verdict reads only the zip directory and
+  the manifest, so a bundle damaged inside an intact zip lists as
+  restorable until its first restore refuses it.
 - `GET /api/backups/{corpus}/files/{name}` returns one bundle as
   `application/zip` with `Content-Disposition: attachment`. The panel's
   Download is a plain link, so no cross-origin fetch (and no CORS) is

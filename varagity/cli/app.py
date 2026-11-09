@@ -12,12 +12,18 @@ Every subcommand runs through the Prefect flows
 (``varagity.pipeline``), invoked directly in-process — no worker or
 deployment (spec §21 #8) — so every ingest stage and every question is a
 tracked run at the Prefect UI (``:4200``).
+
+An ingest refused by the corpus lock — a backup restore holds the corpus
+(ADR-019) — is not a crash: ``ingest`` and ``chat`` say so in one line and
+exit 1. They ask the lock *before* the tracked flow starts, so no failed
+flow run's traceback lands above that line.
 """
 
 import argparse
 import logging
 from typing import Any
 
+import psycopg
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -40,6 +46,7 @@ from varagity.pipeline import (
 )
 from varagity.retrieval import get_retriever
 from varagity.stores.records import RetrievedChunk
+from varagity.stores.vector_store import ContextualVectorDB, CorpusLocked
 
 logger = logging.getLogger(__name__)
 
@@ -224,11 +231,55 @@ def _run_ingest(verbose: int, *, reingest: bool = False) -> int:
             ``--reingest`` flag).
 
     Returns:
-        ``0`` on success, ``1`` if any file failed to ingest.
+        ``0`` on success, ``1`` if any file failed to ingest — or if a
+        backup restore holds the corpus, so nothing was ingested.
     """
-    summary = ingest_flow(reingest=reingest, verbose=verbose)
+    refusal = _restore_refusal()
+    if refusal is not None:
+        _show_corpus_locked(refusal)
+        return 1
+    try:
+        summary = ingest_flow(reingest=reingest, verbose=verbose)
+    except CorpusLocked as error:  # a restore that began since the probe
+        _show_corpus_locked(error)
+        return 1
     _show_ingest_summary(summary)
     return 1 if summary.failed else 0
+
+
+def _restore_refusal() -> CorpusLocked | None:
+    """Ask the corpus lock, before the ingest flow starts, whether a restore holds it.
+
+    The flow takes the lock for real and would be refused all the same —
+    but inside a tracked run, so Prefect would log a failed flow run, with
+    its traceback, above the one-line answer. Asking first (shared, given
+    straight back) keeps a refused ingest to that one line; a restore that
+    starts in the moment between is still refused by the flow.
+
+    Returns:
+        The refusal when a restore holds the corpus; ``None`` when it is
+        free — or when Postgres can't be reached, which the flow then
+        reports as it always has.
+    """
+    try:
+        with ContextualVectorDB() as store, store.corpus_lock(exclusive=False):
+            return None
+    except CorpusLocked as error:
+        return error
+    except psycopg.Error:
+        return None
+
+
+def _show_corpus_locked(error: CorpusLocked) -> None:
+    """Say, in one line, that the corpus lock refused the ingest.
+
+    Args:
+        error: The refusal (its message names the restore holding the
+            corpus).
+    """
+    # soft_wrap: one logical line, never hard-wrapped by rich at the
+    # console width (the terminal wraps it, if it must).
+    console.print(f"[bold red]Not ingesting:[/] {error}", highlight=False, soft_wrap=True)
 
 
 def _run_chat(verbose: int) -> int:
@@ -246,11 +297,20 @@ def _run_chat(verbose: int) -> int:
         verbose: Effective console verbosity.
 
     Returns:
-        ``0`` on clean exit (``:quit`` or end-of-input).
+        ``0`` on clean exit (``:quit`` or end-of-input); ``1`` when a backup
+        restore holds the corpus, so the startup ingest was refused.
     """
     settings = get_settings()
 
-    summary = ingest_flow(verbose=verbose)
+    refusal = _restore_refusal()
+    if refusal is not None:
+        _show_corpus_locked(refusal)
+        return 1
+    try:
+        summary = ingest_flow(verbose=verbose)
+    except CorpusLocked as error:  # a restore that began since the probe
+        _show_corpus_locked(error)
+        return 1
     _show_ingest_summary(summary)
     if summary.failed:
         logger.warning(

@@ -7,7 +7,9 @@ and the one-member manifest read the listing depends on.
 """
 
 import hashlib
+import json
 import os
+import stat
 import zipfile
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -21,16 +23,22 @@ from varagity.backup.bundle import (
     BUNDLE_FORMAT,
     BUNDLE_VERSION,
     MANIFEST_NAME,
+    BundleDamaged,
+    BundleIncompatible,
     BundleInvalid,
     BundleManifest,
+    BundleVerdict,
     bundle_name,
     corpus_root,
     display_path,
     exports_dir,
+    inspect_bundle,
     is_bundle_name,
     list_bundles,
+    open_bundle,
     read_manifest,
     sweep_partials,
+    verify_bundle,
     write_bundle,
 )
 
@@ -219,7 +227,7 @@ class TestNamesAndPartials:
     def test_partials_are_never_listed(self, exports: Path) -> None:
         write_sample(exports)
         (exports / ".varagity-rag-20261108-1400.zip.partial").write_bytes(b"in flight")
-        assert [listing.name for listing in list_bundles(exports)] == [
+        assert [listing.name for listing in list_bundles(exports, "rag")] == [
             "varagity-rag-20261108-1312.zip"
         ]
 
@@ -227,9 +235,9 @@ class TestNamesAndPartials:
         with write_bundle(exports, "rag", created_at=WHEN) as writer:
             with writer.member("documents.jsonl") as sink:
                 sink.write(b"{}\n")
-            assert list_bundles(exports) == []
+            assert list_bundles(exports, "rag") == []
             writer.seal(**seal_defaults())
-        assert [listing.name for listing in list_bundles(exports)] == [writer.result.name]
+        assert [listing.name for listing in list_bundles(exports, "rag")] == [writer.result.name]
 
     def test_the_next_export_sweeps_only_its_own_corpus_partials(self, exports: Path) -> None:
         exports.mkdir(parents=True)
@@ -269,21 +277,21 @@ class TestReadManifestRefusals:
     def test_not_a_zip(self, tmp_path: Path) -> None:
         path = tmp_path / "fake.zip"
         path.write_bytes(b"this is not a zip")
-        with pytest.raises(BundleInvalid, match="not a readable zip"):
+        with pytest.raises(BundleInvalid, match="fake.zip: Not a readable zip"):
             read_manifest(path)
 
     def test_a_zip_without_a_manifest(self, tmp_path: Path) -> None:
         path = tmp_path / "plain.zip"
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("readme.txt", "hello")
-        with pytest.raises(BundleInvalid, match="has no bundle.json"):
+        with pytest.raises(BundleInvalid, match="plain.zip: No bundle.json"):
             read_manifest(path)
 
     def test_a_manifest_that_is_not_a_varagity_one(self, tmp_path: Path) -> None:
         path = tmp_path / "other.zip"
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr(MANIFEST_NAME, '{"format": "something-else", "version": 1}')
-        with pytest.raises(BundleInvalid, match="not a varagity manifest"):
+        with pytest.raises(BundleInvalid, match="other.zip: .* not a Varagity manifest"):
             read_manifest(path)
 
     def test_an_absurdly_large_manifest(
@@ -297,14 +305,14 @@ class TestReadManifestRefusals:
 
 class TestListing:
     def test_a_missing_folder_lists_nothing(self, exports: Path) -> None:
-        assert list_bundles(exports) == []
+        assert list_bundles(exports, "rag") == []
 
     def test_newest_first_with_manifests(self, exports: Path) -> None:
         older = write_sample(exports, when=datetime(2026, 10, 19, 9, 4, tzinfo=UTC))
         newer = write_sample(exports)
         os.utime(older, (1_000_000, 1_000_000))
         os.utime(newer, (2_000_000, 2_000_000))
-        listings = list_bundles(exports)
+        listings = list_bundles(exports, "rag")
         assert [listing.name for listing in listings] == [newer.name, older.name]
         assert listings[0].size_bytes == newer.stat().st_size
         assert listings[0].modified_at == datetime.fromtimestamp(2_000_000, tz=UTC)
@@ -315,7 +323,7 @@ class TestListing:
         with zipfile.ZipFile(exports / "photos.zip", "w") as archive:
             archive.writestr("a.jpg", b"...")
         (exports / "notes.txt").write_text("not a zip")
-        listings = list_bundles(exports)
+        listings = list_bundles(exports, "rag")
         assert [(listing.name, listing.manifest) for listing in listings] == [("photos.zip", None)]
 
     def test_a_symlink_leading_out_of_the_folder_is_not_listed(
@@ -324,7 +332,7 @@ class TestListing:
         outside = write_sample(tmp_path / "elsewhere")
         exports.mkdir(parents=True)
         (exports / "link.zip").symlink_to(outside)
-        assert list_bundles(exports) == []
+        assert list_bundles(exports, "rag") == []
 
 
 class TestLocations:
@@ -342,3 +350,353 @@ class TestLocations:
         assert display_path("rag") == "docs/varagity-exports/"
         assert display_path("rag", "b.zip") == "docs/varagity-exports/b.zip"
         assert display_path("graph", "g.zip") == "graph-docs/varagity-exports/g.zip"
+
+
+# ── the restore verdicts (phase 2) ────────────────────────────────────────
+
+DIM = 4
+
+
+@pytest.fixture
+def stack(settings_env: Callable[..., None]) -> None:
+    """This stack's embedding space — the one the sample bundles were made in."""
+    settings_env(EMBEDDING_MODEL="test-model", EMBEDDING_DIM=DIM)
+
+
+def rag_members(chunks: int = 2) -> dict[str, bytes]:
+    """A RAG bundle's three data members with a consistent layout."""
+    return {
+        "documents.jsonl": b'{"doc_id":"a"}\n',
+        "chunks.jsonl": b"".join(b'{"chunk_id":"a::%d"}\n' % i for i in range(chunks)),
+        "embeddings.f32": bytes(range(chunks * DIM * 4)),
+    }
+
+
+def craft(
+    path: Path,
+    *,
+    members: dict[str, bytes] | None = None,
+    manifest: dict[str, Any] | None = None,
+    records: list[dict[str, Any]] | None = None,
+    extra: tuple[tuple[zipfile.ZipInfo | str, bytes], ...] = (),
+) -> Path:
+    """Hand-build a bundle zip: data members, any extra entries, then bundle.json.
+
+    The manifest records every member's real size and sha256 unless
+    ``records`` (or a ``manifest`` override of ``members``) says otherwise.
+    """
+    contents = rag_members() if members is None else members
+    document: dict[str, Any] = {
+        "format": BUNDLE_FORMAT,
+        "version": BUNDLE_VERSION,
+        "corpus": "rag",
+        "created_at": WHEN.isoformat(),
+        "embedding_model": "test-model",
+        "embedding_dim": DIM,
+        "stale": False,
+        "counts": {"documents": 1, "chunks": 2},
+        "ingest_settings": {"CHUNK_SIZE": "400"},
+        "members": records
+        if records is not None
+        else [
+            {"name": name, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in contents.items()
+        ],
+    }
+    document.update(manifest or {})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in contents.items():
+            archive.writestr(name, data)
+        for entry, data in extra:
+            archive.writestr(entry, data)
+        archive.writestr(MANIFEST_NAME, json.dumps(document))
+    return path
+
+
+def verdict_of(path: Path, corpus: str = "rag") -> BundleVerdict:
+    return inspect_bundle(path, corpus)  # type: ignore[arg-type]
+
+
+class TestVerdicts:
+    def test_a_sound_bundle_is_restorable(self, exports: Path, stack: None) -> None:
+        verdict = verdict_of(write_sample(exports))
+        assert verdict.restorable is True
+        assert verdict.reason is None
+        assert verdict.manifest is not None and verdict.manifest.counts["chunks"] == 2
+        assert verdict.manifest_or_raise() is verdict.manifest
+
+    def test_another_format_version_is_incompatible_not_unreadable(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        # A later layout may not validate as this one: the version decides first.
+        path = craft(tmp_path / "v2.zip", manifest={"version": 2, "corpus": "everything"})
+        verdict = verdict_of(path)
+        assert isinstance(verdict.problem, BundleIncompatible)
+        assert verdict.reason == "Bundle format version 2 — this stack reads version 1."
+        assert verdict.manifest is None
+        with pytest.raises(BundleIncompatible):
+            verdict.manifest_or_raise()
+
+    def test_a_bundle_of_the_other_corpus_is_incompatible(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        verdict = verdict_of(craft(tmp_path / "g.zip", manifest={"corpus": "graph"}))
+        assert isinstance(verdict.problem, BundleIncompatible)
+        assert verdict.reason == "A message graph backup — it cannot restore the document corpus."
+        assert verdict.manifest is not None  # still described: counts, dates, …
+
+    def test_another_embedding_model_is_incompatible(self, tmp_path: Path, stack: None) -> None:
+        verdict = verdict_of(craft(tmp_path / "m.zip", manifest={"embedding_model": "BAAI/bge-m3"}))
+        assert isinstance(verdict.problem, BundleIncompatible)
+        assert verdict.reason == ("Embedded with BAAI/bge-m3 — this stack embeds with test-model.")
+
+    def test_another_embedding_dimension_is_incompatible(self, tmp_path: Path, stack: None) -> None:
+        # A consistent 8-dimensional bundle: the layout holds, the stack's dim doesn't.
+        members = {**rag_members(), "embeddings.f32": bytes(2 * 8 * 4)}
+        verdict = verdict_of(
+            craft(tmp_path / "d.zip", members=members, manifest={"embedding_dim": 8})
+        )
+        assert isinstance(verdict.problem, BundleIncompatible)
+        assert verdict.reason == ("8-dimensional embeddings — this stack embeds into 4 dimensions.")
+
+    @pytest.mark.parametrize(
+        ("entry", "why"),
+        [
+            ("../escape.txt", "it climbs out of the bundle"),
+            ("/etc/cron.d/evil", "an absolute path"),
+            ("C:/windows/evil", "an absolute path"),
+            ("a\\b.txt", "a backslash in its path"),
+            ("a//b.txt", "an empty or '.' path segment"),
+        ],
+    )
+    def test_unsafe_member_paths_are_invalid(
+        self, tmp_path: Path, stack: None, entry: str, why: str
+    ) -> None:
+        path = craft(tmp_path / "evil.zip", extra=((entry, b"payload"),))
+        verdict = verdict_of(path)
+        assert type(verdict.problem) is BundleInvalid
+        assert verdict.reason == f"Unsafe member {entry!r}: {why}."
+
+    def test_a_symlink_member_is_invalid(self, tmp_path: Path, stack: None) -> None:
+        link = zipfile.ZipInfo("link")
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        verdict = verdict_of(craft(tmp_path / "link.zip", extra=((link, b"/etc/passwd"),)))
+        assert verdict.reason == "Unsafe member 'link': a symlink."
+
+    def test_a_member_outside_the_allowlist_is_invalid(self, tmp_path: Path, stack: None) -> None:
+        members = {**rag_members(), "notes.txt": b"hi"}
+        verdict = verdict_of(craft(tmp_path / "extra.zip", members=members))
+        assert verdict.reason == "Unexpected member(s): notes.txt."
+
+    def test_a_member_the_manifest_records_but_the_zip_lacks_is_invalid(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        members = rag_members()
+        records = [
+            {"name": name, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in members.items()
+        ]
+        del members["chunks.jsonl"]
+        verdict = verdict_of(craft(tmp_path / "short.zip", members=members, records=records))
+        assert verdict.reason == "Missing member(s): chunks.jsonl."
+
+    def test_an_allowed_member_the_manifest_does_not_record_is_invalid(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        members = rag_members()
+        records = [
+            {"name": name, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in members.items()
+            if name != "embeddings.f32"
+        ]
+        del members["embeddings.f32"]
+        verdict = verdict_of(craft(tmp_path / "unrecorded.zip", members=members, records=records))
+        assert verdict.reason == "bundle.json does not record embeddings.f32."
+
+    def test_a_duplicated_entry_is_invalid(self, tmp_path: Path, stack: None) -> None:
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            path = craft(tmp_path / "dup.zip", extra=(("chunks.jsonl", b"again"),))
+        assert verdict_of(path).reason == "The zip holds 'chunks.jsonl' more than once."
+
+    def test_a_member_the_manifest_lists_twice_is_invalid(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        members = rag_members()
+        records = [
+            {"name": name, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in members.items()
+        ]
+        path = craft(tmp_path / "twice.zip", members=members, records=[*records, records[0]])
+        assert verdict_of(path).reason == "bundle.json lists 'documents.jsonl' more than once."
+
+    def test_a_recorded_size_that_differs_from_the_zips_is_invalid(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        members = rag_members()
+        records = [
+            {
+                "name": name,
+                "size_bytes": len(data) + (1 if name == "chunks.jsonl" else 0),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+            for name, data in members.items()
+        ]
+        verdict = verdict_of(craft(tmp_path / "size.zip", members=members, records=records))
+        assert type(verdict.problem) is BundleInvalid
+        assert verdict.reason is not None
+        size = len(members["chunks.jsonl"])
+        assert verdict.reason == (
+            f"chunks.jsonl is {size} bytes in the zip but {size + 1} in bundle.json — the "
+            "bundle is damaged."
+        )
+
+    def test_a_vector_matrix_that_disagrees_with_the_chunk_count_is_invalid(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        verdict = verdict_of(
+            craft(tmp_path / "rows.zip", manifest={"counts": {"documents": 1, "chunks": 3}})
+        )
+        assert verdict.reason == (
+            "embeddings.f32 is 32 bytes, but 3 chunk(s) of 4 float32s take 48 — the bundle is "
+            "damaged."
+        )
+
+    def test_missing_counts_are_invalid(self, tmp_path: Path, stack: None) -> None:
+        verdict = verdict_of(craft(tmp_path / "counts.zip", manifest={"counts": {}}))
+        assert verdict.reason == "bundle.json does not record its document and chunk counts."
+
+    def test_a_corpus_without_restore_rules_is_incompatible(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        path = craft(tmp_path / "g.zip", manifest={"corpus": "graph"})
+        verdict = verdict_of(path, "graph")
+        assert isinstance(verdict.problem, BundleIncompatible)
+        assert verdict.reason == "This stack cannot restore message graph backups yet."
+
+    def test_unreadable_files_get_a_reason_not_an_exception(self, tmp_path: Path) -> None:
+        junk = tmp_path / "junk.zip"
+        junk.write_bytes(b"not a zip at all")
+        verdict = verdict_of(junk)
+        assert verdict.manifest is None and verdict.reason is not None
+        assert verdict.reason.startswith("Not a readable zip file")
+        plain = tmp_path / "plain.zip"
+        with zipfile.ZipFile(plain, "w") as archive:
+            archive.writestr("photo.jpg", b"...")
+        assert verdict_of(plain).reason == "No bundle.json — not a Varagity backup."
+        broken = tmp_path / "broken.zip"
+        with zipfile.ZipFile(broken, "w") as archive:
+            archive.writestr(MANIFEST_NAME, "{not json")
+        assert verdict_of(broken).reason == "Its bundle.json is not a Varagity manifest (not JSON)."
+
+    def test_inspection_never_opens_a_data_member(
+        self, exports: Path, stack: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = write_sample(exports)
+        opened: list[str] = []
+        real_open = zipfile.ZipFile.open
+
+        def spy(self: zipfile.ZipFile, name: Any, *args: Any, **kwargs: Any) -> Any:
+            opened.append(name if isinstance(name, str) else name.filename)
+            return real_open(self, name, *args, **kwargs)
+
+        monkeypatch.setattr(zipfile.ZipFile, "open", spy)
+        assert verdict_of(path).restorable
+        assert opened == [MANIFEST_NAME]
+
+    def test_listings_carry_each_bundles_verdict(self, exports: Path, stack: None) -> None:
+        good = write_sample(exports)
+        bad = craft(exports / "other-model.zip", manifest={"embedding_model": "BAAI/bge-m3"})
+        os.utime(good, (2_000_000, 2_000_000))
+        os.utime(bad, (1_000_000, 1_000_000))
+        listings = list_bundles(exports, "rag")
+        assert [(listing.name, listing.verdict.restorable) for listing in listings] == [
+            (good.name, True),
+            (bad.name, False),
+        ]
+        assert listings[0].mtime_ns == 2_000_000 * 10**9
+        assert listings[1].manifest is not None  # an incompatible bundle is still described
+
+
+class TestVerification:
+    def test_a_sound_bundle_verifies_and_returns_its_manifest(
+        self, exports: Path, stack: None
+    ) -> None:
+        path = write_sample(exports)
+        assert verify_bundle(path, "rag") == read_manifest(path)
+
+    def test_verification_raises_the_cheap_verdicts_problem(
+        self, tmp_path: Path, stack: None
+    ) -> None:
+        path = craft(tmp_path / "m.zip", manifest={"embedding_model": "BAAI/bge-m3"})
+        with pytest.raises(BundleIncompatible, match="Embedded with BAAI/bge-m3"):
+            verify_bundle(path, "rag")
+
+    def test_a_member_whose_bytes_changed_is_damaged(self, tmp_path: Path, stack: None) -> None:
+        """★ Same sizes, re-zipped CRCs: only the sha256 can tell."""
+        members = rag_members()
+        records = [
+            {"name": name, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in members.items()
+        ]
+        tampered = {**members, "chunks.jsonl": members["chunks.jsonl"].replace(b"a::1", b"a::7")}
+        path = craft(tmp_path / "tampered.zip", members=tampered, records=records)
+        assert verdict_of(path).restorable  # the cheap verdict can't see it…
+        with pytest.raises(BundleDamaged, match="chunks.jsonl does not match its recorded sha256"):
+            verify_bundle(path, "rag")  # …the hash does
+
+    def test_a_crc_failure_is_damage_too(self, tmp_path: Path, stack: None) -> None:
+        """Bytes flipped inside the zip file itself (a stored member, so the CRC trips)."""
+        path = write_sample(tmp_path / "exports")
+        raw = bytearray(path.read_bytes())
+        marker = bytes(range(32))  # embeddings.f32's stored payload in write_sample
+        offset = raw.index(marker)
+        raw[offset] ^= 0xFF
+        path.write_bytes(bytes(raw))
+        with pytest.raises(BundleDamaged, match="embeddings.f32 could not be read"):
+            verify_bundle(path, "rag")
+
+    def test_member_streams_read_lines_and_check_on_exit(self, exports: Path, stack: None) -> None:
+        path = write_sample(exports)
+        manifest = read_manifest(path)
+        with open_bundle(path, manifest) as source:
+            with source.member("chunks.jsonl") as stream:
+                assert [line for line in stream] == [
+                    b'{"chunk_id":"a::0"}\n',
+                    b'{"chunk_id":"a::1"}\n',
+                ]
+            with source.member("embeddings.f32") as stream:
+                assert stream.read(4) == bytes(range(4))  # the rest is drained by the check
+            with pytest.raises(BundleInvalid, match="Missing member"):
+                source.member("nope.jsonl").__enter__()
+
+    def test_a_stream_abandoned_by_an_error_is_not_checked(
+        self, exports: Path, stack: None
+    ) -> None:
+        path = write_sample(exports)
+        with (
+            open_bundle(path, read_manifest(path)) as source,
+            pytest.raises(RuntimeError, match="the consumer gave up"),
+            source.member("chunks.jsonl") as stream,
+        ):
+            stream.readline()
+            raise RuntimeError("the consumer gave up")  # not a BundleDamaged
+
+    def test_an_unreadable_file_cannot_be_opened(self, tmp_path: Path) -> None:
+        junk = tmp_path / "junk.zip"
+        junk.write_bytes(b"nope")
+        manifest = BundleManifest.model_validate(
+            {
+                "format": BUNDLE_FORMAT,
+                "version": BUNDLE_VERSION,
+                "corpus": "rag",
+                "created_at": WHEN.isoformat(),
+                "embedding_model": "m",
+                "embedding_dim": DIM,
+                "stale": False,
+                "counts": {},
+                "members": [],
+            }
+        )
+        with pytest.raises(BundleInvalid, match="Not a readable zip"), open_bundle(junk, manifest):
+            pass

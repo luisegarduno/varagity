@@ -12,6 +12,7 @@ import dataclasses
 import importlib
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -21,6 +22,7 @@ from prefect.client.schemas.filters import FlowRunFilter
 from prefect.testing.utilities import prefect_test_harness
 from prometheus_client import REGISTRY
 
+from tests.unit.test_backup_rag import FakeRebuildBM25, FakeRestoreStore, rezip
 from tests.unit.test_backup_rag import FakeStore as FakeCorpusStore
 from tests.unit.test_backup_rag import chunk as backup_chunk
 from tests.unit.test_backup_rag import document as backup_document
@@ -707,3 +709,148 @@ class TestRagExportFlow:
         from varagity.pipeline import rag_export_flow
 
         assert rag_export_flow.retries in (0, None)
+
+
+class FakeFlagStore:
+    """Records the corpus-stale writes a flow makes."""
+
+    def __init__(self) -> None:
+        self.writes: list[bool] = []
+
+    def set_corpus_stale(self, stale: bool) -> None:
+        self.writes.append(stale)
+
+
+class TestRagRestoreFlow:
+    """The RAG restore's tracking shell — the backup package does the work (ADR-019)."""
+
+    SETTINGS = {"CHUNK_SIZE": "400"}
+
+    @pytest.fixture
+    def docs_root(self, tmp_path: Path, settings_env: Callable[..., None]) -> Path:
+        root = tmp_path / "docs"
+        root.mkdir()
+        settings_env(DOCS_PATH=str(root), EMBEDDING_MODEL="test-model", EMBEDDING_DIM=2)
+        return root
+
+    def bundle(self, docs_root: Path) -> Path:
+        from varagity.backup.rag import export_rag
+
+        store = FakeCorpusStore(
+            [backup_document("doc-a", str(docs_root / "a.md"), 1)],
+            [backup_chunk("doc-a", 0, 0, [0.5, 0.25])],
+        )
+        return export_rag(
+            docs_root / "varagity-exports", store, self.SETTINGS, stale=False
+        ).bundle.path
+
+    def test_rag_restore_is_a_tracked_flow_run_that_flags_stale_on_completion(
+        self, docs_root: Path
+    ) -> None:
+        from varagity.pipeline import rag_restore_flow
+
+        flags = FakeFlagStore()
+        store = FakeRestoreStore()
+        frames: list[str] = []
+        state = rag_restore_flow(
+            self.bundle(docs_root),
+            ingest_settings=lambda: {"CHUNK_SIZE": "800"},  # the stack moved on
+            on_progress=lambda stage, current, total: frames.append(stage),
+            store=store,
+            bm25=FakeRebuildBM25(),
+            settings_store=flags,
+            return_state=True,
+        )
+        assert state.is_completed()
+        result = state.result()
+        assert rag_restore_flow.name == "rag-restore"
+        assert result.counts == {"documents": 1, "chunks": 1, "bm25": 1}
+        assert result.stale is True
+        assert flags.writes == [True]  # derived: the bundle's CHUNK_SIZE differs
+        assert frames[0] == "validate" and frames[-1] == "bm25"
+        assert [row.source for row in store.documents] == [str((docs_root / "a.md").resolve())]
+        with get_client(sync_client=True) as client:
+            run = client.read_flow_run(state.state_details.flow_run_id)
+        assert run.state is not None and run.state.is_completed()
+
+    def test_matching_settings_clear_the_flag(self, docs_root: Path) -> None:
+        from varagity.pipeline import rag_restore_flow
+
+        flags = FakeFlagStore()
+        result = rag_restore_flow(
+            self.bundle(docs_root),
+            ingest_settings=lambda: dict(self.SETTINGS),
+            store=FakeRestoreStore(),
+            bm25=FakeRebuildBM25(),
+            settings_store=flags,
+        )
+        assert result.stale is False
+        assert flags.writes == [False]
+
+    def test_a_failed_restore_writes_no_flag(self, docs_root: Path) -> None:
+        """★ Only a completed restore may say what the corpus now is."""
+        import zipfile
+
+        from varagity.backup.bundle import BundleDamaged
+        from varagity.pipeline import rag_restore_flow
+
+        bundle = self.bundle(docs_root)
+        with zipfile.ZipFile(bundle) as archive:
+            chunks = archive.read("chunks.jsonl")
+        damaged = rezip(
+            bundle, {"chunks.jsonl": chunks.replace(b"chunk 0", b"chunk 9")}, reseal=False
+        )
+        flags = FakeFlagStore()
+        with pytest.raises(BundleDamaged):
+            rag_restore_flow(
+                damaged,
+                ingest_settings=lambda: dict(self.SETTINGS),
+                store=FakeRestoreStore(),
+                bm25=FakeRebuildBM25(),
+                settings_store=flags,
+            )
+        assert flags.writes == []
+
+    def test_the_flow_opens_its_own_stores_when_none_are_given(
+        self, docs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from varagity.pipeline import rag_restore_flow
+
+        backup_flow_module = importlib.import_module("varagity.pipeline.backup_flow")
+        opened: list[str] = []
+        flags = FakeFlagStore()
+
+        def owned(name: str, value: object) -> Any:
+            class _Owned:
+                def __enter__(self) -> object:
+                    opened.append(name)
+                    return value
+
+                def __exit__(self, *exc: object) -> None:
+                    opened.append(f"{name} closed")
+
+            return lambda: _Owned()
+
+        monkeypatch.setattr(
+            backup_flow_module, "ContextualVectorDB", owned("store", FakeRestoreStore())
+        )
+        monkeypatch.setattr(
+            backup_flow_module, "ElasticsearchBM25", owned("bm25", FakeRebuildBM25())
+        )
+        monkeypatch.setattr(backup_flow_module, "AppSettingsStore", owned("settings", flags))
+        rag_restore_flow(self.bundle(docs_root), ingest_settings=lambda: dict(self.SETTINGS))
+        assert opened == [
+            "store",
+            "bm25",
+            "bm25 closed",
+            "store closed",
+            "settings",
+            "settings closed",
+        ]
+        assert flags.writes == [False]
+
+    def test_the_flow_carries_no_retries(self) -> None:
+        """A failed restore rolled back (or says what it left); the user presses Restore again."""
+        from varagity.pipeline import rag_restore_flow
+
+        assert rag_restore_flow.retries in (0, None)

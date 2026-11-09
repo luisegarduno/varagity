@@ -14,6 +14,9 @@
  *   `409 ingest_already_running`: files are already safely on disk at that
  *   point (upload and ingest are decoupled server-side), so the attach
  *   holds and re-issues when the in-flight run's stream reaches terminal.
+ *   `409 corpus_busy` is the same wait behind a backup export or restore
+ *   (ADR-019): the attach follows the *backup* stream to its terminal frame,
+ *   once per refusal, then re-issues — never a tight retry loop.
  *
  * The driver (`createAttachController`) takes its effects injected so the
  * state machine is unit-testable without a DOM or a network.
@@ -26,13 +29,16 @@ import { useMountEffect } from "@/hooks/use-mount-effect";
 import {
   ApiError,
   startIngest,
+  streamBackupStatus,
   streamIngestStatus,
   uploadDocuments,
+  type BackupEvent,
   type ConfigResponse,
   type IngestEvent,
   type UploadResponse,
   type UploadedFile,
 } from "@/lib/api";
+import { initialBackupView, reduceBackupEvent } from "@/lib/backup-reducer";
 import { filesFromDrop } from "@/lib/dropped-files";
 import {
   initialIngestView,
@@ -237,8 +243,13 @@ export type AttachPhase =
   | "done"
   | "error";
 
+/** What a queued attach waits behind: an ingest, or a backup run (by operation once known). */
+export type AttachQueue = "ingest" | "backup" | "export" | "restore";
+
 export interface AttachState {
   phase: AttachPhase;
+  /** What `phase === "queued"` is waiting for (`null` reads as an ingest). */
+  queuedBehind: AttachQueue | null;
   /** Files currently uploading (drives the "Uploading N files…" label). */
   pending: number;
   /** Files stored by this attach cycle (the "N documents added" label). */
@@ -252,6 +263,7 @@ export interface AttachState {
 
 export const initialAttachState: AttachState = {
   phase: "idle",
+  queuedBehind: null,
   pending: 0,
   stored: 0,
   skipped: null,
@@ -275,7 +287,16 @@ export function attachChipLabel(state: AttachState): string | null {
     case "uploading":
       return `Uploading ${state.pending} ${state.pending === 1 ? "file" : "files"}…`;
     case "queued":
-      return "Queued — waiting for the current ingest…";
+      switch (state.queuedBehind) {
+        case "restore":
+          return "Queued — waiting for the restore…";
+        case "export":
+          return "Queued — waiting for the export…";
+        case "backup":
+          return "Queued — waiting for the backup…";
+        default:
+          return "Queued — waiting for the current ingest…";
+      }
     case "ingesting": {
       const view = state.ingest;
       const stage = view?.currentStage
@@ -308,6 +329,11 @@ export interface AttachDeps {
   start: () => Promise<unknown>;
   /** The ingest-status SSE; ends at the watched run's terminal frame. */
   stream: (signal?: AbortSignal) => AsyncGenerator<IngestEvent, void, undefined>;
+  /**
+   * The RAG backup-status SSE — what a `409 corpus_busy` waits on (an
+   * export or restore holds the corpus); ends at that run's terminal frame.
+   */
+  backupStream: (signal?: AbortSignal) => AsyncGenerator<BackupEvent, void, undefined>;
   onState: (state: AttachState) => void;
   /** Called after each ingest cycle settles (cache invalidation). */
   onSettled?: () => void;
@@ -362,6 +388,26 @@ export function createAttachController(deps: AttachDeps): AttachController {
     return view;
   }
 
+  /**
+   * Follow the backup stream to its terminal frame (or its idle frame).
+   *
+   * Returns whether it showed a backup run to wait for — live, or replayed
+   * after it ended — which is what makes re-issuing worthwhile. A dropped
+   * stream returns `false` too: retrying on it could spin.
+   */
+  async function drainBackup(): Promise<boolean> {
+    let view = initialBackupView;
+    try {
+      for await (const event of deps.backupStream(aborter.signal)) {
+        view = reduceBackupEvent(view, event);
+        if (view.run !== null) emit({ queuedBehind: view.run.operation });
+      }
+    } catch {
+      return false; // abort or a dropped stream: the caller surfaces the 409
+    }
+    return view.run !== null;
+  }
+
   async function ingestOnce(): Promise<void> {
     for (;;) {
       if (aborter.signal.aborted) return;
@@ -370,11 +416,22 @@ export function createAttachController(deps: AttachDeps): AttachController {
         break;
       } catch (failure) {
         if (failure instanceof ApiError && failure.status === 409) {
+          if (failure.code === "corpus_busy") {
+            // A backup export or restore holds the corpus. Our files are on
+            // disk, so wait for *that* run — once — then re-issue. A busy
+            // corpus with no backup run to wait for would only spin, so it
+            // is surfaced instead.
+            emit({ phase: "queued", queuedBehind: "backup" });
+            if (await drainBackup()) continue;
+            if (aborter.signal.aborted) return;
+            emit({ phase: "error", error: failureMessage(failure) });
+            return;
+          }
           // The runner is one-at-a-time by design and our files are already
           // safely on disk — hold, watch the in-flight run's stream to its
           // terminal frame, then re-issue. 409 stays the server's honest
           // answer; the queue is client state.
-          emit({ phase: "queued" });
+          emit({ phase: "queued", queuedBehind: "ingest" });
           await drainStream(null);
           continue;
         }
@@ -382,7 +439,7 @@ export function createAttachController(deps: AttachDeps): AttachController {
         return;
       }
     }
-    emit({ phase: "ingesting", ingest: initialIngestView });
+    emit({ phase: "ingesting", queuedBehind: null, ingest: initialIngestView });
     const view = await drainStream((next) =>
       emit({ phase: "ingesting", ingest: next }),
     );
@@ -509,6 +566,7 @@ export function useComposerAttach(): ComposerAttachHandle {
       upload: uploadDocuments,
       start: () => startIngest(false),
       stream: (signal) => streamIngestStatus(signal),
+      backupStream: (signal) => streamBackupStatus("rag", signal),
       onState: setState,
       // A completed run changed the document table (and only that —
       // reingest:false never clears the stale-corpus flag).

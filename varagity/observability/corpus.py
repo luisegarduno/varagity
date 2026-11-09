@@ -17,7 +17,11 @@ Failure posture: a store outage must degrade ``/metrics``, never 500 it.
 The last good snapshot is re-served (going stale) and a fresh process with
 no snapshot yet emits the gauges with no samples at all.
 :data:`varagity.observability.metrics.DEPENDENCY_UP` is what reports store
-health; these gauges deliberately do not.
+health; these gauges deliberately do not. A backup restore is the same
+posture: its ``TRUNCATE`` holds both tables until it commits (ADR-019), so
+the gauge connection carries a lock timeout — a scrape during the load gives
+up on the lock within a second and serves the last snapshot rather than
+hanging for the whole restore.
 """
 
 import logging
@@ -30,7 +34,7 @@ from prometheus_client import REGISTRY
 from prometheus_client.core import GaugeMetricFamily
 from prometheus_client.registry import Collector, CollectorRegistry
 
-from varagity.stores.vector_store import ContextualVectorDB
+from varagity.stores.vector_store import ContextualVectorDB, default_conninfo
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,32 @@ CORPUS_GAUGES: dict[str, tuple[str, ...]] = {
     "varagity_corpus_documents_by_type": ("file_type",),
     "varagity_corpus_chunks_by_strategy": ("chunking_strategy",),
 }
+
+# How long a gauge query waits for a table lock before giving up (libpq's
+# `options`, so every statement on the gauge connection carries it).
+GAUGE_LOCK_TIMEOUT_MS = 1000
+
+
+def gauge_store() -> ContextualVectorDB:
+    """Connect the store the gauges query, with a short lock timeout.
+
+    A restore holds ``documents`` and ``chunks`` exclusively until it
+    commits; with the timeout, a count query against them fails fast
+    (``psycopg.errors.LockNotAvailable``) and the collector serves its last
+    snapshot instead of queueing behind the restore.
+
+    Returns:
+        A connected store.
+
+    Raises:
+        psycopg.OperationalError: If the database is unreachable.
+    """
+    return ContextualVectorDB(
+        psycopg.conninfo.make_conninfo(
+            default_conninfo(), options=f"-c lock_timeout={GAUGE_LOCK_TIMEOUT_MS}"
+        )
+    )
+
 
 _DOCS = "varagity_corpus_documents"
 _CHUNKS = "varagity_corpus_chunks"
@@ -83,7 +113,7 @@ class CorpusCollector(Collector):
 
     def __init__(
         self,
-        store_factory: Callable[[], ContextualVectorDB] = ContextualVectorDB,
+        store_factory: Callable[[], ContextualVectorDB] = gauge_store,
         ttl_seconds: float = CACHE_TTL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -91,7 +121,8 @@ class CorpusCollector(Collector):
 
         Args:
             store_factory: Builds a connected store per refresh (override
-                seam for tests). Called inside a ``with`` block, so the
+                seam for tests); :func:`gauge_store`, with its lock timeout,
+                by default. Called inside a ``with`` block, so the
                 connection closes after every refresh.
             ttl_seconds: How long a snapshot is served before re-querying.
             clock: Monotonic time source (override seam for tests).
@@ -149,11 +180,19 @@ class CorpusCollector(Collector):
         except psycopg.Error as error:
             # Serve stale over raising: a scrape that 500s takes the whole
             # /metrics endpoint down, including the metrics that are fine.
-            logger.warning(
-                "corpus gauges not refreshed — postgres unreachable (%s); serving %s",
-                error,
-                "the last snapshot" if self._snapshot is not None else "no samples",
-            )
+            serving = "the last snapshot" if self._snapshot is not None else "no samples"
+            if isinstance(error, psycopg.errors.LockNotAvailable):
+                # A restore holds the tables until it commits (ADR-019):
+                # expected, brief, and not an outage.
+                logger.info(
+                    "corpus gauges not refreshed — the tables are locked; serving %s", serving
+                )
+            else:
+                logger.warning(
+                    "corpus gauges not refreshed — postgres unreachable (%s); serving %s",
+                    error,
+                    serving,
+                )
         return self._snapshot
 
     def _fetch(self) -> CorpusSnapshot:

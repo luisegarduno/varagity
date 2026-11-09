@@ -12,6 +12,7 @@ import psycopg
 import pytest
 from prometheus_client import CollectorRegistry
 
+from varagity.observability import corpus as corpus_module
 from varagity.observability.corpus import CorpusCollector, register_corpus_collector
 
 
@@ -194,6 +195,26 @@ class TestStoreOutage:
         factory.error = psycopg.OperationalError("connection refused")
         list(collector.collect())  # must not raise
 
+    def test_a_restores_table_lock_serves_the_last_snapshot(
+        self,
+        collector: CorpusCollector,
+        factory: FakeStoreFactory,
+        clock: FakeClock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A restore holds the tables until it commits: the scrape gives up and serves stale."""
+        samples(collector)
+        clock.now += 11.0
+        factory.documents = 99  # what the store would say once the restore commits
+        factory.error = psycopg.errors.LockNotAvailable("canceling statement due to lock timeout")
+
+        with caplog.at_level("INFO", logger="varagity.observability.corpus"):
+            values = samples(collector)
+
+        assert values[("varagity_corpus_documents", ())] == 2  # the last snapshot
+        assert "tables are locked" in caplog.text
+        assert "unreachable" not in caplog.text  # not an outage
+
     def test_recovery_refreshes(
         self, collector: CorpusCollector, factory: FakeStoreFactory, clock: FakeClock
     ) -> None:
@@ -205,6 +226,23 @@ class TestStoreOutage:
         values = samples(collector)
 
         assert values[("varagity_corpus_documents", ())] == 2
+
+
+class TestGaugeStore:
+    def test_the_default_store_carries_a_lock_timeout(
+        self, monkeypatch: pytest.MonkeyPatch, settings_env: Any
+    ) -> None:
+        settings_env(POSTGRES_HOST="db.test", POSTGRES_DB="varagity")
+        seen: list[str] = []
+        monkeypatch.setattr(
+            corpus_module, "ContextualVectorDB", lambda conninfo: seen.append(conninfo)
+        )
+        corpus_module.gauge_store()
+        (conninfo,) = seen
+        params = psycopg.conninfo.conninfo_to_dict(conninfo)
+        assert params["options"] == f"-c lock_timeout={corpus_module.GAUGE_LOCK_TIMEOUT_MS}"
+        assert params["host"] == "db.test"
+        assert CorpusCollector()._store_factory is corpus_module.gauge_store
 
 
 class TestRegistration:

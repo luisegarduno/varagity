@@ -66,6 +66,7 @@ export type GraphEntityDetail = Schemas["GraphEntityDetailOut"];
 export type GraphTranscriptRef = Schemas["GraphTranscriptRefOut"];
 export type BundleOut = Schemas["BundleOut"];
 export type BundleManifest = Schemas["BundleManifestOut"];
+export type BackupRestoreRequest = Schemas["BackupRestoreRequest"];
 export type BackupRun = Schemas["BackupRunOut"];
 export type BackupSummary = Schemas["BackupSummaryOut"];
 export type BackupStatusEvent = Schemas["BackupStatusEvent"];
@@ -413,6 +414,25 @@ export function listBackups(corpus: TargetCorpus): Promise<BundleOut[]> {
  */
 export function startExport(corpus: TargetCorpus): Promise<BackupRun> {
   return request(`/api/backups/${corpus}/export`, { method: "POST" });
+}
+
+/**
+ * Start restoring a corpus from one of its bundles and return the run handle.
+ *
+ * Restore **replaces** the corpus with the bundle's rows (no reprocessing).
+ * Everything that can refuse it answers before the run exists:
+ * `404 bundle_not_found`, `409 corpus_busy` (another operation holds the
+ * corpus, or an ingest in another process holds its lock),
+ * `422 bundle_invalid` (unsound or damaged — the server hashes every member
+ * here) and `422 bundle_incompatible` (another embedding model, dimension,
+ * corpus or format version).
+ */
+export function startRestore(corpus: TargetCorpus, name: string): Promise<BackupRun> {
+  const body: BackupRestoreRequest = { name };
+  return request(`/api/backups/${corpus}/restore`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 /**

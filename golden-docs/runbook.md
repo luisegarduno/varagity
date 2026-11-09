@@ -579,6 +579,73 @@ name but now just means "runs the real engine against the live GPU
 services". `--no-cov` because any `-m` run trips the repo-wide coverage
 floor.
 
+## Backups
+
+`docker compose down -v` wipes the processed document corpus along with the
+volumes ([below](#volumes-and-resets)): the chunk rows, their contextual
+blurbs and embeddings, and the BM25 index. The source folders survive
+because they are host binds — and so does a **backup bundle**, which is
+written into a reserved folder inside one (`docs/varagity-exports/`,
+[Data model](data-model.md#backup-bundles)). Restoring a bundle brings the
+corpus back with no parsing, chunking, contextualizing or embedding. Both
+live on `/corpus` → Documents → **Export & restore**, or against the API:
+
+```bash
+# export: writes docs/varagity-exports/varagity-rag-<UTC yyyymmdd-HHMM>.zip
+curl -sX POST localhost:8000/api/backups/rag/export
+curl -sN localhost:8000/api/backups/rag/status   # follow it (SSE, replayed from the start)
+
+# what's in the folder, with each bundle's restore verdict and settings drift
+curl -s localhost:8000/api/backups/rag | jq '.[] | {name, restorable, reason, drift}'
+
+# restore one — this REPLACES the corpus in both stores
+curl -sX POST localhost:8000/api/backups/rag/restore \
+  -H 'content-type: application/json' -d '{"name": "varagity-rag-20261108-1312.zip"}'
+curl -sN localhost:8000/api/backups/rag/status
+```
+
+- **Restore replaces.** The corpus's rows in both stores become the
+  bundle's; nothing is merged. The GUI asks first whenever the corpus isn't
+  empty (after a `down -v` there is nothing to replace, so it doesn't).
+  Conversations keep their evidence snapshots either way.
+- **One operation per corpus.** Ingest, export and restore exclude each
+  other (`409 corpus_busy`, naming the holder). While a restore runs, a chat
+  question against the documents answers `503 corpus_restoring` (the
+  composer says "being restored"; ask again when it ends), document deletes
+  answer `409`, and a composer 📎 upload waits in "queued" and ingests once
+  the restore finishes.
+- **The corpus lock reaches the CLI.** A restore holds the RAG corpus's
+  Postgres advisory lock *exclusively*; every ingest holds it *shared* —
+  including `uv run main.py ingest` and the startup ingest of `main.py chat`
+  in their own process, which the API's in-process gate can't see. So during
+  a restore a CLI ingest exits at once with one line (`Not ingesting: the
+  corpus is being restored — …`, exit 1), and while a CLI ingest runs a
+  restore answers `409 corpus_busy` naming "an ingest in another process".
+  Two ingests still run side by side as they always have, and the lock dies
+  with its database session, so a killed process never strands the corpus.
+- **Strict compatibility.** A bundle made with another embedding model or
+  dimension is refused (`422 bundle_incompatible`), never restored: neither
+  store would notice, and retrieval would quietly return the wrong passages.
+  A damaged bundle (`422 bundle_invalid`) is refused before anything is
+  touched — a restore hashes every member first. The list itself never
+  hashes, so a bundle damaged *inside* an intact zip lists as restorable
+  until its first restore refuses it; from then on (until the file changes
+  or the API restarts) the list shows it as damaged.
+- **The stale flag and drift.** Restoring a bundle made under other
+  reingest-affecting settings (`CHUNKING_STRATEGY`, `CHUNK_SIZE`,
+  `CHUNK_OVERLAP`, `CONTEXTUALIZE`, `OCR_ENGINE`) flags the corpus stale, as
+  does a bundle that was stale when exported. The list shows that `drift`
+  up front; drift never refuses a restore.
+- **Restore on the stack mode it came from.** Each document's `source` is
+  re-rooted onto the restoring API's `DOCS_PATH` (`/app/docs` in compose,
+  `./docs` in host mode). A host-mode restore is therefore correct for host
+  mode — and the compose API would then list every document flat until it
+  restores the bundle itself.
+- **If Elasticsearch fails after the commit**, the run fails saying the rows
+  are restored; restore the same bundle again to rebuild the BM25 index.
+- **Not in a bundle:** chat history, conversation folders and
+  settings-drawer overrides (they live in `pgdata`, which `down -v` wipes).
+
 ## Volumes and resets
 
 | Volume | Holds | Reset effect |
@@ -593,7 +660,9 @@ floor.
 
 `docker compose down -v` drops all of them — the full factory reset, and
 since stage 2 that **includes the message graph**. The two host binds
-(`./docs`, `./graph-docs`) are not volumes and always survive.
+(`./docs`, `./graph-docs`) are not volumes and always survive — and with
+them any backup bundles in `docs/varagity-exports/`
+([above](#backups)).
 
 ### Schema migrations run on API startup
 
@@ -958,7 +1027,10 @@ context):
 | Ingestion dashboard stays empty after a CLI ingest | Metrics are per-process — run the ingest through the GUI/API ([above](#observability-operations)) |
 | Changed `NEXT_PUBLIC_API_URL`, browser still calls the old origin | Build-time constant — `docker compose build web && docker compose up -d web` |
 | Browser on another machine gets CORS errors | That origin must be in `API_CORS_ORIGINS` *and* baked into `NEXT_PUBLIC_API_URL` ([above](#web-app-dev-vs-prod)) |
-| `POST /api/ingest` answers 409 | One run at a time — watch `GET /api/ingest/status`, retry once it's terminal |
+| `POST /api/ingest` answers 409 | One run at a time — watch `GET /api/ingest/status`, retry once it's terminal; `corpus_busy` means a backup export or restore holds the corpus (watch `GET /api/backups/rag/status`) |
+| `main.py ingest` / `chat` prints "Not ingesting: the corpus is being restored" | A GUI/API restore holds the corpus lock — wait for it to finish ([above](#backups)) |
+| Restore answers `409 corpus_busy` "an ingest in another process" | A CLI `ingest` (or `chat`'s startup ingest) holds the corpus lock shared — let it finish, then restore ([above](#backups)) |
+| Restore answers `422 bundle_incompatible` | The bundle was embedded with another `EMBEDDING_MODEL` / `EMBEDDING_DIM` — restore it on a stack configured like the one that exported it ([above](#backups)) |
 | First PDF ingest very slow | One-time Docling/EasyOCR model downloads ([above](#first-run-model-downloads)) |
 | Evidence panel says "preview unavailable — showing text" | Reason-dependent degrade — `file_changed`: file edited since ingest, reingest to clear; `conversion_unavailable`: host-mode API without LibreOffice, pptx-only and expected ([above](#page-previews-evidence-panel)) |
 | First PPTX preview slow after an `api` restart | The conversion cache is container-ephemeral — one `soffice` run per deck re-pays it ([above](#page-previews-evidence-panel)) |

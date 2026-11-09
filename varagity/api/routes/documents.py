@@ -20,7 +20,9 @@ source file is also unlinked when it lives inside ``DOCS_PATH``, so the
 next ingest can't resurrect the document. ``POST /api/documents/delete``
 is the same operation over a set (the corpus table's multi-select): the
 same ordering applied set-wise, in one round trip per store instead of one
-per document.
+per document. Both deletes answer ``409 corpus_busy`` while a backup export
+or restore holds the corpus (ADR-019) — a restore is replacing the very
+rows a delete would remove.
 
 The ``…/preview/locate`` + ``…/preview/page/{page}`` pair (ADR-010) backs
 the evidence panel's page preview: locate scores the source document's
@@ -43,12 +45,14 @@ import pypdfium2 as pdfium
 from elastic_transport import TransportError
 from fastapi import APIRouter, Depends, Form, HTTPException, Response, UploadFile
 
+from varagity.api.corpus_gate import CorpusBusy, CorpusGate, get_corpus_gates
 from varagity.api.deps import get_bm25_store, get_vector_store
 from varagity.api.schemas import (
     DocumentBulkDeleteRequest,
     DocumentBulkDeleteResponse,
     DocumentDeleteResponse,
     DocumentOut,
+    ErrorResponse,
     PreviewLocateRequest,
     PreviewLocateResponse,
     PreviewRect,
@@ -68,6 +72,12 @@ router = APIRouter(tags=["documents"])
 
 VectorStoreDep = Annotated[ContextualVectorDB, Depends(get_vector_store)]
 BM25StoreDep = Annotated[ElasticsearchBM25, Depends(get_bm25_store)]
+GatesDep = Annotated[dict[str, CorpusGate], Depends(get_corpus_gates)]
+
+# The operations whose hold on the corpus refuses a delete: a backup's. An
+# ingest holding the gate does not — deletes beside an ingest are as they
+# always were.
+_DELETE_BLOCKING = frozenset({"export", "restore"})
 
 # Uploads stream to disk in slices so an oversized file aborts at the cap
 # instead of buffering whole.
@@ -569,6 +579,26 @@ def _remove_source_file(info: DocumentInfo) -> bool:
     return True
 
 
+def _refuse_during_backup(gates: dict[str, CorpusGate]) -> None:
+    """Answer ``409`` while a backup export or restore holds the corpus.
+
+    Checked before any store is touched — a restore's ``TRUNCATE`` holds the
+    tables, so even the existence lookup would wait for it.
+
+    Args:
+        gates: The process's per-corpus write gates.
+
+    Raises:
+        HTTPException: ``409 corpus_busy``, naming the backup.
+    """
+    holder = gates["rag"].holder
+    if holder in _DELETE_BLOCKING:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "corpus_busy", "message": str(CorpusBusy("rag", holder))},
+        )
+
+
 def _es_unreachable(error: TransportError) -> HTTPException:
     """Build the structured 503 for a downed Elasticsearch.
 
@@ -588,11 +618,15 @@ def _es_unreachable(error: TransportError) -> HTTPException:
     )
 
 
-@router.delete("/api/documents/{doc_id}")
+@router.delete(
+    "/api/documents/{doc_id}",
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
 def delete_document(
     doc_id: str,
     store: VectorStoreDep,
     bm25: BM25StoreDep,
+    gates: GatesDep,
     remove_file: bool = False,
 ) -> DocumentDeleteResponse:
     """Remove a document's chunks from both stores (GUI-driven GC).
@@ -606,6 +640,7 @@ def delete_document(
         doc_id: The document to remove.
         store: The per-request vector store.
         bm25: The per-request BM25 store.
+        gates: The process's per-corpus write gates.
         remove_file: Also unlink the source file — honored only when it
             resolves inside ``DOCS_PATH`` (otherwise the next ingest would
             simply re-add the document).
@@ -614,10 +649,12 @@ def delete_document(
         The deletion counts and whether the file was removed.
 
     Raises:
-        HTTPException: ``404 document_not_found`` for an unknown id;
+        HTTPException: ``409 corpus_busy`` while a backup export or restore
+            holds the corpus; ``404 document_not_found`` for an unknown id;
             ``503 es_unreachable`` when Elasticsearch is down (nothing
             deleted — retry when it returns).
     """
+    _refuse_during_backup(gates)
     documents = {info.doc_id: info for info in store.list_documents()}
     info = documents.get(doc_id)
     if info is None:
@@ -644,11 +681,12 @@ def delete_document(
     )
 
 
-@router.post("/api/documents/delete")
+@router.post("/api/documents/delete", responses={409: {"model": ErrorResponse}})
 def delete_documents(
     payload: DocumentBulkDeleteRequest,
     store: VectorStoreDep,
     bm25: BM25StoreDep,
+    gates: GatesDep,
     remove_file: bool = False,
 ) -> DocumentBulkDeleteResponse:
     """Remove several documents' chunks from both stores (bulk GUI-driven GC).
@@ -672,6 +710,7 @@ def delete_documents(
             preserved).
         store: The per-request vector store.
         bm25: The per-request BM25 store.
+        gates: The process's per-corpus write gates.
         remove_file: Also unlink each source file — honored per document,
             only inside ``DOCS_PATH``.
 
@@ -679,9 +718,11 @@ def delete_documents(
         Per-document outcomes plus the ids that had no ``documents`` row.
 
     Raises:
-        HTTPException: ``503 es_unreachable`` when Elasticsearch is down
-            (nothing deleted — retry when it returns).
+        HTTPException: ``409 corpus_busy`` while a backup export or restore
+            holds the corpus; ``503 es_unreachable`` when Elasticsearch is
+            down (nothing deleted — retry when it returns).
     """
+    _refuse_during_backup(gates)
     documents = {info.doc_id: info for info in store.list_documents()}
     requested = list(dict.fromkeys(payload.doc_ids))  # collapse dupes, keep order
     targets = [documents[doc_id] for doc_id in requested if doc_id in documents]

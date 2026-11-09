@@ -11,6 +11,13 @@ the CLI's ``rich`` display. This module owns both halves:
   process, the ingest Prometheus counters finally reach the scrape).
   A second start while one is running raises
   :class:`IngestAlreadyRunning` (the route's structured ``409``).
+* **One writer per corpus.** A run also claims the RAG corpus's
+  :class:`~varagity.api.corpus_gate.CorpusGate` for its whole life (ADR-019),
+  so an ingest and a backup export or restore never overlap in this process:
+  a start while a backup holds the corpus raises
+  :class:`~varagity.api.corpus_gate.CorpusBusy` (``409 corpus_busy``). The
+  gate is released *before* the terminal frame, so a client that starts the
+  next run on seeing it never races a stale claim.
 * **Progress without pipeline edits.** The runner wraps the flow's
   ``@task``-wrapped stages (:data:`~varagity.pipeline.ingest_flow.TASK_STAGES`)
   with event emitters — tracking and streaming compose — and passes the
@@ -39,6 +46,7 @@ from langchain_core.documents import Document
 from pydantic import BaseModel
 from rich.progress import Progress, TaskID
 
+from varagity.api.corpus_gate import CorpusGate, get_corpus_gates
 from varagity.api.schemas import (
     IngestLogEvent,
     IngestProgressEvent,
@@ -251,6 +259,7 @@ class IngestRunner:
         *,
         base_stages: IngestStages | None = None,
         on_reingest_complete: Callable[[], None] | None = None,
+        gate: CorpusGate | None = None,
     ) -> None:
         """Wire the runner's collaborators (all injectable for tests).
 
@@ -261,8 +270,11 @@ class IngestRunner:
                 Prefect task stages when omitted.
             on_reingest_complete: Hook fired after a ``reingest=true`` run
                 completes; defaults to clearing the corpus-stale flag.
+            gate: The RAG corpus's write gate; the process-wide one when
+                omitted.
         """
         self._flow = flow if flow is not None else ingest_flow
+        self._gate = gate if gate is not None else get_corpus_gates()["rag"]
         self._base_stages = base_stages if base_stages is not None else TASK_STAGES
         self._on_reingest_complete = (
             on_reingest_complete if on_reingest_complete is not None else _clear_corpus_stale
@@ -286,10 +298,14 @@ class IngestRunner:
 
         Raises:
             IngestAlreadyRunning: If a run is already in flight.
+            CorpusBusy: If a backup export or restore holds the corpus.
         """
         with self._lock:
             if self._run is not None and self._run.state == "running":
                 raise IngestAlreadyRunning(f"run {self._run.run_id} is still running")
+            # After the single-flight check, so a second ingest keeps its own
+            # ingest_already_running answer; corpus_busy means a backup.
+            self._gate.claim("ingest")
             run = _RunState(run_id=uuid4().hex[:12], reingest=reingest)
             self._run = run
             self._events = []
@@ -301,7 +317,17 @@ class IngestRunner:
         thread = threading.Thread(
             target=self._execute, args=(run,), name=f"ingest-{run.run_id}", daemon=True
         )
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError as error:  # no thread to run it: end the run, free the corpus
+            with self._lock:
+                run.state = "failed"
+                run.error = f"{type(error).__name__}: {error}"
+                run.finished_at = datetime.now(UTC)
+            self._gate.release()
+            self._emit(EVENT_STATUS, IngestStatusEvent(run=run.to_out()))
+            self._close_feed()
+            raise
         return started
 
     def snapshot(self) -> IngestRunOut | None:
@@ -406,6 +432,9 @@ class IngestRunner:
         finally:
             ingest_logger.removeHandler(relay)
             ingest_logger.setLevel(previous_level)
+            # Free the corpus before the terminal frame: a client that starts
+            # the next run (or a backup) on seeing it must find it free.
+            self._gate.release()
             self._emit(EVENT_STATUS, IngestStatusEvent(run=run.to_out()))
             self._close_feed()
             if run.state == "completed":

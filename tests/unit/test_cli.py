@@ -9,7 +9,9 @@ exercise genuine retrieval → grounding → answer wiring.
 """
 
 from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 
+import psycopg
 import pytest
 
 from varagity.cli import app as cli_app
@@ -18,6 +20,10 @@ from varagity.debug.show import console
 from varagity.generation.answer import answer_query
 from varagity.ingest.loader import IngestSummary
 from varagity.stores.records import RetrievalTrace, RetrievedChunk
+from varagity.stores.vector_store import CorpusLocked
+
+# The real corpus-lock probe, kept before the autouse stub below replaces it.
+_restore_refusal = cli_app._restore_refusal
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +31,12 @@ def _fresh_settings() -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _corpus_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No restore holds the corpus unless a test says so (and no database is dialled)."""
+    monkeypatch.setattr(cli_app, "_restore_refusal", lambda: None)
 
 
 def _chunk(i: int, content: str) -> RetrievedChunk:
@@ -239,6 +251,121 @@ class TestChatCommand:
         with console.capture():
             assert cli_app.run(["-v", "0"]) == 0
         assert chat_harness["retriever"].calls == [("still answerable?", 10)]
+
+
+class TestCorpusLocked:
+    """A restore holding the corpus refuses the CLI's ingest in one line (ADR-019)."""
+
+    @staticmethod
+    def _locked(*args: object, **kwargs: object) -> IngestSummary:
+        raise CorpusLocked(exclusive=False)
+
+    def test_ingest_says_so_in_one_line_and_exits_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cli_app, "ingest_flow", self._locked)
+        with console.capture() as capture:
+            assert cli_app.run(["-v", "0", "ingest"]) == 1
+        lines = [line for line in capture.get().splitlines() if line.strip()]
+        assert len(lines) == 1
+        assert "being restored" in lines[0]
+        assert "Ingest summary" not in capture.get()
+
+    def test_chat_exits_before_its_loop(
+        self, chat_harness: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        chat_harness["inputs"] = ["never asked?", ":quit"]
+
+        def locked(verbose: int) -> IngestSummary:
+            chat_harness["events"].append("ingest")
+            raise CorpusLocked(exclusive=False)
+
+        monkeypatch.setattr(cli_app, "ingest_flow", locked)
+        with console.capture() as capture:
+            assert cli_app.run(["-v", "0"]) == 1
+        lines = [line for line in capture.get().splitlines() if line.strip()]
+        assert len(lines) == 1 and "being restored" in lines[0]
+        assert chat_harness["events"] == ["ingest"]  # no prompt: the loop never started
+        assert chat_harness["retriever"].calls == []
+
+    def test_ingest_is_refused_before_its_flow_starts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The probe answers first, so no failed flow run logs a traceback above the line."""
+        flows: list[dict[str, object]] = []
+        monkeypatch.setattr(cli_app, "_restore_refusal", lambda: CorpusLocked(exclusive=False))
+        monkeypatch.setattr(cli_app, "ingest_flow", lambda **kwargs: flows.append(kwargs))
+        with console.capture() as capture:
+            assert cli_app.run(["-v", "0", "ingest", "--reingest"]) == 1
+        lines = [line for line in capture.get().splitlines() if line.strip()]
+        assert len(lines) == 1 and "being restored" in lines[0]
+        assert flows == []
+
+    def test_chat_is_refused_before_its_startup_ingest(
+        self, chat_harness: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        chat_harness["inputs"] = ["never asked?", ":quit"]
+        monkeypatch.setattr(cli_app, "_restore_refusal", lambda: CorpusLocked(exclusive=False))
+        with console.capture() as capture:
+            assert cli_app.run(["-v", "0"]) == 1
+        lines = [line for line in capture.get().splitlines() if line.strip()]
+        assert len(lines) == 1 and "being restored" in lines[0]
+        assert chat_harness["events"] == []  # the startup ingest never ran
+        assert chat_harness["retriever"].calls == []
+
+
+class _ProbeStore:
+    """A vector store whose corpus lock is free or held, recording what the probe does."""
+
+    def __init__(self, *, held: bool) -> None:
+        self.held = held
+        self.locks: list[str] = []
+        self.closed = False
+
+    def __enter__(self) -> "_ProbeStore":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.closed = True
+
+    @contextmanager
+    def corpus_lock(self, *, exclusive: bool) -> Iterator[None]:
+        if self.held:
+            raise CorpusLocked(exclusive=exclusive)
+        self.locks.append("shared" if not exclusive else "exclusive")
+        yield
+        self.locks.append("released")
+
+
+class TestRestoreProbe:
+    """``_restore_refusal`` asks the corpus lock the way an ingest takes it (ADR-019)."""
+
+    def test_a_held_lock_is_the_refusal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store = _ProbeStore(held=True)
+        monkeypatch.setattr(cli_app, "ContextualVectorDB", lambda: store)
+        refusal = _restore_refusal()
+        assert isinstance(refusal, CorpusLocked)
+        assert refusal.exclusive is False  # asked as an ingest: shared
+        assert "being restored" in str(refusal)
+        assert store.closed
+
+    def test_a_free_lock_is_taken_shared_and_given_straight_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _ProbeStore(held=False)
+        monkeypatch.setattr(cli_app, "ContextualVectorDB", lambda: store)
+        assert _restore_refusal() is None
+        assert store.locks == ["shared", "released"]
+        assert store.closed
+
+    def test_an_unreachable_store_is_left_to_the_flow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def unreachable() -> _ProbeStore:
+            raise psycopg.OperationalError("connection refused")
+
+        monkeypatch.setattr(cli_app, "ContextualVectorDB", unreachable)
+        assert _restore_refusal() is None
 
 
 class TestShowMatches:
