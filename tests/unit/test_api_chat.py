@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from prefect.testing.utilities import prefect_test_harness
 
 from tests.sse import parse_sse
+from varagity.api.corpus_gate import CorpusGate, get_corpus_gates
 from varagity.api.deps import (
     get_conversation_store_factory,
     get_llm,
@@ -224,7 +225,11 @@ def app(store_state: dict[str, Any]) -> FastAPI:
         return None
 
     application.dependency_overrides[get_services_preflight] = lambda: _noop_preflight
+    # Per-test gates: a restore one test simulates never leaks into another.
+    gates = {"rag": CorpusGate("rag"), "graph": CorpusGate("graph")}
+    application.dependency_overrides[get_corpus_gates] = lambda: gates
     application.state.fake_retriever = retriever
+    application.state.gates = gates
     return application
 
 
@@ -502,3 +507,35 @@ async def test_history_limit_reads_condense_history_turns(
     store_state["conversations"]["known"] = "Existing"
     await post_chat(app, {"query": "q", "conversation_id": "known"})
     assert store_state["recent_turns_calls"] == [("known", 2)]
+
+
+async def test_a_rag_restore_answers_503_corpus_restoring_before_any_query(
+    app: FastAPI, store_state: dict[str, Any]
+) -> None:
+    """★ The tables are being replaced: refused up front, never half-retrieved (ADR-019)."""
+    import json
+
+    app.state.gates["rag"].claim("restore")
+    status, content_type, body = await post_chat(app, {"query": "what is it?"})
+    assert status == 503
+    assert "text/event-stream" not in content_type
+    error = json.loads(body)["error"]
+    assert error["code"] == "corpus_restoring"
+    assert "document corpus is being restored" in error["message"]
+    assert app.state.fake_retriever.queries == []  # no retrieval ran
+    assert store_state["messages"] == []
+
+
+@pytest.mark.parametrize("holder", ["export", "ingest"])
+async def test_only_a_restore_holds_chat_off(app: FastAPI, holder: str) -> None:
+    """An export reads a snapshot and an ingest only adds rows: chat answers through both."""
+    app.state.gates["rag"].claim(holder)
+    status, _, body = await post_chat(app, {"query": "q"})
+    assert status == 200
+    assert parse_sse(body)[-1][0] == "done"
+
+
+async def test_a_graph_restore_does_not_hold_a_document_turn(app: FastAPI) -> None:
+    app.state.gates["graph"].claim("restore")
+    status, _, _ = await post_chat(app, {"query": "q"})
+    assert status == 200

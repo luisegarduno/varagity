@@ -1246,50 +1246,91 @@ class BundleManifestOut(BundleManifest):
 class BundleOut(BaseModel):
     """One bundle file in ``GET /api/backups/{corpus}`` (ADR-019).
 
+    The verdict fields are the *cheap* check — the zip's directory and its
+    manifest, never a hash (a restore hashes every member before it touches
+    a store). A bundle damaged inside an intact zip therefore lists as
+    restorable until a restore refuses it; from then on, until its size or
+    mtime changes, it lists as damaged.
+
     Attributes:
         name: The bundle's file name in the corpus's ``varagity-exports/``
-            folder — the key the download route takes.
+            folder — the key the download and restore routes take.
         size_bytes: Its size on disk.
         modified_at: Its mtime (UTC).
         manifest: Its ``bundle.json``, or ``None`` when the file has none or
             it is unreadable — a zip copied into the folder by hand is
             listed, never hidden.
+        restorable: Whether nothing the cheap check sees refuses a restore.
+        reason: Why the bundle can't be restored (``None`` when it can): an
+            unreadable manifest, another format version or corpus, another
+            embedding model or dimension, an unsafe or unexpected member, a
+            member whose recorded size differs from the zip's, or a damage a
+            restore already found.
+        drift: The reingest-affecting settings the bundle's rows were made
+            under that differ from this stack's — restoring it flags the
+            corpus stale. Empty when they match (or there is no manifest).
     """
 
     name: str
     size_bytes: int
     modified_at: datetime
     manifest: BundleManifestOut | None = None
+    restorable: bool
+    reason: str | None
+    drift: list[str]
+
+
+class BackupRestoreRequest(BaseModel):
+    """Body of ``POST /api/backups/{corpus}/restore`` (ADR-019).
+
+    Attributes:
+        name: The bundle to restore — a file name in the corpus's
+            ``varagity-exports/`` folder, as the backups list reports it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
 
 
 class BackupSummaryOut(BaseModel):
     """What a completed backup run did (terminal runs only).
 
     Attributes:
-        counts: What the bundle holds — ``documents`` and ``chunks`` for a
-            RAG bundle.
+        counts: An export's: what the bundle holds — ``documents`` and
+            ``chunks`` for a RAG bundle. A restore's: what it wrote —
+            ``documents``, ``chunks``, and ``bm25`` (the chunks the rebuilt
+            index holds).
         size_bytes: The bundle's size on disk.
-        wall_clock_s: Seconds from the snapshot to the published bundle.
+        wall_clock_s: Seconds from the snapshot to the published bundle (an
+            export), or from validation to a searchable index (a restore).
+        stale: A restore's: whether it left the corpus flagged stale (the
+            bundle was stale at export, or its rows were made under other
+            ingest settings). ``None`` for an export.
     """
 
     counts: dict[str, int]
     size_bytes: int
     wall_clock_s: float
+    stale: bool | None = None
 
 
 class BackupRunOut(BaseModel):
-    """One backup run's state (``POST /api/backups/{corpus}/export`` + its stream).
+    """One backup run's state (``POST /api/backups/{corpus}/export`` or ``/restore``).
 
     Attributes:
         run_id: The run handle.
-        corpus: The corpus being backed up.
-        operation: What the run does — ``export`` writes a new bundle.
+        corpus: The corpus being backed up or restored.
+        operation: What the run does — ``export`` writes a new bundle,
+            ``restore`` replaces the corpus with one.
         state: ``running`` | ``completed`` | ``failed``.
-        bundle: The file the run wrote (set once it is published — an export
-            names nothing until its bundle is whole).
-        saved_to: Where it landed, relative to the checkout
+        bundle: An export's: the file it wrote (set once it is published —
+            an export names nothing until its bundle is whole). A restore's:
+            the bundle it restores, from the start.
+        saved_to: Where an export's bundle landed, relative to the checkout
             (``docs/varagity-exports/<name>``) — the path "Copy path"
-            copies, right in both host and compose mode.
+            copies, right in both host and compose mode. ``None`` for a
+            restore.
         started_at: When the run started.
         finished_at: When it reached a terminal state (``None`` while
             running).
@@ -1299,7 +1340,7 @@ class BackupRunOut(BaseModel):
 
     run_id: str
     corpus: Literal["rag", "graph"]
-    operation: Literal["export"]
+    operation: Literal["export", "restore"]
     state: Literal["running", "completed", "failed"]
     bundle: str | None = None
     saved_to: str | None = None
@@ -1328,15 +1369,23 @@ class BackupProgressEvent(BaseModel):
 
     An export walks ``snapshot`` (open one consistent read of the corpus) →
     ``documents`` → ``chunks`` (rows written, with ``current``/``total``) →
-    ``finalize`` (the vector matrix, the manifest, the atomic rename).
+    ``finalize`` (the vector matrix, the manifest, the atomic rename). A
+    restore walks ``validate`` (the bundle's verdict again) → ``load`` (the
+    replacing transaction's binary COPY, chunks loaded so far) → ``index``
+    (the vector index rebuild and the commit — the restore takes effect) →
+    ``bm25`` (the BM25 index refilled from the restored rows, chunks so far).
 
     Attributes:
-        stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize``.
+        stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (an
+            export) or ``validate`` | ``load`` | ``index`` | ``bm25`` (a
+            restore).
         current: Rows written so far in a counted stage.
         total: The stage's row count.
     """
 
-    stage: Literal["snapshot", "documents", "chunks", "finalize"]
+    stage: Literal[
+        "snapshot", "documents", "chunks", "finalize", "validate", "load", "index", "bm25"
+    ]
     current: int | None = None
     total: int | None = None
 
@@ -1344,9 +1393,9 @@ class BackupProgressEvent(BaseModel):
 class BackupLogEvent(BaseModel):
     """Payload of the backup-status SSE ``log`` event.
 
-    Relayed ``varagity.backup`` log records (what was exported, a swept
-    partial, an embedding-model drift warning), so the panel shows what the
-    server log would.
+    Relayed ``varagity.backup`` log records (what was exported or restored,
+    a swept partial, an embedding-model drift warning), so the panel shows
+    what the server log would.
 
     Attributes:
         level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).

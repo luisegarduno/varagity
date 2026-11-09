@@ -419,6 +419,7 @@ export interface paths {
          *         doc_id: The document to remove.
          *         store: The per-request vector store.
          *         bm25: The per-request BM25 store.
+         *         gates: The process's per-corpus write gates.
          *         remove_file: Also unlink the source file — honored only when it
          *             resolves inside ``DOCS_PATH`` (otherwise the next ingest would
          *             simply re-add the document).
@@ -427,7 +428,8 @@ export interface paths {
          *         The deletion counts and whether the file was removed.
          *
          *     Raises:
-         *         HTTPException: ``404 document_not_found`` for an unknown id;
+         *         HTTPException: ``409 corpus_busy`` while a backup export or restore
+         *             holds the corpus; ``404 document_not_found`` for an unknown id;
          *             ``503 es_unreachable`` when Elasticsearch is down (nothing
          *             deleted — retry when it returns).
          */
@@ -469,6 +471,7 @@ export interface paths {
          *             preserved).
          *         store: The per-request vector store.
          *         bm25: The per-request BM25 store.
+         *         gates: The process's per-corpus write gates.
          *         remove_file: Also unlink each source file — honored per document,
          *             only inside ``DOCS_PATH``.
          *
@@ -476,8 +479,9 @@ export interface paths {
          *         Per-document outcomes plus the ids that had no ``documents`` row.
          *
          *     Raises:
-         *         HTTPException: ``503 es_unreachable`` when Elasticsearch is down
-         *             (nothing deleted — retry when it returns).
+         *         HTTPException: ``409 corpus_busy`` while a backup export or restore
+         *             holds the corpus; ``503 es_unreachable`` when Elasticsearch is
+         *             down (nothing deleted — retry when it returns).
          */
         post: operations["delete_documents_api_documents_delete_post"];
         delete?: never;
@@ -596,8 +600,10 @@ export interface paths {
          *
          *     Raises:
          *         HTTPException: ``409 ingest_already_running`` while a run is in
-         *             flight; ``503 <service>_unreachable`` when a required backing
-         *             service is down.
+         *             flight; ``409 corpus_busy`` while a backup export or restore
+         *             holds the corpus (ADR-019 — the message names it);
+         *             ``503 <service>_unreachable`` when a required backing service is
+         *             down.
          */
         post: operations["start_ingest_api_ingest_post"];
         delete?: never;
@@ -946,10 +952,13 @@ export interface paths {
          *
          *     A directory read plus one small member per bundle — the manifest is
          *     found through each zip's central directory, so a folder of large
-         *     bundles lists in milliseconds.
+         *     bundles lists in milliseconds. Each entry carries the cheap restore
+         *     verdict (no hashing — a restore hashes, and a damage it finds is
+         *     remembered here).
          *
          *     Args:
          *         corpus: The corpus whose backups to list.
+         *         damaged: The process's remembered restore failures.
          *
          *     Returns:
          *         One entry per bundle file, newest first (empty when the folder does
@@ -1005,6 +1014,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/backups/{corpus}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Restore
+         * @description Start a background restore of one bundle and return its handle.
+         *
+         *     **Restore replaces**: the corpus's rows in both stores become the
+         *     bundle's, re-rooted onto this stack's ``DOCS_PATH``, with no parsing,
+         *     chunking, contextualizing or embedding; the BM25 index is rebuilt from
+         *     the restored rows. Everything that can refuse the bundle runs first, so
+         *     a bad bundle answers ``422`` and never becomes a failed run — including
+         *     the sha256 of every member, which only this check (not the list) reads.
+         *
+         *     Args:
+         *         corpus: The corpus to restore.
+         *         payload: The bundle to restore, by name.
+         *         runners: The process-wide backup runners.
+         *         preflight: The awaitable reachability check (structured 503).
+         *         store: The per-request vector store (the corpus-lock check).
+         *         damaged: The process's remembered restore failures (a damaged
+         *             bundle is recorded here, so the list then shows it damaged).
+         *
+         *     Returns:
+         *         The new run's snapshot (state ``running``).
+         *
+         *     Raises:
+         *         HTTPException: ``503 postgres_unreachable`` / ``es_unreachable``
+         *             when a store the restore writes is down; ``404
+         *             bundle_not_found`` for a name that is not a bundle in the
+         *             folder; ``409 corpus_busy`` while another operation holds the
+         *             corpus, or an ingest in another process holds the corpus lock;
+         *             ``422 bundle_invalid`` for an unsound or damaged bundle; ``422
+         *             bundle_incompatible`` for one from another embedding model or
+         *             dimension, corpus, or format version.
+         */
+        post: operations["start_restore_api_backups__corpus__restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/backups/{corpus}/status": {
         parameters: {
             query?: never;
@@ -1016,11 +1074,12 @@ export interface paths {
          * Backup Status
          * @description Stream the corpus's current (or last) backup run as SSE.
          *
-         *     Frames: ``status`` (snapshot; also terminal, with the summary and the
-         *     saved path), ``progress`` (``snapshot`` → ``documents`` → ``chunks`` →
-         *     ``finalize``), ``log`` (relayed ``varagity.backup`` lines). With no run
-         *     in this API process the stream is a single idle ``status`` frame; after
-         *     a terminal run it replays that run and closes.
+         *     Frames: ``status`` (snapshot; also terminal, with the summary — and an
+         *     export's saved path), ``progress`` (an export's ``snapshot`` →
+         *     ``documents`` → ``chunks`` → ``finalize``; a restore's ``validate`` →
+         *     ``load`` → ``index`` → ``bm25``), ``log`` (relayed ``varagity.backup``
+         *     lines). With no run in this API process the stream is a single idle
+         *     ``status`` frame; after a terminal run it replays that run and closes.
          *
          *     Args:
          *         corpus: The corpus whose backup run to follow.
@@ -1102,19 +1161,34 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * BackupRestoreRequest
+         * @description Body of ``POST /api/backups/{corpus}/restore`` (ADR-019).
+         *
+         *     Attributes:
+         *         name: The bundle to restore — a file name in the corpus's
+         *             ``varagity-exports/`` folder, as the backups list reports it.
+         */
+        BackupRestoreRequest: {
+            /** Name */
+            name: string;
+        };
+        /**
          * BackupRunOut
-         * @description One backup run's state (``POST /api/backups/{corpus}/export`` + its stream).
+         * @description One backup run's state (``POST /api/backups/{corpus}/export`` or ``/restore``).
          *
          *     Attributes:
          *         run_id: The run handle.
-         *         corpus: The corpus being backed up.
-         *         operation: What the run does — ``export`` writes a new bundle.
+         *         corpus: The corpus being backed up or restored.
+         *         operation: What the run does — ``export`` writes a new bundle,
+         *             ``restore`` replaces the corpus with one.
          *         state: ``running`` | ``completed`` | ``failed``.
-         *         bundle: The file the run wrote (set once it is published — an export
-         *             names nothing until its bundle is whole).
-         *         saved_to: Where it landed, relative to the checkout
+         *         bundle: An export's: the file it wrote (set once it is published —
+         *             an export names nothing until its bundle is whole). A restore's:
+         *             the bundle it restores, from the start.
+         *         saved_to: Where an export's bundle landed, relative to the checkout
          *             (``docs/varagity-exports/<name>``) — the path "Copy path"
-         *             copies, right in both host and compose mode.
+         *             copies, right in both host and compose mode. ``None`` for a
+         *             restore.
          *         started_at: When the run started.
          *         finished_at: When it reached a terminal state (``None`` while
          *             running).
@@ -1131,9 +1205,9 @@ export interface components {
             corpus: "rag" | "graph";
             /**
              * Operation
-             * @constant
+             * @enum {string}
              */
-            operation: "export";
+            operation: "export" | "restore";
             /**
              * State
              * @enum {string}
@@ -1159,10 +1233,16 @@ export interface components {
          * @description What a completed backup run did (terminal runs only).
          *
          *     Attributes:
-         *         counts: What the bundle holds — ``documents`` and ``chunks`` for a
-         *             RAG bundle.
+         *         counts: An export's: what the bundle holds — ``documents`` and
+         *             ``chunks`` for a RAG bundle. A restore's: what it wrote —
+         *             ``documents``, ``chunks``, and ``bm25`` (the chunks the rebuilt
+         *             index holds).
          *         size_bytes: The bundle's size on disk.
-         *         wall_clock_s: Seconds from the snapshot to the published bundle.
+         *         wall_clock_s: Seconds from the snapshot to the published bundle (an
+         *             export), or from validation to a searchable index (a restore).
+         *         stale: A restore's: whether it left the corpus flagged stale (the
+         *             bundle was stale at export, or its rows were made under other
+         *             ingest settings). ``None`` for an export.
          */
         BackupSummaryOut: {
             /** Counts */
@@ -1173,6 +1253,8 @@ export interface components {
             size_bytes: number;
             /** Wall Clock S */
             wall_clock_s: number;
+            /** Stale */
+            stale?: boolean | null;
         };
         /** Body_upload_documents_api_documents_post */
         Body_upload_documents_api_documents_post: {
@@ -1254,14 +1336,29 @@ export interface components {
          * BundleOut
          * @description One bundle file in ``GET /api/backups/{corpus}`` (ADR-019).
          *
+         *     The verdict fields are the *cheap* check — the zip's directory and its
+         *     manifest, never a hash (a restore hashes every member before it touches
+         *     a store). A bundle damaged inside an intact zip therefore lists as
+         *     restorable until a restore refuses it; from then on, until its size or
+         *     mtime changes, it lists as damaged.
+         *
          *     Attributes:
          *         name: The bundle's file name in the corpus's ``varagity-exports/``
-         *             folder — the key the download route takes.
+         *             folder — the key the download and restore routes take.
          *         size_bytes: Its size on disk.
          *         modified_at: Its mtime (UTC).
          *         manifest: Its ``bundle.json``, or ``None`` when the file has none or
          *             it is unreadable — a zip copied into the folder by hand is
          *             listed, never hidden.
+         *         restorable: Whether nothing the cheap check sees refuses a restore.
+         *         reason: Why the bundle can't be restored (``None`` when it can): an
+         *             unreadable manifest, another format version or corpus, another
+         *             embedding model or dimension, an unsafe or unexpected member, a
+         *             member whose recorded size differs from the zip's, or a damage a
+         *             restore already found.
+         *         drift: The reingest-affecting settings the bundle's rows were made
+         *             under that differ from this stack's — restoring it flags the
+         *             corpus stale. Empty when they match (or there is no manifest).
          */
         BundleOut: {
             /** Name */
@@ -1274,6 +1371,12 @@ export interface components {
              */
             modified_at: string;
             manifest?: components["schemas"]["BundleManifestOut"] | null;
+            /** Restorable */
+            restorable: boolean;
+            /** Reason */
+            reason: string | null;
+            /** Drift */
+            drift: string[];
         };
         /**
          * ChatOverrides
@@ -2441,9 +2544,9 @@ export interface components {
          * BackupLogEvent
          * @description Payload of the backup-status SSE ``log`` event.
          *
-         *     Relayed ``varagity.backup`` log records (what was exported, a swept
-         *     partial, an embedding-model drift warning), so the panel shows what the
-         *     server log would.
+         *     Relayed ``varagity.backup`` log records (what was exported or restored,
+         *     a swept partial, an embedding-model drift warning), so the panel shows
+         *     what the server log would.
          *
          *     Attributes:
          *         level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).
@@ -2461,10 +2564,16 @@ export interface components {
          *
          *     An export walks ``snapshot`` (open one consistent read of the corpus) →
          *     ``documents`` → ``chunks`` (rows written, with ``current``/``total``) →
-         *     ``finalize`` (the vector matrix, the manifest, the atomic rename).
+         *     ``finalize`` (the vector matrix, the manifest, the atomic rename). A
+         *     restore walks ``validate`` (the bundle's verdict again) → ``load`` (the
+         *     replacing transaction's binary COPY, chunks loaded so far) → ``index``
+         *     (the vector index rebuild and the commit — the restore takes effect) →
+         *     ``bm25`` (the BM25 index refilled from the restored rows, chunks so far).
          *
          *     Attributes:
-         *         stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize``.
+         *         stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (an
+         *             export) or ``validate`` | ``load`` | ``index`` | ``bm25`` (a
+         *             restore).
          *         current: Rows written so far in a counted stage.
          *         total: The stage's row count.
          */
@@ -2473,7 +2582,7 @@ export interface components {
              * Stage
              * @enum {string}
              */
-            stage: "snapshot" | "documents" | "chunks" | "finalize";
+            stage: "snapshot" | "documents" | "chunks" | "finalize" | "validate" | "load" | "index" | "bm25";
             /**
              * Current
              * @default null
@@ -3513,6 +3622,24 @@ export interface operations {
                     "application/json": components["schemas"]["DocumentDeleteResponse"];
                 };
             };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -3546,6 +3673,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DocumentBulkDeleteResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4061,6 +4197,68 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    start_restore_api_backups__corpus__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                corpus: "rag";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupRestoreRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupRunOut"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

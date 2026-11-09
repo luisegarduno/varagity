@@ -11,11 +11,15 @@ the BM25 index is *contextual* from its first document.
 Identity fields are mapped ``"index": false`` but keep doc values, so
 term-level queries against them (``delete_documents``' ``delete_by_query``)
 still work — just via a slower doc-values scan, which is fine at dev scale.
+
+Every field of an indexed document is a copy of a ``chunks`` column, so the
+whole index can be rebuilt from the stored rows with no model call —
+:meth:`ElasticsearchBM25.rebuild`, which a backup restore runs (ADR-019).
 """
 
 import logging
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, Protocol
 
 from elastic_transport import ConnectionError as ESConnectionError
 from elastic_transport import ConnectionTimeout
@@ -83,6 +87,45 @@ _es_retry = retry(
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
+
+# A rebuild streams the corpus in bulk requests of this many documents; a
+# 429 (the node shedding load) is retried per request with backoff — the
+# stream itself can't be replayed by tenacity once it has been consumed.
+_REBUILD_CHUNK_SIZE = 500
+_REBUILD_MAX_RETRIES = 3
+
+
+class IndexableChunk(Protocol):
+    """What the index needs of one chunk: the five fields it mirrors.
+
+    Satisfied by :class:`~varagity.stores.records.ChunkRecord` (ingest) and
+    by the vector store's ``CorpusIndexRow`` (a restore's rebuild).
+    """
+
+    @property
+    def chunk_id(self) -> str:
+        """The chunk's id — the document's ``_id``."""
+        ...
+
+    @property
+    def doc_id(self) -> str:
+        """The owning document's id."""
+        ...
+
+    @property
+    def original_index(self) -> int:
+        """The corpus-global index (the fusion join key)."""
+        ...
+
+    @property
+    def content(self) -> str:
+        """The original chunk text."""
+        ...
+
+    @property
+    def contextualized_content(self) -> str:
+        """The contextualized text that is BM25-indexed."""
+        ...
 
 
 class BM25Hit(BaseModel):
@@ -179,23 +222,94 @@ class ElasticsearchBM25(ClosingContextMixin):
         """
         if not records:
             return 0
-        actions = [
-            {
-                "_index": self.index_name,
-                "_id": record.chunk_id,
-                "_source": {
-                    "content": record.content,
-                    "contextualized_content": record.contextualized_content,
-                    "doc_id": record.doc_id,
-                    "chunk_id": record.chunk_id,
-                    "original_index": record.original_index,
-                },
-            }
-            for record in records
-        ]
+        actions = [self._action(record) for record in records]
         success, _ = helpers.bulk(self._client, actions)
         self._client.indices.refresh(index=self.index_name)
         return success
+
+    def _action(self, chunk: IndexableChunk) -> dict[str, Any]:
+        """Build one chunk's bulk ``index`` action.
+
+        Args:
+            chunk: The chunk to index.
+
+        Returns:
+            The action, addressed by ``chunk_id``.
+        """
+        return {
+            "_index": self.index_name,
+            "_id": chunk.chunk_id,
+            "_source": {
+                "content": chunk.content,
+                "contextualized_content": chunk.contextualized_content,
+                "doc_id": chunk.doc_id,
+                "chunk_id": chunk.chunk_id,
+                "original_index": chunk.original_index,
+            },
+        }
+
+    def rebuild(
+        self,
+        chunks: Iterable[IndexableChunk],
+        *,
+        on_indexed: Callable[[int], None] | None = None,
+    ) -> int:
+        """Recreate the index from scratch and stream every chunk into it.
+
+        A backup restore's second half (ADR-019): the index is deleted and
+        created anew with the spec mapping — so nothing of the previous
+        corpus survives, and no auto-created default mapping can either —
+        then the chunks stream in through ``helpers.streaming_bulk`` (bounded
+        memory however large the corpus) and a final refresh makes them
+        searchable. Index recreation is retried like every other call; a
+        failure mid-stream raises, and running the rebuild again repairs the
+        index.
+
+        Args:
+            chunks: Every chunk the index should hold.
+            on_indexed: Called with the running count after each indexed
+                chunk (the restore's progress ticks).
+
+        Returns:
+            The number of chunks indexed.
+
+        Raises:
+            elasticsearch.helpers.BulkIndexError: If any chunk is rejected.
+            elastic_transport.ConnectionError: If Elasticsearch is
+                unreachable (after retries, for the index recreation).
+        """
+        self._recreate_index()
+        indexed = 0
+        for ok, _ in helpers.streaming_bulk(
+            self._client,
+            (self._action(chunk) for chunk in chunks),
+            chunk_size=_REBUILD_CHUNK_SIZE,
+            max_retries=_REBUILD_MAX_RETRIES,
+        ):
+            if ok:
+                indexed += 1
+                if on_indexed is not None:
+                    on_indexed(indexed)
+        self._refresh()
+        logger.info("rebuilt BM25 index %r with %d chunk(s)", self.index_name, indexed)
+        return indexed
+
+    @_es_retry
+    def _recreate_index(self) -> None:
+        """Delete the index (if any) and create it again, empty.
+
+        Idempotent as a pair, which is what makes retrying it safe: a create
+        that timed out client-side after succeeding is simply redone.
+        """
+        self._client.indices.delete(index=self.index_name, ignore_unavailable=True)
+        self._client.indices.create(
+            index=self.index_name, settings=_INDEX_SETTINGS, mappings=_INDEX_MAPPINGS
+        )
+
+    @_es_retry
+    def _refresh(self) -> None:
+        """Make everything indexed so far searchable."""
+        self._client.indices.refresh(index=self.index_name)
 
     def delete_document(self, doc_id: str) -> int:
         """Delete all of a document's chunks (``--reingest`` consistency).

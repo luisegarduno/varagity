@@ -16,6 +16,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
+from varagity.api.corpus_gate import CorpusBusy
 from varagity.api.deps import get_ingest_preflight
 from varagity.api.ingest_runner import IngestAlreadyRunning, IngestRunner, get_ingest_runner
 from varagity.api.schemas import ErrorResponse, IngestRunOut, IngestStartRequest
@@ -51,8 +52,10 @@ async def start_ingest(
 
     Raises:
         HTTPException: ``409 ingest_already_running`` while a run is in
-            flight; ``503 <service>_unreachable`` when a required backing
-            service is down.
+            flight; ``409 corpus_busy`` while a backup export or restore
+            holds the corpus (ADR-019 — the message names it);
+            ``503 <service>_unreachable`` when a required backing service is
+            down.
     """
     await preflight()
     try:
@@ -61,6 +64,11 @@ async def start_ingest(
         raise HTTPException(
             status_code=409,
             detail={"code": "ingest_already_running", "message": str(error)},
+        ) from error
+    except CorpusBusy as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "corpus_busy", "message": str(error)},
         ) from error
 
 

@@ -2,7 +2,7 @@
   "components": {
     "schemas": {
       "BackupLogEvent": {
-        "description": "Payload of the backup-status SSE ``log`` event.\n\nRelayed ``varagity.backup`` log records (what was exported, a swept\npartial, an embedding-model drift warning), so the panel shows what the\nserver log would.\n\nAttributes:\n    level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).\n    message: The formatted log message.",
+        "description": "Payload of the backup-status SSE ``log`` event.\n\nRelayed ``varagity.backup`` log records (what was exported or restored,\na swept partial, an embedding-model drift warning), so the panel shows\nwhat the server log would.\n\nAttributes:\n    level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).\n    message: The formatted log message.",
         "properties": {
           "level": {
             "title": "Level",
@@ -21,7 +21,7 @@
         "type": "object"
       },
       "BackupProgressEvent": {
-        "description": "Payload of the backup-status SSE ``progress`` event.\n\nAn export walks ``snapshot`` (open one consistent read of the corpus) \u2192\n``documents`` \u2192 ``chunks`` (rows written, with ``current``/``total``) \u2192\n``finalize`` (the vector matrix, the manifest, the atomic rename).\n\nAttributes:\n    stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize``.\n    current: Rows written so far in a counted stage.\n    total: The stage's row count.",
+        "description": "Payload of the backup-status SSE ``progress`` event.\n\nAn export walks ``snapshot`` (open one consistent read of the corpus) \u2192\n``documents`` \u2192 ``chunks`` (rows written, with ``current``/``total``) \u2192\n``finalize`` (the vector matrix, the manifest, the atomic rename). A\nrestore walks ``validate`` (the bundle's verdict again) \u2192 ``load`` (the\nreplacing transaction's binary COPY, chunks loaded so far) \u2192 ``index``\n(the vector index rebuild and the commit \u2014 the restore takes effect) \u2192\n``bm25`` (the BM25 index refilled from the restored rows, chunks so far).\n\nAttributes:\n    stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (an\n        export) or ``validate`` | ``load`` | ``index`` | ``bm25`` (a\n        restore).\n    current: Rows written so far in a counted stage.\n    total: The stage's row count.",
         "properties": {
           "current": {
             "anyOf": [
@@ -40,7 +40,11 @@
               "snapshot",
               "documents",
               "chunks",
-              "finalize"
+              "finalize",
+              "validate",
+              "load",
+              "index",
+              "bm25"
             ],
             "title": "Stage",
             "type": "string"
@@ -64,8 +68,24 @@
         "title": "BackupProgressEvent",
         "type": "object"
       },
+      "BackupRestoreRequest": {
+        "additionalProperties": false,
+        "description": "Body of ``POST /api/backups/{corpus}/restore`` (ADR-019).\n\nAttributes:\n    name: The bundle to restore \u2014 a file name in the corpus's\n        ``varagity-exports/`` folder, as the backups list reports it.",
+        "properties": {
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "BackupRestoreRequest",
+        "type": "object"
+      },
       "BackupRunOut": {
-        "description": "One backup run's state (``POST /api/backups/{corpus}/export`` + its stream).\n\nAttributes:\n    run_id: The run handle.\n    corpus: The corpus being backed up.\n    operation: What the run does \u2014 ``export`` writes a new bundle.\n    state: ``running`` | ``completed`` | ``failed``.\n    bundle: The file the run wrote (set once it is published \u2014 an export\n        names nothing until its bundle is whole).\n    saved_to: Where it landed, relative to the checkout\n        (``docs/varagity-exports/<name>``) \u2014 the path \"Copy path\"\n        copies, right in both host and compose mode.\n    started_at: When the run started.\n    finished_at: When it reached a terminal state (``None`` while\n        running).\n    error: The run-level failure (``failed`` only).\n    summary: The final counters (``completed`` only).",
+        "description": "One backup run's state (``POST /api/backups/{corpus}/export`` or ``/restore``).\n\nAttributes:\n    run_id: The run handle.\n    corpus: The corpus being backed up or restored.\n    operation: What the run does \u2014 ``export`` writes a new bundle,\n        ``restore`` replaces the corpus with one.\n    state: ``running`` | ``completed`` | ``failed``.\n    bundle: An export's: the file it wrote (set once it is published \u2014\n        an export names nothing until its bundle is whole). A restore's:\n        the bundle it restores, from the start.\n    saved_to: Where an export's bundle landed, relative to the checkout\n        (``docs/varagity-exports/<name>``) \u2014 the path \"Copy path\"\n        copies, right in both host and compose mode. ``None`` for a\n        restore.\n    started_at: When the run started.\n    finished_at: When it reached a terminal state (``None`` while\n        running).\n    error: The run-level failure (``failed`` only).\n    summary: The final counters (``completed`` only).",
         "properties": {
           "bundle": {
             "anyOf": [
@@ -110,7 +130,10 @@
             "title": "Finished At"
           },
           "operation": {
-            "const": "export",
+            "enum": [
+              "export",
+              "restore"
+            ],
             "title": "Operation",
             "type": "string"
           },
@@ -183,7 +206,7 @@
         "type": "object"
       },
       "BackupSummaryOut": {
-        "description": "What a completed backup run did (terminal runs only).\n\nAttributes:\n    counts: What the bundle holds \u2014 ``documents`` and ``chunks`` for a\n        RAG bundle.\n    size_bytes: The bundle's size on disk.\n    wall_clock_s: Seconds from the snapshot to the published bundle.",
+        "description": "What a completed backup run did (terminal runs only).\n\nAttributes:\n    counts: An export's: what the bundle holds \u2014 ``documents`` and\n        ``chunks`` for a RAG bundle. A restore's: what it wrote \u2014\n        ``documents``, ``chunks``, and ``bm25`` (the chunks the rebuilt\n        index holds).\n    size_bytes: The bundle's size on disk.\n    wall_clock_s: Seconds from the snapshot to the published bundle (an\n        export), or from validation to a searchable index (a restore).\n    stale: A restore's: whether it left the corpus flagged stale (the\n        bundle was stale at export, or its rows were made under other\n        ingest settings). ``None`` for an export.",
         "properties": {
           "counts": {
             "additionalProperties": {
@@ -195,6 +218,17 @@
           "size_bytes": {
             "title": "Size Bytes",
             "type": "integer"
+          },
+          "stale": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stale"
           },
           "wall_clock_s": {
             "title": "Wall Clock S",
@@ -376,8 +410,15 @@
         "type": "object"
       },
       "BundleOut": {
-        "description": "One bundle file in ``GET /api/backups/{corpus}`` (ADR-019).\n\nAttributes:\n    name: The bundle's file name in the corpus's ``varagity-exports/``\n        folder \u2014 the key the download route takes.\n    size_bytes: Its size on disk.\n    modified_at: Its mtime (UTC).\n    manifest: Its ``bundle.json``, or ``None`` when the file has none or\n        it is unreadable \u2014 a zip copied into the folder by hand is\n        listed, never hidden.",
+        "description": "One bundle file in ``GET /api/backups/{corpus}`` (ADR-019).\n\nThe verdict fields are the *cheap* check \u2014 the zip's directory and its\nmanifest, never a hash (a restore hashes every member before it touches\na store). A bundle damaged inside an intact zip therefore lists as\nrestorable until a restore refuses it; from then on, until its size or\nmtime changes, it lists as damaged.\n\nAttributes:\n    name: The bundle's file name in the corpus's ``varagity-exports/``\n        folder \u2014 the key the download and restore routes take.\n    size_bytes: Its size on disk.\n    modified_at: Its mtime (UTC).\n    manifest: Its ``bundle.json``, or ``None`` when the file has none or\n        it is unreadable \u2014 a zip copied into the folder by hand is\n        listed, never hidden.\n    restorable: Whether nothing the cheap check sees refuses a restore.\n    reason: Why the bundle can't be restored (``None`` when it can): an\n        unreadable manifest, another format version or corpus, another\n        embedding model or dimension, an unsafe or unexpected member, a\n        member whose recorded size differs from the zip's, or a damage a\n        restore already found.\n    drift: The reingest-affecting settings the bundle's rows were made\n        under that differ from this stack's \u2014 restoring it flags the\n        corpus stale. Empty when they match (or there is no manifest).",
         "properties": {
+          "drift": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Drift",
+            "type": "array"
+          },
           "manifest": {
             "anyOf": [
               {
@@ -397,6 +438,21 @@
             "title": "Name",
             "type": "string"
           },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "restorable": {
+            "title": "Restorable",
+            "type": "boolean"
+          },
           "size_bytes": {
             "title": "Size Bytes",
             "type": "integer"
@@ -405,7 +461,10 @@
         "required": [
           "name",
           "size_bytes",
-          "modified_at"
+          "modified_at",
+          "restorable",
+          "reason",
+          "drift"
         ],
         "title": "BundleOut",
         "type": "object"
@@ -2932,7 +2991,7 @@
   "paths": {
     "/api/backups/{corpus}": {
       "get": {
-        "description": "List the backup bundles in a corpus's ``varagity-exports/`` folder.\n\nA directory read plus one small member per bundle \u2014 the manifest is\nfound through each zip's central directory, so a folder of large\nbundles lists in milliseconds.\n\nArgs:\n    corpus: The corpus whose backups to list.\n\nReturns:\n    One entry per bundle file, newest first (empty when the folder does\n    not exist yet).",
+        "description": "List the backup bundles in a corpus's ``varagity-exports/`` folder.\n\nA directory read plus one small member per bundle \u2014 the manifest is\nfound through each zip's central directory, so a folder of large\nbundles lists in milliseconds. Each entry carries the cheap restore\nverdict (no hashing \u2014 a restore hashes, and a damage it finds is\nremembered here).\n\nArgs:\n    corpus: The corpus whose backups to list.\n    damaged: The process's remembered restore failures.\n\nReturns:\n    One entry per bundle file, newest first (empty when the folder does\n    not exist yet).",
         "operationId": "list_backups_api_backups__corpus__get",
         "parameters": [
           {
@@ -3116,9 +3175,93 @@
         ]
       }
     },
+    "/api/backups/{corpus}/restore": {
+      "post": {
+        "description": "Start a background restore of one bundle and return its handle.\n\n**Restore replaces**: the corpus's rows in both stores become the\nbundle's, re-rooted onto this stack's ``DOCS_PATH``, with no parsing,\nchunking, contextualizing or embedding; the BM25 index is rebuilt from\nthe restored rows. Everything that can refuse the bundle runs first, so\na bad bundle answers ``422`` and never becomes a failed run \u2014 including\nthe sha256 of every member, which only this check (not the list) reads.\n\nArgs:\n    corpus: The corpus to restore.\n    payload: The bundle to restore, by name.\n    runners: The process-wide backup runners.\n    preflight: The awaitable reachability check (structured 503).\n    store: The per-request vector store (the corpus-lock check).\n    damaged: The process's remembered restore failures (a damaged\n        bundle is recorded here, so the list then shows it damaged).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``503 postgres_unreachable`` / ``es_unreachable``\n        when a store the restore writes is down; ``404\n        bundle_not_found`` for a name that is not a bundle in the\n        folder; ``409 corpus_busy`` while another operation holds the\n        corpus, or an ingest in another process holds the corpus lock;\n        ``422 bundle_invalid`` for an unsound or damaged bundle; ``422\n        bundle_incompatible`` for one from another embedding model or\n        dimension, corpus, or format version.",
+        "operationId": "start_restore_api_backups__corpus__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "corpus",
+            "required": true,
+            "schema": {
+              "const": "rag",
+              "title": "Corpus",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Start Restore",
+        "tags": [
+          "backups"
+        ]
+      }
+    },
     "/api/backups/{corpus}/status": {
       "get": {
-        "description": "Stream the corpus's current (or last) backup run as SSE.\n\nFrames: ``status`` (snapshot; also terminal, with the summary and the\nsaved path), ``progress`` (``snapshot`` \u2192 ``documents`` \u2192 ``chunks`` \u2192\n``finalize``), ``log`` (relayed ``varagity.backup`` lines). With no run\nin this API process the stream is a single idle ``status`` frame; after\na terminal run it replays that run and closes.\n\nArgs:\n    corpus: The corpus whose backup run to follow.\n    runners: The process-wide backup runners.\n\nYields:\n    The framed events, oldest first, then live until terminal.",
+        "description": "Stream the corpus's current (or last) backup run as SSE.\n\nFrames: ``status`` (snapshot; also terminal, with the summary \u2014 and an\nexport's saved path), ``progress`` (an export's ``snapshot`` \u2192\n``documents`` \u2192 ``chunks`` \u2192 ``finalize``; a restore's ``validate`` \u2192\n``load`` \u2192 ``index`` \u2192 ``bm25``), ``log`` (relayed ``varagity.backup``\nlines). With no run in this API process the stream is a single idle\n``status`` frame; after a terminal run it replays that run and closes.\n\nArgs:\n    corpus: The corpus whose backup run to follow.\n    runners: The process-wide backup runners.\n\nYields:\n    The framed events, oldest first, then live until terminal.",
         "operationId": "backup_status_api_backups__corpus__status_get",
         "parameters": [
           {
@@ -3529,7 +3672,7 @@
     },
     "/api/documents/delete": {
       "post": {
-        "description": "Remove several documents' chunks from both stores (bulk GUI-driven GC).\n\nThe corpus table's multi-select delete (spec_v2 \u00a74.2). A ``POST``\nsub-path rather than a body on ``DELETE`` \u2014 the set to delete is the\nrequest's subject, and bodies on ``DELETE`` are the kind of thing\nintermediaries feel free to drop.\n\nSame store ordering as the single-document delete, applied set-wise:\none ``terms`` ``delete_by_query`` against Elasticsearch first, one\n``DELETE \u2026 WHERE doc_id = ANY(\u2026)`` against pgvector last. So the\ninvariant holds for the batch exactly as it does for one document \u2014 if\nElasticsearch fails, no marker row is gone, every document still lists,\nand the whole batch is retryable. Unknown ids are reported in\n``not_found`` rather than raising: a concurrent delete must not fail\nthe rest of the batch.\n\nArgs:\n    payload: The requested ``doc_ids`` (duplicates collapse; order is\n        preserved).\n    store: The per-request vector store.\n    bm25: The per-request BM25 store.\n    remove_file: Also unlink each source file \u2014 honored per document,\n        only inside ``DOCS_PATH``.\n\nReturns:\n    Per-document outcomes plus the ids that had no ``documents`` row.\n\nRaises:\n    HTTPException: ``503 es_unreachable`` when Elasticsearch is down\n        (nothing deleted \u2014 retry when it returns).",
+        "description": "Remove several documents' chunks from both stores (bulk GUI-driven GC).\n\nThe corpus table's multi-select delete (spec_v2 \u00a74.2). A ``POST``\nsub-path rather than a body on ``DELETE`` \u2014 the set to delete is the\nrequest's subject, and bodies on ``DELETE`` are the kind of thing\nintermediaries feel free to drop.\n\nSame store ordering as the single-document delete, applied set-wise:\none ``terms`` ``delete_by_query`` against Elasticsearch first, one\n``DELETE \u2026 WHERE doc_id = ANY(\u2026)`` against pgvector last. So the\ninvariant holds for the batch exactly as it does for one document \u2014 if\nElasticsearch fails, no marker row is gone, every document still lists,\nand the whole batch is retryable. Unknown ids are reported in\n``not_found`` rather than raising: a concurrent delete must not fail\nthe rest of the batch.\n\nArgs:\n    payload: The requested ``doc_ids`` (duplicates collapse; order is\n        preserved).\n    store: The per-request vector store.\n    bm25: The per-request BM25 store.\n    gates: The process's per-corpus write gates.\n    remove_file: Also unlink each source file \u2014 honored per document,\n        only inside ``DOCS_PATH``.\n\nReturns:\n    Per-document outcomes plus the ids that had no ``documents`` row.\n\nRaises:\n    HTTPException: ``409 corpus_busy`` while a backup export or restore\n        holds the corpus; ``503 es_unreachable`` when Elasticsearch is\n        down (nothing deleted \u2014 retry when it returns).",
         "operationId": "delete_documents_api_documents_delete_post",
         "parameters": [
           {
@@ -3564,6 +3707,16 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -3583,7 +3736,7 @@
     },
     "/api/documents/{doc_id}": {
       "delete": {
-        "description": "Remove a document's chunks from both stores (GUI-driven GC).\n\nElasticsearch first, pgvector last: the pgvector ``documents`` row is\nthe marker \u2014 if the ES delete fails, the document still lists and the\ndelete can be retried; a marker deleted first would strand ES chunks\ninvisibly (the exact v1 gap this route closes).\n\nArgs:\n    doc_id: The document to remove.\n    store: The per-request vector store.\n    bm25: The per-request BM25 store.\n    remove_file: Also unlink the source file \u2014 honored only when it\n        resolves inside ``DOCS_PATH`` (otherwise the next ingest would\n        simply re-add the document).\n\nReturns:\n    The deletion counts and whether the file was removed.\n\nRaises:\n    HTTPException: ``404 document_not_found`` for an unknown id;\n        ``503 es_unreachable`` when Elasticsearch is down (nothing\n        deleted \u2014 retry when it returns).",
+        "description": "Remove a document's chunks from both stores (GUI-driven GC).\n\nElasticsearch first, pgvector last: the pgvector ``documents`` row is\nthe marker \u2014 if the ES delete fails, the document still lists and the\ndelete can be retried; a marker deleted first would strand ES chunks\ninvisibly (the exact v1 gap this route closes).\n\nArgs:\n    doc_id: The document to remove.\n    store: The per-request vector store.\n    bm25: The per-request BM25 store.\n    gates: The process's per-corpus write gates.\n    remove_file: Also unlink the source file \u2014 honored only when it\n        resolves inside ``DOCS_PATH`` (otherwise the next ingest would\n        simply re-add the document).\n\nReturns:\n    The deletion counts and whether the file was removed.\n\nRaises:\n    HTTPException: ``409 corpus_busy`` while a backup export or restore\n        holds the corpus; ``404 document_not_found`` for an unknown id;\n        ``503 es_unreachable`` when Elasticsearch is down (nothing\n        deleted \u2014 retry when it returns).",
         "operationId": "delete_document_api_documents__doc_id__delete",
         "parameters": [
           {
@@ -3616,6 +3769,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {
@@ -4264,7 +4437,7 @@
     },
     "/api/ingest": {
       "post": {
-        "description": "Trigger a background ingest run and return its handle.\n\nArgs:\n    payload: ``reingest=true`` re-processes unchanged files (the\n        stale-corpus action; setting changes don't change content\n        hashes).\n    runner: The process-wide ingest runner.\n    preflight: The awaitable reachability check (structured 503).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``409 ingest_already_running`` while a run is in\n        flight; ``503 <service>_unreachable`` when a required backing\n        service is down.",
+        "description": "Trigger a background ingest run and return its handle.\n\nArgs:\n    payload: ``reingest=true`` re-processes unchanged files (the\n        stale-corpus action; setting changes don't change content\n        hashes).\n    runner: The process-wide ingest runner.\n    preflight: The awaitable reachability check (structured 503).\n\nReturns:\n    The new run's snapshot (state ``running``).\n\nRaises:\n    HTTPException: ``409 ingest_already_running`` while a run is in\n        flight; ``409 corpus_busy`` while a backup export or restore\n        holds the corpus (ADR-019 \u2014 the message names it);\n        ``503 <service>_unreachable`` when a required backing service is\n        down.",
         "operationId": "start_ingest_api_ingest_post",
         "requestBody": {
           "content": {

@@ -73,18 +73,26 @@ class TestIndexDefinition:
 
 
 class FakeIndices:
-    def __init__(self, *, exists: bool) -> None:
+    def __init__(self, *, exists: bool, events: list[str] | None = None) -> None:
         self._exists = exists
         self.created: list[dict[str, Any]] = []
         self.refreshed: list[str] = []
+        self.deleted: list[dict[str, Any]] = []
+        self.events = events if events is not None else []
 
     def exists(self, index: str) -> bool:
         return self._exists
 
     def create(self, index: str, settings: Any, mappings: Any) -> None:
+        self.events.append("create")
         self.created.append({"index": index, "settings": settings, "mappings": mappings})
 
+    def delete(self, index: str, ignore_unavailable: bool) -> None:
+        self.events.append("delete")
+        self.deleted.append({"index": index, "ignore_unavailable": ignore_unavailable})
+
     def refresh(self, index: str) -> None:
+        self.events.append("refresh")
         self.refreshed.append(index)
 
 
@@ -268,3 +276,74 @@ class TestSearch:
 
     def test_no_hits_is_an_empty_list(self) -> None:
         assert store_with(FakeESClient()).search("anything", k=5, verbose=0) == []
+
+
+class TestRebuild:
+    """A restore's BM25 half (ADR-019): recreate, then stream every chunk in."""
+
+    def test_the_index_is_recreated_before_anything_streams(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ Delete + create first, so no old document — or default mapping — survives."""
+        events: list[str] = []
+        streamed: list[dict[str, Any]] = []
+        options: dict[str, Any] = {}
+
+        def fake_streaming_bulk(client: Any, actions: Any, **kwargs: Any) -> Any:
+            events.append("stream")
+            options.update(kwargs)
+            for action in actions:
+                streamed.append(action)
+                yield True, {"index": {"_id": action["_id"]}}
+
+        monkeypatch.setattr(
+            bm25_store, "helpers", SimpleNamespace(streaming_bulk=fake_streaming_bulk)
+        )
+        client = FakeESClient(exists=True)
+        client.indices = FakeIndices(exists=True, events=events)
+        ticks: list[int] = []
+
+        indexed = store_with(client).rebuild(
+            (make_record(i) for i in range(3)), on_indexed=ticks.append
+        )
+
+        assert indexed == 3
+        assert events == ["delete", "create", "stream", "refresh"]
+        assert client.indices.deleted == [{"index": "idx-test", "ignore_unavailable": True}]
+        (created,) = client.indices.created
+        assert created["settings"] == _INDEX_SETTINGS and created["mappings"] == _INDEX_MAPPINGS
+        assert [action["_id"] for action in streamed] == [
+            f"docaaa000000000a::{i}" for i in range(3)
+        ]
+        assert streamed[0]["_source"] == {
+            "content": "chunk 0",
+            "contextualized_content": "the blurb\n\nchunk 0",
+            "doc_id": "docaaa000000000a",
+            "chunk_id": "docaaa000000000a::0",
+            "original_index": 0,
+        }
+        assert ticks == [1, 2, 3]
+        assert options["max_retries"] > 0  # 429s back off per bulk request
+
+    def test_rejected_documents_are_not_counted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_streaming_bulk(client: Any, actions: Any, **kwargs: Any) -> Any:
+            for index, action in enumerate(actions):
+                yield index != 1, {"index": {"_id": action["_id"]}}
+
+        monkeypatch.setattr(
+            bm25_store, "helpers", SimpleNamespace(streaming_bulk=fake_streaming_bulk)
+        )
+        assert store_with(FakeESClient()).rebuild([make_record(i) for i in range(3)]) == 2
+
+    def test_an_empty_corpus_still_leaves_a_fresh_index(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            bm25_store,
+            "helpers",
+            SimpleNamespace(streaming_bulk=lambda client, actions, **_: iter(())),
+        )
+        client = FakeESClient()
+        assert store_with(client).rebuild([]) == 0
+        assert len(client.indices.created) == 1
+        assert client.indices.refreshed == ["idx-test"]

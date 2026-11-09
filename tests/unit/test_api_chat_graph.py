@@ -24,6 +24,7 @@ from tests.unit.test_api_chat import (
     FakeRetriever,
     StreamingFakeLLM,
 )
+from varagity.api.corpus_gate import CorpusGate, get_corpus_gates
 from varagity.api.deps import (
     get_conversation_store_factory,
     get_graph_chat_preflight,
@@ -143,7 +144,10 @@ def app(
 
     application.dependency_overrides[get_services_preflight] = lambda: _chunk_preflight
     application.dependency_overrides[get_graph_chat_preflight] = lambda: _graph_preflight
+    gates = {"rag": CorpusGate("rag"), "graph": CorpusGate("graph")}
+    application.dependency_overrides[get_corpus_gates] = lambda: gates
     application.state.fake_retriever = retriever
+    application.state.gates = gates
     return application
 
 
@@ -384,3 +388,26 @@ def test_the_fakes_match_the_service_surface_the_route_uses() -> None:
     for name in ("session", "retrieve"):
         assert callable(getattr(GraphService, name))
         assert callable(getattr(FakeGraphService, name))
+
+
+class TestDuringADocumentRestore:
+    """A RAG restore holds off the turns the documents would answer — only those (ADR-019)."""
+
+    async def test_a_turn_the_graph_answers_is_unaffected(
+        self, app: FastAPI, graph_service: FakeGraphService
+    ) -> None:
+        app.state.gates["rag"].claim("restore")
+        events = await graph_turn(app)
+        assert events[-1][0] == "done"
+        assert graph_service.calls  # the graph really answered
+
+    async def test_a_graph_turn_that_would_degrade_to_the_documents_is_refused(
+        self, app: FastAPI, settings_env: Any
+    ) -> None:
+        import json
+
+        settings_env(GRAPH_ENABLED="false")  # the kill switch sends it to the documents…
+        app.state.gates["rag"].claim("restore")  # …which are mid-restore
+        status, body = await post_chat(app, {"query": "q", "corpus": "graph"})
+        assert status == 503
+        assert json.loads(body)["error"]["code"] == "corpus_restoring"

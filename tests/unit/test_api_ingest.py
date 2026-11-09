@@ -20,6 +20,7 @@ import pytest
 from fastapi import FastAPI
 
 from tests.sse import parse_sse
+from varagity.api.corpus_gate import CorpusBusy, CorpusGate, get_corpus_gates
 from varagity.api.deps import get_ingest_preflight
 from varagity.api.ingest_runner import (
     EVENT_LOG,
@@ -159,6 +160,9 @@ def scripted_flow(
 def make_runner(**kwargs: Any) -> IngestRunner:
     kwargs.setdefault("base_stages", scripted_base_stages())
     kwargs.setdefault("on_reingest_complete", lambda: None)
+    # Each test gets its own gate, so a run one test leaves behind can never
+    # hold another test's corpus.
+    kwargs.setdefault("gate", CorpusGate("rag"))
     return IngestRunner(kwargs.pop("flow", scripted_flow()), **kwargs)
 
 
@@ -268,6 +272,72 @@ class TestRunnerLifecycle:
         await wait_terminal(runner)
         assert cleared == []
 
+    async def test_a_run_holds_the_rag_gate_and_frees_it_before_its_terminal_frame(
+        self,
+    ) -> None:
+        """★ A client starting the next run on the terminal frame never sees corpus_busy."""
+        gate = CorpusGate("rag")
+        hold = threading.Event()
+        runner = make_runner(flow=scripted_flow(gate=hold), gate=gate)
+        holder_at_terminal: list[str | None] = []
+        real_emit = runner._emit
+
+        def watching_emit(event: str, payload: Any) -> None:
+            if event == EVENT_STATUS and payload.run is not None and payload.run.state != "running":
+                holder_at_terminal.append(gate.holder)
+            real_emit(event, payload)
+
+        runner._emit = watching_emit  # type: ignore[method-assign]
+        runner.start(reingest=False)
+        try:
+            assert gate.holder == "ingest"
+        finally:
+            hold.set()
+        await wait_terminal(runner)
+        assert holder_at_terminal == [None]
+        assert gate.holder is None
+
+    async def test_a_backup_holding_the_corpus_refuses_the_ingest(self) -> None:
+        gate = CorpusGate("rag")
+        gate.claim("export")
+        runner = make_runner(gate=gate)
+        with pytest.raises(CorpusBusy, match="an export is running"):
+            runner.start(reingest=False)
+        assert runner.snapshot() is None  # no run was created
+        assert gate.holder == "export"  # untouched by the refusal
+
+    async def test_a_second_ingest_keeps_its_own_code_ahead_of_the_gate(self) -> None:
+        gate = CorpusGate("rag")
+        hold = threading.Event()
+        runner = make_runner(flow=scripted_flow(gate=hold), gate=gate)
+        runner.start(reingest=False)
+        try:
+            with pytest.raises(IngestAlreadyRunning):
+                runner.start(reingest=False)
+        finally:
+            hold.set()
+        await wait_terminal(runner)
+
+    async def test_a_thread_that_will_not_start_gives_the_corpus_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gate = CorpusGate("rag")
+        runner = make_runner(gate=gate)
+
+        def refuse(self: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", refuse)
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            runner.start(reingest=False)
+        assert gate.holder is None
+        snapshot = runner.snapshot()
+        assert snapshot is not None and snapshot.state == "failed"
+
+    def test_the_default_runner_claims_the_process_rag_gate(self) -> None:
+        runner = IngestRunner(scripted_flow(), base_stages=scripted_base_stages())
+        assert runner._gate is get_corpus_gates()["rag"]
+
     async def test_failed_reingest_does_not_clear_stale(self) -> None:
         cleared: list[bool] = []
         runner = make_runner(
@@ -323,6 +393,24 @@ class TestRoutes:
         finally:
             gate.set()
         await wait_terminal(runner)
+
+    async def test_an_ingest_during_an_export_is_a_structured_409(self) -> None:
+        gate = CorpusGate("rag")
+        gate.claim("export")
+        application = create_app()
+        application.dependency_overrides[get_ingest_runner] = lambda: make_runner(gate=gate)
+
+        async def _noop() -> None:
+            return None
+
+        application.dependency_overrides[get_ingest_preflight] = lambda: _noop
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://api") as client:
+            response = await client.post("/api/ingest", json={})
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "corpus_busy"
+        assert "an export is running" in error["message"]
 
     async def test_preflight_failure_is_a_structured_503(self, app: FastAPI) -> None:
         from fastapi import HTTPException

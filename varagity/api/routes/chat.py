@@ -18,8 +18,10 @@ the wire.
 
 Failure surfaces split by stream state: dependency outages and bad
 references are caught by dependencies *before* the stream opens (clean
-structured ``503``/``404``/``422``); anything after the 200 flushed is an
-in-band ``error`` event. A client disconnect cancels this generator, whose
+structured ``503``/``404``/``422``) — and so is a corpus mid-restore, which
+answers ``503 corpus_restoring`` rather than retrieve from tables that are
+being replaced (ADR-019); anything after the 200 flushed is an in-band
+``error`` event. A client disconnect cancels this generator, whose
 cleanup flips the bridge's abort flag; the flow notices between tokens and
 closes the LLM stream, freeing the GPU (spec_v2 §4.3 cancellation).
 """
@@ -35,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
+from varagity.api.corpus_gate import CorpusGate, get_corpus_gates
 from varagity.api.deps import (
     get_chat_engine_resolver,
     get_conversation_store_factory,
@@ -91,6 +94,9 @@ _STATS_WARMUP_TOKENS = 8
 # every chunk; at ~56 tok/s that is a frame per ~18 ms, which would swamp
 # the deltas the user actually came for. 250 ms reads as live.
 _STATS_MIN_INTERVAL_S = 0.25
+
+# How a corpus-restoring refusal names each corpus to the person asking.
+_CORPUS_NOUNS = {"rag": "document corpus", "graph": "message graph"}
 
 # Per-transcript cap on the evidence excerpt, both on the wire and in the
 # persisted snapshot. A retrieved graph passage is a slice of a whole
@@ -440,16 +446,18 @@ async def prepare_chat(
     services_preflight: Annotated[Callable[[], Awaitable[None]], Depends(get_services_preflight)],
     graph_service: Annotated[GraphService, Depends(get_graph_service)],
     graph_preflight: Annotated[Callable[[], Awaitable[None]], Depends(get_graph_chat_preflight)],
+    gates: Annotated[dict[str, CorpusGate], Depends(get_corpus_gates)],
 ) -> ChatPlan:
     """Validate the request and resolve everything the stream will need.
 
     Checks run cheapest-first: body shape (FastAPI, 422 — an unknown
     ``corpus`` never gets past it) → retrieval-method resolution (422) →
     chat-engine resolution (override or settings, 422) → the graph degrade
-    decision, which picks *which* dependencies the turn even needs →
-    dependency reachability (503, *before* the stream opens) → conversation
-    existence (404), whose store round-trip doubles as the history load for
-    the chat engine (bounded by ``CONDENSE_HISTORY_TURNS``).
+    decision, which picks *which* corpus answers and so which dependencies
+    the turn even needs → that corpus mid-restore (503) → dependency
+    reachability (503, *before* the stream opens) → conversation existence
+    (404), whose store round-trip doubles as the history load for the chat
+    engine (bounded by ``CONDENSE_HISTORY_TURNS``).
 
     A graph turn resolves the chunk retriever too: it is cheap, and it is
     what answers the turn if the graph degrades.
@@ -465,6 +473,8 @@ async def prepare_chat(
         graph_service: The process-wide graph service.
         graph_preflight: The graph turn's reachability check (Elasticsearch
             is not on that path).
+        gates: The process's per-corpus write gates (a restore holds its
+            corpus's gate for the whole run).
 
     Returns:
         The assembled plan.
@@ -472,9 +482,11 @@ async def prepare_chat(
     Raises:
         HTTPException: ``422 unknown_retrieval_method`` /
             ``422 unknown_chat_engine`` for an override naming no
-            registered implementation; ``503 <service>_unreachable`` for a
-            down dependency; ``404 conversation_not_found`` for an unknown
-            ``conversation_id``.
+            registered implementation; ``503 corpus_restoring`` while a
+            backup restore replaces the corpus that would answer (a graph
+            turn the graph answers is unaffected by a document restore);
+            ``503 <service>_unreachable`` for a down dependency; ``404
+            conversation_not_found`` for an unknown ``conversation_id``.
     """
     settings = get_settings()
     overrides = payload.overrides or ChatOverrides()
@@ -503,6 +515,22 @@ async def prepare_chat(
     # Opening the session dials no service — it initializes local storages —
     # so nothing here depends on the check that follows it.
     graph = await _open_graph(graph_service) if corpus == "graph" else None
+    # Whichever corpus will actually answer — a degraded graph turn answers
+    # from the documents — must not be mid-restore: its tables are empty or
+    # half-loaded until the restore commits, and retrieval would either wait
+    # behind the restore or answer from nothing.
+    answering = "graph" if graph is not None else "rag"
+    if gates[answering].holder == "restore":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "corpus_restoring",
+                "message": (
+                    f"the {_CORPUS_NOUNS[answering]} is being restored from a backup — "
+                    "ask again when the restore finishes"
+                ),
+            },
+        )
     await (graph_preflight() if graph is not None else services_preflight())
 
     history: list[Turn] = []

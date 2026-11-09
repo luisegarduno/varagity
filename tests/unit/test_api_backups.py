@@ -1,18 +1,25 @@
 """Unit tests for the backup runner and its API routes (ADR-019).
 
-The runner executes an injected export flow (the ``test_api_ingest.py``
-pattern), so no Prefect or postgres is touched — but the injected flow runs
-the *real* :func:`~varagity.backup.rag.export_rag` over a fake snapshot, so
-the bundle the routes list and serve is a real zip in a tmp ``DOCS_PATH``.
-What's under test: the gate as the one-run-at-a-time rule, replay-then-live
-subscription, the terminal frame's saved path, and the structured route
-errors.
+The runner executes injected export and restore flows (the
+``test_api_ingest.py`` pattern), so no Prefect or postgres is touched — but
+the injected flows run the *real* :func:`~varagity.backup.rag.export_rag` and
+:func:`~varagity.backup.rag.restore_rag` over fake stores, so the bundles the
+routes list, verify, serve and restore are real zips in a tmp
+``DOCS_PATH``. What's under test: the gate as the one-run-at-a-time rule,
+replay-then-live subscription, the terminal frame's saved path and restore
+summary, the restore route's up-front refusals, the list's cheap verdict,
+and the remembered damage. (That the real ``rag-restore`` flow writes the
+stale flag only on completion is ``test_pipeline_flows.py``'s, under the
+Prefect harness.)
 """
 
 import asyncio
 import logging
+import os
 import threading
-from collections.abc import Callable
+import zipfile
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +28,14 @@ import pytest
 from fastapi import FastAPI, HTTPException
 
 from tests.sse import parse_sse
-from tests.unit.test_backup_rag import FakeStore, chunk, document
+from tests.unit.test_backup_rag import (
+    FakeRebuildBM25,
+    FakeRestoreStore,
+    FakeStore,
+    chunk,
+    document,
+    rezip,
+)
 from varagity.api.backup_runner import (
     EVENT_LOG,
     EVENT_PROGRESS,
@@ -34,7 +48,16 @@ from varagity.api.backup_runner import (
 from varagity.api.corpus_gate import CorpusBusy, CorpusGate
 from varagity.api.deps import get_backup_preflight, get_vector_store
 from varagity.api.main import create_app
-from varagity.backup.rag import RagExport, export_rag
+from varagity.api.routes import backups as backups_routes
+from varagity.api.routes.backups import DamagedBundles, get_damaged_bundles
+from varagity.backup.rag import (
+    CHUNKS_MEMBER,
+    RagExport,
+    RagRestore,
+    derive_corpus_stale,
+    export_rag,
+    restore_rag,
+)
 
 TICK = 0.02  # worker-thread scheduling slack for wait loops
 DIM = 4
@@ -83,11 +106,55 @@ def scripted_flow(
     return flow
 
 
+def scripted_restore_flow(
+    docs_root: Path,
+    *,
+    store: FakeRestoreStore | None = None,
+    bm25: FakeRebuildBM25 | None = None,
+    hold: threading.Event | None = None,
+) -> Callable[..., RagRestore]:
+    """A restore-flow double: the real restore over fake stores, then the stale derivation.
+
+    Args:
+        docs_root: The tmp corpus root (the re-rooting target).
+        store: The fake vector store to replace (a fresh one by default).
+        bm25: The fake BM25 store to rebuild (a fresh one by default).
+        hold: When given, the flow blocks on it first.
+    """
+
+    def flow(
+        bundle: Path,
+        *,
+        ingest_settings: Callable[[], Mapping[str, str]],
+        on_progress: Any = None,
+    ) -> RagRestore:
+        if hold is not None:
+            assert hold.wait(timeout=5)
+        result = restore_rag(
+            bundle,
+            store or FakeRestoreStore(),  # type: ignore[arg-type]
+            bm25 or FakeRebuildBM25(),  # type: ignore[arg-type]
+            docs_root,
+            on_progress=on_progress,
+        )
+        return replace(result, stale=derive_corpus_stale(result.manifest, ingest_settings()))
+
+    return flow
+
+
 def make_runner(docs_root: Path, **kwargs: Any) -> BackupRunner:
     flow = kwargs.pop("flow", None) or scripted_flow(docs_root)
+    kwargs.setdefault("restore_flow", scripted_restore_flow(docs_root))
     kwargs.setdefault("gate", CorpusGate("rag"))
     kwargs.setdefault("ingest_settings", lambda: dict(INGEST_SETTINGS))
     return BackupRunner("rag", export_flow=flow, **kwargs)
+
+
+def exported_bundle(docs_root: Path) -> Path:
+    """Write one real bundle into the exports folder (no run involved)."""
+    return export_rag(
+        docs_root / "varagity-exports", corpus_store(docs_root), INGEST_SETTINGS, stale=False
+    ).bundle.path
 
 
 async def collect(runner: BackupRunner, timeout: float = 5.0) -> list[Feed]:
@@ -287,11 +354,15 @@ class TestRunnerWiring:
 
 
 class FakeVectorStore:
-    def __init__(self, documents: int) -> None:
+    def __init__(self, documents: int, *, lock_free: bool = True) -> None:
         self.documents = documents
+        self.lock_free = lock_free
 
     def document_count(self) -> int:
         return self.documents
+
+    def corpus_lock_free(self) -> bool:
+        return self.lock_free
 
 
 def make_app(
@@ -299,6 +370,8 @@ def make_app(
     *,
     documents: int = 1,
     preflight: Callable[[str, str], Any] | None = None,
+    lock_free: bool = True,
+    damaged: DamagedBundles | None = None,
 ) -> FastAPI:
     application = create_app()
     application.dependency_overrides[get_backup_runners] = lambda: {"rag": runner}
@@ -307,7 +380,11 @@ def make_app(
         return None
 
     application.dependency_overrides[get_backup_preflight] = lambda: preflight or _noop
-    application.dependency_overrides[get_vector_store] = lambda: FakeVectorStore(documents)
+    application.dependency_overrides[get_vector_store] = lambda: FakeVectorStore(
+        documents, lock_free=lock_free
+    )
+    memory = damaged if damaged is not None else DamagedBundles()
+    application.dependency_overrides[get_damaged_bundles] = lambda: memory
     return application
 
 
@@ -511,6 +588,7 @@ class TestRoutes:
         [
             ("GET", "/api/backups/graph"),
             ("POST", "/api/backups/graph/export"),
+            ("POST", "/api/backups/graph/restore"),
             ("GET", "/api/backups/graph/status"),
             ("GET", "/api/backups/graph/files/x.zip"),
             ("GET", "/api/backups/everything"),
@@ -528,3 +606,374 @@ class TestRoutes:
             await stream_body(make_app(make_runner(docs_root)), "/api/backups/rag/status")
         )
         assert events == [("status", {"run": None})]
+
+
+# ── restore (phase 2) ─────────────────────────────────────────────────────
+
+
+class TestRestoreRunner:
+    async def test_a_completed_restore_replays_its_four_stages(self, docs_root: Path) -> None:
+        bundle = exported_bundle(docs_root)
+        store = FakeRestoreStore()
+        runner = make_runner(docs_root, restore_flow=scripted_restore_flow(docs_root, store=store))
+        started = runner.start("restore", bundle.name)
+        assert started.operation == "restore"
+        assert started.bundle == bundle.name  # named from the start, unlike an export
+        assert started.saved_to is None
+        await wait_terminal(runner)
+
+        events = await collect(runner)
+        stages = [payload.stage for name, payload in events if name == EVENT_PROGRESS]
+        assert stages[0] == "validate"
+        assert stages.index("load") < stages.index("index") < stages.index("bm25")
+        logs = [payload.message for name, payload in events if name == EVENT_LOG]
+        assert any(f"from {bundle.name}" in line for line in logs)
+
+        run = events[-1][1].run
+        assert run.state == "completed"
+        assert run.summary.counts == {"documents": 1, "chunks": 2, "bm25": 2}
+        assert run.summary.size_bytes == bundle.stat().st_size
+        assert run.summary.stale is False  # the bundle's settings are the stack's
+        assert run.saved_to is None
+        assert [row.doc_id for row in store.documents] == ["doc-a"]
+
+    async def test_drifted_settings_come_back_stale(self, docs_root: Path) -> None:
+        bundle = exported_bundle(docs_root)
+        runner = make_runner(
+            docs_root, ingest_settings=lambda: {**INGEST_SETTINGS, "CHUNK_SIZE": "800"}
+        )
+        runner.start("restore", bundle.name)
+        await wait_terminal(runner)
+        snapshot = runner.snapshot()
+        assert snapshot is not None and snapshot.summary is not None
+        assert snapshot.summary.stale is True
+
+    async def test_one_backup_run_at_a_time_whatever_the_operation(self, docs_root: Path) -> None:
+        bundle = exported_bundle(docs_root)
+        hold = threading.Event()
+        gate = CorpusGate("rag")
+        runner = make_runner(
+            docs_root, gate=gate, restore_flow=scripted_restore_flow(docs_root, hold=hold)
+        )
+        runner.start("restore", bundle.name)
+        try:
+            assert gate.holder == "restore"
+            with pytest.raises(CorpusBusy, match="a restore is running"):
+                runner.start("restore", bundle.name)
+            with pytest.raises(CorpusBusy, match="a restore is running"):
+                runner.start("export")
+            with pytest.raises(CorpusBusy):
+                runner.ensure_free()
+        finally:
+            hold.set()
+        await wait_terminal(runner)
+        assert gate.holder is None
+        runner.ensure_free()
+
+    async def test_a_failed_restore_reports_and_frees_the_corpus(self, docs_root: Path) -> None:
+        bundle = exported_bundle(docs_root)
+        with zipfile.ZipFile(bundle) as archive:
+            chunks = archive.read(CHUNKS_MEMBER)
+        damaged = rezip(
+            bundle, {CHUNKS_MEMBER: chunks.replace(b"chunk 1", b"chunk 7")}, reseal=False
+        )
+        gate = CorpusGate("rag")
+        runner = make_runner(docs_root, gate=gate)
+        runner.start("restore", damaged.name)
+        await wait_terminal(runner)
+        snapshot = runner.snapshot()
+        assert snapshot is not None and snapshot.state == "failed"
+        assert snapshot.error is not None
+        assert snapshot.error.startswith("BundleDamaged: chunks.jsonl does not match")
+        assert snapshot.summary is None
+        assert gate.holder is None
+
+    async def test_a_restore_flow_returning_nothing_is_a_failed_run(self, docs_root: Path) -> None:
+        runner = make_runner(docs_root, restore_flow=lambda bundle, **kwargs: None)
+        runner.start("restore", "x.zip")
+        await wait_terminal(runner)
+        snapshot = runner.snapshot()
+        assert snapshot is not None and snapshot.error == "the restore returned no result"
+
+    async def test_start_checks_its_arguments(self, docs_root: Path) -> None:
+        runner = make_runner(docs_root)
+        with pytest.raises(ValueError, match="a restore takes the bundle"):
+            runner.start("restore")
+        with pytest.raises(ValueError, match="an export takes none"):
+            runner.start("export", "x.zip")
+        assert runner.snapshot() is None
+
+    def test_a_corpus_without_a_restore_refuses_one(self, docs_root: Path) -> None:
+        runner = BackupRunner(
+            "graph", gate=CorpusGate("graph"), export_flow=scripted_flow(docs_root)
+        )
+        with pytest.raises(ValueError, match="the graph corpus has no restore"):
+            runner.start("restore", "g.zip")
+
+    async def test_the_flow_gets_the_settings_provider_not_a_snapshot(
+        self, docs_root: Path
+    ) -> None:
+        """The stale flag is judged against the settings current when it is written."""
+        bundle = exported_bundle(docs_root)
+        seen: list[Any] = []
+
+        def flow(bundle: Path, *, ingest_settings: Any, on_progress: Any = None) -> Any:
+            seen.append(ingest_settings)
+            return None
+
+        settings = {"current": dict(INGEST_SETTINGS)}
+        runner = make_runner(
+            docs_root, restore_flow=flow, ingest_settings=lambda: settings["current"]
+        )
+        runner.start("restore", bundle.name)
+        await wait_terminal(runner)
+        (provider,) = seen
+        settings["current"] = {"CHUNK_SIZE": "800"}  # a PATCH lands mid-restore…
+        assert provider() == {"CHUNK_SIZE": "800"}  # …and the provider sees it
+
+
+async def restore(app: FastAPI, name: str) -> httpx.Response:
+    return await request(app, "POST", "/api/backups/rag/restore", json={"name": name})
+
+
+class TestRestoreRoute:
+    async def test_restore_round_trip(self, docs_root: Path) -> None:
+        """★ 202 → the replayed stream walks the four stages → completed."""
+        bundle = exported_bundle(docs_root)
+        runner = make_runner(docs_root)
+        app = make_app(runner)
+
+        started = await restore(app, bundle.name)
+        assert started.status_code == 202
+        body = started.json()
+        assert body["operation"] == "restore" and body["bundle"] == bundle.name
+        await wait_terminal(runner)
+
+        events = parse_sse(await stream_body(app, "/api/backups/rag/status"))
+        stages = [data["stage"] for name, data in events if name == "progress"]
+        assert {"validate", "load", "index", "bm25"} <= set(stages)
+        final = events[-1][1]["run"]
+        assert final["state"] == "completed"
+        assert final["summary"]["counts"] == {"documents": 1, "chunks": 2, "bm25": 2}
+        assert final["summary"]["stale"] is False
+
+    async def test_an_unknown_bundle_is_404(self, docs_root: Path) -> None:
+        exported_bundle(docs_root)
+        runner = make_runner(docs_root)
+        response = await restore(make_app(runner), "missing.zip")
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "bundle_not_found"
+        assert runner.snapshot() is None
+
+    async def test_a_bundle_from_another_embedding_model_is_422_incompatible(
+        self, docs_root: Path, settings_env: Callable[..., None]
+    ) -> None:
+        bundle = exported_bundle(docs_root)
+        settings_env(EMBEDDING_MODEL="BAAI/bge-m3")
+        runner = make_runner(docs_root)
+        response = await restore(make_app(runner), bundle.name)
+        assert response.status_code == 422
+        error = response.json()["error"]
+        assert error["code"] == "bundle_incompatible"
+        assert error["message"] == (
+            f"cannot restore {bundle.name}: Embedded with test-model — this stack embeds with "
+            "BAAI/bge-m3."
+        )
+        assert runner.snapshot() is None  # refused before any run existed
+
+    async def test_a_damaged_bundle_is_422_invalid_and_then_lists_as_damaged(
+        self, docs_root: Path
+    ) -> None:
+        """★ The list never hashes; the restore does — and remembers what it found."""
+        bundle = exported_bundle(docs_root)
+        with zipfile.ZipFile(bundle) as archive:
+            chunks = archive.read(CHUNKS_MEMBER)
+        damaged = rezip(
+            bundle, {CHUNKS_MEMBER: chunks.replace(b"chunk 1", b"chunk 7")}, reseal=False
+        )
+        bundle.unlink()
+        runner = make_runner(docs_root)
+        app = make_app(runner)
+
+        (entry,) = (await request(app, "GET", "/api/backups/rag")).json()
+        assert entry["name"] == damaged.name
+        assert entry["restorable"] is True  # the cheap verdict can't see it
+
+        response = await restore(app, damaged.name)
+        assert response.status_code == 422
+        error = response.json()["error"]
+        assert error["code"] == "bundle_invalid"
+        assert "chunks.jsonl does not match its recorded sha256" in error["message"]
+        assert runner.snapshot() is None
+
+        (entry,) = (await request(app, "GET", "/api/backups/rag")).json()
+        assert entry["restorable"] is False
+        assert entry["reason"] == (
+            "chunks.jsonl does not match its recorded sha256 — the bundle is damaged."
+        )
+
+        # A changed file is a new file: judged afresh by the cheap verdict.
+        os.utime(damaged, (3_000_000, 3_000_000))
+        (entry,) = (await request(app, "GET", "/api/backups/rag")).json()
+        assert entry["restorable"] is True
+
+    async def test_an_unsound_bundle_is_422_invalid(self, docs_root: Path) -> None:
+        exports = docs_root / "varagity-exports"
+        exports.mkdir()
+        with zipfile.ZipFile(exports / "photos.zip", "w") as archive:
+            archive.writestr("a.jpg", b"...")
+        response = await restore(make_app(make_runner(docs_root)), "photos.zip")
+        assert response.status_code == 422
+        error = response.json()["error"]
+        assert error["code"] == "bundle_invalid"
+        assert (
+            error["message"] == "cannot restore photos.zip: No bundle.json — not a Varagity backup."
+        )
+
+    async def test_a_busy_corpus_is_409_before_the_bundle_is_hashed(
+        self, docs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bundle = exported_bundle(docs_root)
+        hashed: list[str] = []
+        monkeypatch.setattr(
+            backups_routes, "verify_bundle", lambda path, corpus: hashed.append(path.name)
+        )
+        gate = CorpusGate("rag")
+        gate.claim("ingest")
+        response = await restore(make_app(make_runner(docs_root, gate=gate)), bundle.name)
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "corpus_busy"
+        assert "an ingest is running" in error["message"]
+        assert hashed == []
+
+    async def test_an_ingest_in_another_process_is_409(self, docs_root: Path) -> None:
+        bundle = exported_bundle(docs_root)
+        runner = make_runner(docs_root)
+        response = await restore(make_app(runner, lock_free=False), bundle.name)
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "corpus_busy"
+        assert "an ingest in another process holds the corpus lock" in error["message"]
+        assert runner.snapshot() is None
+
+    async def test_losing_the_race_for_the_gate_is_409(self, docs_root: Path) -> None:
+        """Free at the pre-check, claimed by the time the run starts."""
+        bundle = exported_bundle(docs_root)
+        gate = CorpusGate("rag")
+        runner = make_runner(docs_root, gate=gate)
+        real_check = runner.ensure_free
+
+        def check_then_lose() -> None:
+            real_check()
+            gate.claim("export")  # another operation slips in after the check
+
+        runner.ensure_free = check_then_lose  # type: ignore[method-assign]
+        response = await restore(make_app(runner), bundle.name)
+        assert response.status_code == 409
+        assert "an export is running" in response.json()["error"]["message"]
+
+    async def test_unreachable_stores_are_a_structured_503(self, docs_root: Path) -> None:
+        calls: list[tuple[str, str]] = []
+
+        async def down(corpus: str, operation: str) -> None:
+            calls.append((corpus, operation))
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "es_unreachable", "message": "elasticsearch unreachable"},
+            )
+
+        response = await restore(make_app(make_runner(docs_root), preflight=down), "x.zip")
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "es_unreachable"
+        assert calls == [("rag", "restore")]
+
+    @pytest.mark.parametrize("body", [{}, {"name": ""}, {"name": "a.zip", "force": True}])
+    async def test_a_malformed_body_is_a_validation_error(
+        self, docs_root: Path, body: dict[str, Any]
+    ) -> None:
+        response = await request(
+            make_app(make_runner(docs_root)), "POST", "/api/backups/rag/restore", json=body
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "validation_error"
+
+
+class TestListedVerdicts:
+    async def test_a_bundle_made_under_this_stacks_settings_has_no_drift(
+        self, docs_root: Path
+    ) -> None:
+        export_rag(
+            docs_root / "varagity-exports",
+            corpus_store(docs_root),
+            backups_routes.current_ingest_settings(),
+            stale=False,
+        )
+        (entry,) = (
+            await request(make_app(make_runner(docs_root)), "GET", "/api/backups/rag")
+        ).json()
+        assert entry["restorable"] is True
+        assert entry["reason"] is None
+        assert entry["drift"] == []
+
+    async def test_settings_the_bundle_never_recorded_count_as_drift(self, docs_root: Path) -> None:
+        exported_bundle(docs_root)  # records only CHUNK_SIZE and CONTEXTUALIZE
+        (entry,) = (
+            await request(make_app(make_runner(docs_root)), "GET", "/api/backups/rag")
+        ).json()
+        assert "CHUNKING_STRATEGY" in entry["drift"] and "OCR_ENGINE" in entry["drift"]
+
+    async def test_drift_names_the_settings_that_differ(
+        self, docs_root: Path, settings_env: Callable[..., None]
+    ) -> None:
+        exported = export_rag(
+            docs_root / "varagity-exports",
+            corpus_store(docs_root),
+            backups_routes.current_ingest_settings(),
+            stale=False,
+        )
+        settings_env(CHUNK_SIZE=800)
+        (entry,) = (
+            await request(make_app(make_runner(docs_root)), "GET", "/api/backups/rag")
+        ).json()
+        assert entry["name"] == exported.bundle.name
+        assert entry["restorable"] is True  # drift flags stale; it never refuses
+        assert entry["drift"] == ["CHUNK_SIZE"]
+
+    async def test_an_incompatible_bundle_lists_its_reason(
+        self, docs_root: Path, settings_env: Callable[..., None]
+    ) -> None:
+        exported_bundle(docs_root)
+        settings_env(EMBEDDING_DIM=8)
+        (entry,) = (
+            await request(make_app(make_runner(docs_root)), "GET", "/api/backups/rag")
+        ).json()
+        assert entry["restorable"] is False
+        assert entry["reason"] == "4-dimensional embeddings — this stack embeds into 8 dimensions."
+        assert entry["manifest"]["counts"] == {"documents": 1, "chunks": 2}
+
+    async def test_a_hand_copied_zip_lists_why_it_cannot_restore(self, docs_root: Path) -> None:
+        exports = docs_root / "varagity-exports"
+        exports.mkdir()
+        with zipfile.ZipFile(exports / "holiday-photos.zip", "w") as archive:
+            archive.writestr("a.jpg", b"...")
+        (entry,) = (
+            await request(make_app(make_runner(docs_root)), "GET", "/api/backups/rag")
+        ).json()
+        assert entry["manifest"] is None
+        assert entry["restorable"] is False
+        assert entry["reason"] == "No bundle.json — not a Varagity backup."
+        assert entry["drift"] == []
+
+    def test_the_damage_memory_keys_by_name_size_and_mtime(self, docs_root: Path) -> None:
+        from varagity.backup.bundle import list_bundles
+
+        bundle = exported_bundle(docs_root)
+        memory = DamagedBundles()
+        (listing,) = list_bundles(bundle.parent, "rag")
+        assert memory.reason("rag", listing) is None
+        memory.remember("rag", bundle.name, bundle, "broken")
+        assert memory.reason("rag", listing) == "broken"
+        assert memory.reason("graph", listing) is None  # per corpus
+        memory.remember("rag", "gone.zip", docs_root / "gone.zip", "never stat-able")  # no-op
+        assert get_damaged_bundles() is get_damaged_bundles()  # one per process

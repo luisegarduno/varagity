@@ -5,10 +5,20 @@ The Anthropic cookbook's in-memory ``ContextualVectorDB`` responsibilities
 PostgreSQL/pgvector (spec §11.2) so the index is durable, concurrent, and
 inspectable via SQL. The schema itself lives in ``schema.sql`` (applied by
 the postgres container on first boot).
+
+It also owns the RAG corpus's **advisory lock** (ADR-019): one fixed key in
+the database's advisory-lock namespace that every ingest holds *shared* for
+its whole run and a backup restore holds *exclusive* from before it empties
+the tables until the BM25 index is rebuilt. The API's in-process corpus gate
+cannot see a CLI ingest (``main.py ingest`` / ``chat`` run in their own
+process); this lock can, because it lives in the one place every writer
+connects to. Ingests still overlap each other exactly as before, and a
+session-level lock dies with its connection, so a crashed process never
+strands the corpus.
 """
 
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -168,6 +178,113 @@ ORDER BY original_index, doc_id
 # row is a few KB with its vector, so a batch stays well under 10 MB.
 _SNAPSHOT_BATCH_ROWS = 500
 
+# The RAG corpus's advisory-lock key: b"VARAGITY" read as one big-endian
+# bigint. Session-level locks on it are released by the session's end, so a
+# crashed process can never strand the corpus.
+CORPUS_LOCK_KEY = int.from_bytes(b"VARAGITY", "big")
+
+# exclusive → the pg function (try-lock never waits: a busy corpus is an
+# answer, not a queue).
+_TRY_LOCK_SQL = {
+    True: "SELECT pg_try_advisory_lock(%s)",
+    False: "SELECT pg_try_advisory_lock_shared(%s)",
+}
+_UNLOCK_SQL = {
+    True: "SELECT pg_advisory_unlock(%s)",
+    False: "SELECT pg_advisory_unlock_shared(%s)",
+}
+
+# How long a restore waits to empty the tables: TRUNCATE needs ACCESS
+# EXCLUSIVE, so it queues behind every open reader. Readers hold it for
+# milliseconds; anything still there after this (an idle-in-transaction
+# session) fails the restore cleanly instead of stalling it forever. SET
+# LOCAL: it ends with the restore's transaction.
+_RESTORE_LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = '30s'"
+
+_TRUNCATE_CORPUS_SQL = "TRUNCATE documents, chunks"
+
+# The vector index is dropped for the load and built once after it (the
+# pgvector README: "it's faster to create an index after loading your
+# initial data"), from its own catalog definition so a tuned index (m,
+# ef_construction) comes back as it was.
+_HNSW_INDEX_NAME = "chunks_embedding_hnsw"
+_INDEX_DEFINITION_SQL = """
+SELECT indexdef FROM pg_indexes
+WHERE schemaname = current_schema() AND indexname = 'chunks_embedding_hnsw'
+"""
+_DROP_HNSW_SQL = "DROP INDEX chunks_embedding_hnsw"
+# schema.sql's own definition, for a database that has lost the index.
+_DEFAULT_HNSW_SQL = (
+    "CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops)"
+)
+
+# Binary COPY: every value crosses the wire in its native binary form — the
+# vectors as pgvector's own (dimension header + float4s), bit for bit.
+_COPY_DOCUMENTS_SQL = (
+    "COPY documents (doc_id, source, file_type, content_hash, n_chunks, ingested_at) "
+    "FROM STDIN (FORMAT binary)"
+)
+_DOCUMENT_COPY_TYPES = ["text", "text", "text", "text", "int4", "timestamptz"]
+_COPY_CHUNKS_SQL = (
+    "COPY chunks (chunk_id, doc_id, original_index, chunk_index, content, context, "
+    "contextualized_content, embedding, metadata, created_at) FROM STDIN (FORMAT binary)"
+)
+_CHUNK_COPY_TYPES = [
+    "text",
+    "text",
+    "int4",
+    "int4",
+    "text",
+    "text",
+    "text",
+    "vector",
+    "jsonb",
+    "timestamptz",
+]
+
+_ANALYZE_SQL = ("ANALYZE documents", "ANALYZE chunks")
+
+# What the BM25 index mirrors of each chunk (bm25_store's five fields).
+_INDEX_ROWS_SQL = """
+SELECT chunk_id, doc_id, original_index, content, contextualized_content
+FROM chunks
+ORDER BY original_index, doc_id
+"""
+
+
+class CorpusLocked(RuntimeError):
+    """Raised when the corpus lock is held in a mode that excludes the request.
+
+    Attributes:
+        exclusive: What the refused request wanted — ``True`` for a restore
+            (refused by an ingest's shared hold), ``False`` for an ingest
+            (refused by a restore's exclusive hold).
+    """
+
+    def __init__(self, *, exclusive: bool) -> None:
+        """Word the refusal for whoever was refused.
+
+        Args:
+            exclusive: Whether the refused request wanted the lock
+                exclusively.
+        """
+        super().__init__(
+            "an ingest is running in another process (it holds the corpus lock) — "
+            "try again when it finishes"
+            if exclusive
+            else "the corpus is being restored — try again when the restore finishes"
+        )
+        self.exclusive = exclusive
+
+
+class CorpusTablesBusy(RuntimeError):
+    """Raised when a restore can't get the corpus tables to itself in time.
+
+    Some session kept ``documents``/``chunks`` open past the restore's lock
+    timeout (an idle-in-transaction connection, a long dump). Nothing was
+    replaced: the restore's transaction rolled back.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class CorpusDocumentRow:
@@ -219,6 +336,25 @@ class CorpusChunkRow:
     metadata: dict[str, Any]
     created_at: datetime
     embedding: Vector
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusIndexRow:
+    """What the BM25 index mirrors of one chunk — its five fields.
+
+    Attributes:
+        chunk_id: ``{doc_id}::{chunk_index}`` (the Elasticsearch ``_id``).
+        doc_id: The owning document.
+        original_index: The corpus-global index (the fusion join key).
+        content: The original chunk text.
+        contextualized_content: The embedded and BM25-indexed text.
+    """
+
+    chunk_id: str
+    doc_id: str
+    original_index: int
+    content: str
+    contextualized_content: str
 
 
 class CorpusSnapshot:
@@ -458,6 +594,196 @@ class ContextualVectorDB(ClosingContextMixin):
             row = self._conn.execute(_CORPUS_COUNTS_SQL).fetchone()
             documents, chunks = (0, 0) if row is None else (int(row[0]), int(row[1]))
             yield CorpusSnapshot(self._conn, document_count=documents, chunk_count=chunks)
+
+    @contextmanager
+    def corpus_lock(self, *, exclusive: bool) -> Iterator[None]:
+        """Hold the RAG corpus's advisory lock for the ``with`` block.
+
+        Ingests hold it **shared** — they overlap each other exactly as they
+        always have — and a backup restore holds it **exclusive**, so a
+        restore and an ingest in *any* two processes exclude each other
+        (ADR-019). The lock belongs to this store's database session: it is
+        released when the block exits, and with the connection if the
+        process dies first. Never blocks — a held lock is refused at once.
+
+        Args:
+            exclusive: Take it exclusively (a restore) rather than shared
+                (an ingest).
+
+        Yields:
+            Nothing; the corpus lock is held until the block exits.
+
+        Raises:
+            CorpusLocked: If the lock is held in a mode that excludes this
+                request.
+        """
+        row = self._conn.execute(_TRY_LOCK_SQL[exclusive], (CORPUS_LOCK_KEY,)).fetchone()
+        if row is None or not row[0]:
+            raise CorpusLocked(exclusive=exclusive)
+        try:
+            yield
+        finally:
+            try:
+                self._conn.execute(_UNLOCK_SQL[exclusive], (CORPUS_LOCK_KEY,))
+            except psycopg.Error as error:
+                # The session is gone (or going): its end releases the lock.
+                logger.warning("could not release the corpus lock (%s)", error)
+
+    def corpus_lock_free(self) -> bool:
+        """Report whether a restore could take the corpus lock right now.
+
+        Takes the lock exclusively and gives it straight back — so ``False``
+        means an ingest, in this process or another, holds it shared. The
+        restore route's pre-202 check; the restore itself still takes the
+        lock for real (and fails cleanly if an ingest won the race).
+
+        Returns:
+            ``True`` when nothing holds the corpus lock.
+        """
+        row = self._conn.execute(_TRY_LOCK_SQL[True], (CORPUS_LOCK_KEY,)).fetchone()
+        if row is None or not row[0]:
+            return False
+        self._conn.execute(_UNLOCK_SQL[True], (CORPUS_LOCK_KEY,))
+        return True
+
+    def replace_corpus(
+        self,
+        documents: Iterable[CorpusDocumentRow],
+        chunks: Iterable[CorpusChunkRow],
+        *,
+        on_indexing: Callable[[], None] | None = None,
+    ) -> tuple[int, int]:
+        """Replace every ``documents`` and ``chunks`` row in one transaction.
+
+        The backup restore's write (ADR-019), in this order: empty both
+        tables, drop the HNSW index (its definition saved from
+        ``pg_indexes``), binary-``COPY`` the documents and then the chunks,
+        rebuild the index from that definition, ``ANALYZE``, commit. The
+        commit is where the restore takes effect: any failure before it —
+        a row the bundle got wrong, a stream that turns out damaged, the
+        caller raising mid-iteration — rolls the whole thing back and the
+        previous corpus is untouched. ``TRUNCATE`` holds both tables until
+        then, so a concurrent reader waits for the restored rows rather
+        than seeing half of them.
+
+        The two streams are consumed strictly in order (documents first, as
+        the foreign key demands), so a chunk stream may depend on what the
+        document stream has already yielded.
+
+        Args:
+            documents: Every document row, in any order.
+            chunks: Every chunk row with its vector; each ``doc_id`` must be
+                among ``documents``.
+            on_indexing: Called once the rows are loaded, just before the
+                vector index build — the slow tail of a large restore.
+
+        Returns:
+            ``(documents, chunks)`` written.
+
+        Raises:
+            CorpusTablesBusy: If another session held the tables past the
+                lock timeout (nothing was replaced).
+        """
+        with self._conn.transaction():
+            self._conn.execute(_RESTORE_LOCK_TIMEOUT_SQL)
+            try:
+                self._conn.execute(_TRUNCATE_CORPUS_SQL)
+            except psycopg.errors.LockNotAvailable as error:
+                raise CorpusTablesBusy(
+                    "another database session kept the documents/chunks tables open — "
+                    "nothing was replaced; try again"
+                ) from error
+            row = self._conn.execute(_INDEX_DEFINITION_SQL).fetchone()
+            index_sql = _DEFAULT_HNSW_SQL if row is None else str(row[0])
+            if row is not None:
+                self._conn.execute(_DROP_HNSW_SQL)
+            documents_written = self._copy_rows(
+                _COPY_DOCUMENTS_SQL,
+                _DOCUMENT_COPY_TYPES,
+                (
+                    (
+                        document.doc_id,
+                        document.source,
+                        document.file_type,
+                        document.content_hash,
+                        document.n_chunks,
+                        document.ingested_at,
+                    )
+                    for document in documents
+                ),
+            )
+            chunks_written = self._copy_rows(
+                _COPY_CHUNKS_SQL,
+                _CHUNK_COPY_TYPES,
+                (
+                    (
+                        chunk.chunk_id,
+                        chunk.doc_id,
+                        chunk.original_index,
+                        chunk.chunk_index,
+                        chunk.content,
+                        chunk.context,
+                        chunk.contextualized_content,
+                        chunk.embedding,
+                        chunk.metadata,
+                        chunk.created_at,
+                    )
+                    for chunk in chunks
+                ),
+            )
+            if on_indexing is not None:
+                on_indexing()
+            self._conn.execute(index_sql)
+            for statement in _ANALYZE_SQL:
+                self._conn.execute(statement)
+        logger.info(
+            "replaced the corpus: %d document(s), %d chunk(s); %s rebuilt",
+            documents_written,
+            chunks_written,
+            _HNSW_INDEX_NAME,
+        )
+        return documents_written, chunks_written
+
+    def _copy_rows(self, sql: str, types: list[str], rows: Iterable[tuple[Any, ...]]) -> int:
+        """Stream rows into one binary ``COPY … FROM STDIN``.
+
+        Args:
+            sql: The ``COPY`` statement.
+            types: The Postgres type of each column, in order (binary COPY
+                carries no type information of its own).
+            rows: The column values, row by row.
+
+        Returns:
+            The rows written.
+        """
+        written = 0
+        with self._conn.cursor() as cursor, cursor.copy(sql) as copy:
+            copy.set_types(types)
+            for values in rows:
+                copy.write_row(values)
+                written += 1
+        return written
+
+    def iter_index_rows(self) -> Generator[CorpusIndexRow, None, None]:
+        """Stream what the BM25 index mirrors of every chunk.
+
+        Backs the restore's BM25 rebuild (ADR-019): the five fields of each
+        stored chunk, through a server-side cursor so the corpus streams in
+        bounded memory. The transaction stays open until the iterator is
+        exhausted or closed — close it (``contextlib.closing``) when
+        abandoning it early.
+
+        Yields:
+            One row per chunk, ``original_index`` order.
+        """
+        with (
+            self._conn.transaction(),
+            self._conn.cursor(name="varagity_index_rows") as cursor,
+        ):
+            cursor.itersize = _SNAPSHOT_BATCH_ROWS
+            cursor.execute(_INDEX_ROWS_SQL)
+            for row in cursor:
+                yield CorpusIndexRow(*row)
 
     def get_document(self, doc_id: str) -> DocumentInfo | None:
         """Fetch one ingested document by id.

@@ -30,11 +30,14 @@ const STATE_BADGE_VARIANT: Record<string, "accent" | "success" | "destructive"> 
 export function IngestPanel({
   view,
   disabled,
+  busyNote = null,
   onIngest,
   onReingest,
 }: {
   view: IngestView;
   disabled: boolean;
+  /** Why the controls are disabled when another operation holds the corpus (a backup). */
+  busyNote?: string | null;
   onIngest: () => void;
   onReingest: () => void;
 }) {
@@ -64,10 +67,14 @@ export function IngestPanel({
         </div>
       </div>
 
+      {busyNote && <p className="text-xs text-muted-foreground">{busyNote}</p>}
+
       {run === null ? (
-        <p className="text-xs text-muted-foreground">
-          No ingest has run since the API started.
-        </p>
+        !busyNote && (
+          <p className="text-xs text-muted-foreground">
+            No ingest has run since the API started.
+          </p>
+        )
       ) : (
         <div className="flex flex-col gap-2">
           {/* role=status: run-state flips (running → completed/failed) are

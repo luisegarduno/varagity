@@ -11,7 +11,13 @@
  * summaries, byte sizes), which are pure and so live here, under the
  * Vitest suite, rather than in the component.
  */
-import type { BackupEvent, BackupRun, BundleManifest } from "@/lib/api";
+import type {
+  BackupEvent,
+  BackupRun,
+  BackupSummary,
+  BundleManifest,
+  BundleOut,
+} from "@/lib/api";
 
 /** One relayed `varagity.backup` log line. */
 export interface BackupLogLine {
@@ -24,7 +30,8 @@ export interface BackupView {
   run: BackupRun | null;
   /**
    * The stage the run last reported — `snapshot` | `documents` | `chunks` |
-   * `finalize` for an export. `null` before the first frame and once terminal.
+   * `finalize` for an export, `validate` | `load` | `index` | `bm25` for a
+   * restore. `null` before the first frame and once terminal.
    */
   stage: string | null;
   /** Rows written so far in a counted stage (`null` otherwise). */
@@ -43,7 +50,7 @@ export const initialBackupView: BackupView = {
   logs: [],
 };
 
-/** An export logs a handful of lines; the cap only guards a runaway. */
+/** A backup run logs a handful of lines; the cap only guards a runaway. */
 export const MAX_BACKUP_LOG_LINES = 200;
 
 /** Apply one SSE event to the view (pure — returns a new object). */
@@ -98,6 +105,14 @@ export function backupStageLabel(view: BackupView): string | null {
       return "writing chunks and vectors";
     case "finalize":
       return "sealing the bundle";
+    case "validate":
+      return "checking the bundle";
+    case "load":
+      return "loading rows";
+    case "index":
+      return "building the vector index";
+    case "bm25":
+      return "rebuilding the BM25 index";
     default:
       return view.stage;
   }
@@ -110,9 +125,108 @@ export function backupStageUnit(stage: string | null): string {
       return "documents";
     case "chunks":
       return "chunks";
+    case "load":
+      return "chunks loaded";
+    case "bm25":
+      return "chunks indexed";
     default:
       return "rows";
   }
+}
+
+/** A restore's four stages, in order, as the panel's step strip names them. */
+export const RESTORE_STEPS = [
+  { stage: "validate", label: "validate" },
+  { stage: "load", label: "load rows" },
+  { stage: "index", label: "vector index" },
+  { stage: "bm25", label: "BM25 index" },
+] as const;
+
+export type RestoreStepState = "done" | "now" | "pending";
+
+/**
+ * Where a restore is, step by step: the steps before the reported stage are
+ * done, the reported one is in progress, and a completed run has done them
+ * all. (A failed run marks nothing done — its error says where it stopped.)
+ */
+export function restoreSteps(
+  view: BackupView,
+): { stage: string; label: string; state: RestoreStepState }[] {
+  const completed = view.run?.state === "completed";
+  const at = RESTORE_STEPS.findIndex((step) => step.stage === view.stage);
+  return RESTORE_STEPS.map((step, index) => ({
+    stage: step.stage,
+    label: step.label,
+    state:
+      completed || (at !== -1 && index < at) ? "done" : index === at ? "now" : "pending",
+  }));
+}
+
+/** `58.3 → "58 s"`, `125 → "2 min 5 s"` — a restore's wall clock, readably. */
+export function formatDuration(seconds: number): string {
+  const whole = Math.round(seconds);
+  if (whole < 60) return `${whole} s`;
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  return rest === 0 ? `${minutes} min` : `${minutes} min ${rest} s`;
+}
+
+/** The "Restore summary" a completed restore renders, as `[label, value]` rows. */
+export function restoreSummaryRows(summary: BackupSummary): [string, string][] {
+  const counts = summary.counts;
+  const rows: [string, string][] = [];
+  if (counts.documents !== undefined) rows.push(["documents", counts.documents.toLocaleString()]);
+  if (counts.chunks !== undefined) rows.push(["chunks", counts.chunks.toLocaleString()]);
+  if (counts.bm25 !== undefined) rows.push(["BM25 docs", counts.bm25.toLocaleString()]);
+  rows.push(["took", formatDuration(summary.wall_clock_s)]);
+  return rows;
+}
+
+/**
+ * The confirm dialog's description: what a restore replaces, and with what.
+ *
+ * `current` is what the corpus holds now (`null` when unknown — the line
+ * then just says "the current corpus").
+ */
+export function describeReplacement(
+  current: { documents: number; chunks: number } | null,
+  manifest: BundleManifest | null,
+): string {
+  const now =
+    current === null
+      ? "the current corpus"
+      : `the ${formatCount(current.documents, "documents")} and ${formatCount(current.chunks, "chunks")}`;
+  const incoming =
+    manifest === null
+      ? "this backup's rows"
+      : `this backup's ${Object.entries(manifest.counts)
+          .map(([noun, count]) => formatCount(count, noun))
+          .join(" and ")}`;
+  return `Replaces ${now} in both stores with ${incoming}. Nothing is re-parsed, re-contextualized or re-embedded. Conversations keep their evidence snapshots.`;
+}
+
+/**
+ * Why restoring a bundle will flag the corpus stale, or `null` when it won't.
+ *
+ * `drift` is the server's list of reingest-affecting settings the bundle was
+ * made under that differ from this stack's; the bundle's own values come
+ * from its manifest.
+ */
+export function describeStaleRestore(bundle: BundleOut): string | null {
+  const manifest = bundle.manifest ?? null;
+  const parts: string[] = [];
+  if (bundle.drift.length > 0) {
+    const recorded = manifest?.ingest_settings ?? {};
+    const values = bundle.drift.map((name) =>
+      recorded[name] === undefined ? `${name} unrecorded` : `${name}=${recorded[name]}`,
+    );
+    parts.push(
+      `It was made under ${values.join(", ")}, which differ from this stack's settings`,
+    );
+  }
+  if (manifest?.stale) parts.push("it was already flagged stale when it was exported");
+  if (parts.length === 0) return null;
+  return `${parts.join("; ")} — the corpus will be flagged stale until a re-ingest.`;
 }
 
 /** Singular nouns for the `counts` keys a manifest carries. */

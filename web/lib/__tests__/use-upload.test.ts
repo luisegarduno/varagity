@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  type BackupEvent,
+  type BackupRun,
   type ConfigResponse,
   type IngestEvent,
   type IngestRun,
@@ -73,6 +75,37 @@ async function* streamOf(
   for (const event of events) yield event;
 }
 
+function backupRun(id: string, state: BackupRun["state"]): BackupRun {
+  return {
+    run_id: id,
+    corpus: "rag",
+    operation: "restore",
+    state,
+    bundle: "varagity-rag-20261108-1312.zip",
+    saved_to: null,
+    started_at: "2026-11-08T13:20:00Z",
+    finished_at: state === "running" ? null : "2026-11-08T13:21:00Z",
+    error: null,
+    summary: null,
+  };
+}
+
+/** A backup-status stream: one restore run to its terminal frame, or the idle frame. */
+async function* backupStreamOf(
+  run: "restore" | "idle",
+): AsyncGenerator<BackupEvent, void, undefined> {
+  if (run === "idle") {
+    yield { type: "status", data: { run: null } };
+    return;
+  }
+  yield { type: "status", data: { run: backupRun("b1", "running") } };
+  yield { type: "progress", data: { stage: "load", current: 2, total: 5 } };
+  yield { type: "status", data: { run: backupRun("b1", "completed") } };
+}
+
+const BUSY = () =>
+  new ApiError(409, "corpus_busy", "the rag corpus is busy — a restore is running");
+
 function uploadOk(files: File[]): UploadResponse {
   return {
     files: files.map((file) => ({
@@ -99,6 +132,7 @@ function harness(overrides: Partial<AttachDeps> = {}) {
     upload: vi.fn(async (files: File[]) => uploadOk(files)),
     start: vi.fn(async () => ({})),
     stream: vi.fn(() => streamOf(runEvents("run-1"))),
+    backupStream: vi.fn(() => backupStreamOf("idle")),
     onState: (state) => states.push(state),
     onSettled: vi.fn(),
     ...overrides,
@@ -176,6 +210,52 @@ describe("createAttachController", () => {
     expect(start).toHaveBeenCalledTimes(3);
     expect(deps.stream).toHaveBeenCalledTimes(3); // two drains + our run
     expect(latest().phase).toBe("done");
+  });
+
+  it("on corpus_busy waits for the backup run once, then starts the ingest", async () => {
+    const start = vi.fn().mockRejectedValueOnce(BUSY()).mockResolvedValue({});
+    const backupStream = vi.fn(() => backupStreamOf("restore"));
+    const { controller, deps, states, latest } = harness({ start, backupStream });
+
+    await controller.attach([pickedFile("a.md")], { folder: false, config: CONFIG });
+
+    expect(backupStream).toHaveBeenCalledTimes(1); // the backup stream, drained once
+    expect(deps.stream).toHaveBeenCalledTimes(1); // only our own ingest's stream
+    expect(start).toHaveBeenCalledTimes(2);
+    const queued = states.filter((state) => state.phase === "queued");
+    expect(queued.length).toBeGreaterThan(0);
+    // Named by the run it waits on, once the stream says which.
+    expect(attachChipLabel(queued[queued.length - 1])).toBe(
+      "Queued — waiting for the restore…",
+    );
+    expect(latest().phase).toBe("done");
+    expect(latest().queuedBehind).toBeNull();
+    expect(latest().stored).toBe(1);
+  });
+
+  it("surfaces corpus_busy with no backup run to wait for instead of spinning", async () => {
+    const start = vi.fn().mockRejectedValue(BUSY());
+    const backupStream = vi.fn(() => backupStreamOf("idle"));
+    const { controller, latest } = harness({ start, backupStream });
+
+    await controller.attach([pickedFile("a.md")], { folder: false, config: CONFIG });
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(backupStream).toHaveBeenCalledTimes(1);
+    expect(latest().phase).toBe("error");
+    expect(latest().error).toBe("the rag corpus is busy — a restore is running");
+  });
+
+  it("does not retry on a dropped backup stream", async () => {
+    const start = vi.fn().mockRejectedValue(BUSY());
+    // A stream that drops before its first frame.
+    async function* dropped(): AsyncGenerator<BackupEvent, void, undefined> {
+      throw new TypeError("network error");
+    }
+    const { controller, latest } = harness({ start, backupStream: vi.fn(() => dropped()) });
+    await controller.attach([pickedFile("a.md")], { folder: false, config: CONFIG });
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(latest().phase).toBe("error");
   });
 
   it("merges a second attach into the running cycle and ingests once more", async () => {
@@ -321,6 +401,18 @@ describe("attachChipLabel", () => {
   it("names the queue wait", () => {
     expect(attachChipLabel(at({ phase: "queued" }))).toBe(
       "Queued — waiting for the current ingest…",
+    );
+    expect(attachChipLabel(at({ phase: "queued", queuedBehind: "ingest" }))).toBe(
+      "Queued — waiting for the current ingest…",
+    );
+    expect(attachChipLabel(at({ phase: "queued", queuedBehind: "backup" }))).toBe(
+      "Queued — waiting for the backup…",
+    );
+    expect(attachChipLabel(at({ phase: "queued", queuedBehind: "export" }))).toBe(
+      "Queued — waiting for the export…",
+    );
+    expect(attachChipLabel(at({ phase: "queued", queuedBehind: "restore" }))).toBe(
+      "Queued — waiting for the restore…",
     );
   });
 

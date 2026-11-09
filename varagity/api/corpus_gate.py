@@ -14,6 +14,16 @@ It is deliberately small and in-process: the API is the only process that
 runs these operations through the GUI (the graph's single writer by design),
 so a ``threading.Lock`` is the whole mechanism. Claims never block — a busy
 corpus is an answer, not a wait.
+
+**The cross-process half (RAG only).** Some RAG writers run in their own
+process — ``uv run main.py ingest``, and ``main.py chat``, which ingests on
+startup — where no in-process gate can see them. The RAG corpus therefore
+also has a Postgres advisory lock
+(:meth:`~varagity.stores.vector_store.ContextualVectorDB.corpus_lock`): every
+ingest, in any process, holds it shared for its whole run, and a restore
+holds it exclusive. The gate orders the API's own operations (and names the
+holder in the ``409``); the lock is what keeps a CLI ingest and a restore
+apart. The graph needs no such half — its single writer *is* this process.
 """
 
 import threading
@@ -86,6 +96,21 @@ class CorpusGate:
         """Give the corpus back (idempotent: releasing a free gate is a no-op)."""
         with self._lock:
             self._holder = None
+
+    def ensure_free(self) -> None:
+        """Refuse at once if any operation holds the corpus — without claiming it.
+
+        For routes that should answer ``409`` *before* doing expensive work
+        (a restore hashing a bundle) or that write outside any run (the
+        document deletes). The claim that follows can still lose a race;
+        it raises the same error.
+
+        Raises:
+            CorpusBusy: If the corpus is held.
+        """
+        holder = self.holder
+        if holder is not None:
+            raise CorpusBusy(self.corpus, holder)
 
     @property
     def holder(self) -> Operation | None:

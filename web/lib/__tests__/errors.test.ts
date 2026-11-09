@@ -46,6 +46,18 @@ describe("describeChatError", () => {
     expect(descriptor.raw).toBe(false);
   });
 
+  it("treats corpus_restoring as a wait with a retry, not a fault", () => {
+    const descriptor = describeChatError({
+      code: "corpus_restoring",
+      message: "the document corpus is being restored from a backup — ask again …",
+    });
+    expect(descriptor.title).toBe("The corpus is being restored");
+    expect(descriptor.hint).toContain("once the restore finishes");
+    expect(descriptor.command).toBeNull();
+    expect(descriptor.action).toBe("retry");
+    expect(descriptor.raw).toBe(false);
+  });
+
   it("surfaces unrecognized codes raw, still offering a retry", () => {
     const descriptor = describeChatError({
       code: "pipeline_error",

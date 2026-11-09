@@ -44,6 +44,16 @@ class TestCorpusGate:
         with pytest.raises(CorpusBusy, match=f"the graph corpus is busy — {phrase}"):
             gate.claim("export")
 
+    def test_ensure_free_refuses_without_claiming(self) -> None:
+        gate = CorpusGate("rag")
+        gate.ensure_free()  # free: no error, and still free
+        assert gate.holder is None
+        gate.claim("restore")
+        with pytest.raises(CorpusBusy, match="a restore is running") as caught:
+            gate.ensure_free()
+        assert caught.value.holder == "restore"
+        assert gate.holder == "restore"
+
     def test_release_is_idempotent(self) -> None:
         gate = CorpusGate("rag")
         gate.release()

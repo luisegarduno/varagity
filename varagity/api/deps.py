@@ -385,9 +385,12 @@ def get_graph_build_preflight() -> Callable[[], Awaitable[None]]:
 # What each backup operation touches (ADR-019). None of them calls a model
 # service — that is the point of a backup — so the set is just the stores
 # the operation reads or writes: a RAG export reads the rows (and the
-# corpus-stale flag beside them) from postgres, and nothing else.
+# corpus-stale flag beside them) from postgres, and nothing else; a RAG
+# restore replaces the rows in postgres and rebuilds the BM25 index in
+# Elasticsearch from them.
 BACKUP_REQUIRED_SERVICES: dict[tuple[str, str], tuple[str, ...]] = {
     ("rag", "export"): ("postgres",),
+    ("rag", "restore"): ("postgres", "elasticsearch"),
 }
 
 
@@ -399,7 +402,7 @@ async def require_backup_services(corpus: str, operation: str) -> None:
 
     Args:
         corpus: The corpus being backed up (``rag``).
-        operation: The backup operation (``export``).
+        operation: The backup operation (``export`` | ``restore``).
 
     Raises:
         HTTPException: ``503`` naming the first unreachable service.

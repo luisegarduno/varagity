@@ -7,6 +7,7 @@ import { useMountEffect } from "@/hooks/use-mount-effect";
 import {
   ApiError,
   startExport,
+  startRestore,
   streamBackupStatus,
   type BundleOut,
   type TargetCorpus,
@@ -34,6 +35,13 @@ export interface BackupRunHandle {
   running: boolean;
   /** Start an export; follows its stream on success. */
   startExport: () => Promise<void>;
+  /**
+   * Start restoring one bundle; follows its stream on success. Resolves to
+   * `null` once the run started, or to why it was refused — in which case
+   * the bundle list is re-read, so a bundle the restore found damaged now
+   * says so.
+   */
+  startRestore: (name: string) => Promise<string | null>;
 }
 
 /**
@@ -44,7 +52,10 @@ export interface BackupRunHandle {
  * tabs can host the same panel: attach to the replaying stream once on
  * mount (a live, finished, or absent run all render correctly), re-attach
  * after a successful start, and invalidate the corpus's `["backups", …]`
- * list when a run ends — a finished export has a new bundle to show.
+ * list when a run ends — a finished export has a new bundle to show. A
+ * finished RAG restore also invalidates the document table and the
+ * settings catalog: the rows were replaced, and the restore rewrote the
+ * stale flag the banner reads.
  */
 export function useBackupRun(corpus: TargetCorpus): BackupRunHandle {
   const queryClient = useQueryClient();
@@ -75,6 +86,10 @@ export function useBackupRun(corpus: TargetCorpus): BackupRunHandle {
         }
         if (next.run !== null && next.run.state !== "running") {
           void queryClient.invalidateQueries({ queryKey: queryKeys.backups(corpus) });
+          if (next.run.operation === "restore" && corpus === "rag") {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.documents });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
+          }
         }
       } catch {
         // Stream dropped (API restart, network): the panel keeps the last
@@ -103,6 +118,28 @@ export function useBackupRun(corpus: TargetCorpus): BackupRunHandle {
     }
   }, [corpus, follow]);
 
+  const restore = useCallback(
+    async (name: string): Promise<string | null> => {
+      try {
+        await startRestore(corpus, name);
+        setError(null);
+        follow();
+        return null;
+      } catch (failure) {
+        const message =
+          failure instanceof ApiError
+            ? failure.message
+            : "Could not start the restore — is the stack up?";
+        setError(message);
+        // A refusal may have taught the server something (a damaged bundle
+        // is remembered): re-read the list so the row says so.
+        void queryClient.invalidateQueries({ queryKey: queryKeys.backups(corpus) });
+        return message;
+      }
+    },
+    [corpus, follow, queryClient],
+  );
+
   return {
     view,
     bundles,
@@ -110,5 +147,6 @@ export function useBackupRun(corpus: TargetCorpus): BackupRunHandle {
     error,
     running: view.run?.state === "running",
     startExport: start,
+    startRestore: restore,
   };
 }

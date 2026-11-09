@@ -7,14 +7,14 @@ run is — the same contract ingest and the graph build already keep, so the
 
 * **One writer per corpus.** :meth:`BackupRunner.start` claims the corpus's
   :class:`~varagity.api.corpus_gate.CorpusGate` and holds it for the whole
-  run; a second export (or, once they claim it too, an ingest or a restore)
-  is refused with :class:`~varagity.api.corpus_gate.CorpusBusy` — the
+  run; a second export or restore — or an ingest, which claims the same
+  gate — is refused with :class:`~varagity.api.corpus_gate.CorpusBusy`, the
   route's ``409 corpus_busy``. There is no separate single-flight flag: the
   gate *is* the one-run-at-a-time rule.
-* **A tracked flow.** The run executes the ``rag-export`` Prefect flow on a
-  daemon thread, in-process, exactly as the CLI and the ingest runner run
-  theirs; stage progress rides an ``on_progress`` callback and the
-  ``varagity.backup`` log records are relayed as ``log`` events.
+* **A tracked flow.** The run executes the ``rag-export`` or ``rag-restore``
+  Prefect flow on a daemon thread, in-process, exactly as the CLI and the
+  ingest runner run theirs; stage progress rides an ``on_progress`` callback
+  and the ``varagity.backup`` log records are relayed as ``log`` events.
 * **Replay + live fan-out.** Events accumulate per run; a subscriber gets
   the full backlog first, then live events until the terminal ``status``
   frame — connecting mid-run or after completion renders the same picture.
@@ -48,9 +48,9 @@ from varagity.api.schemas import (
     BackupSummaryOut,
 )
 from varagity.backup.bundle import Corpus, display_path, exports_dir
-from varagity.backup.rag import ExportStage, RagExport
+from varagity.backup.rag import ExportStage, RagExport, RagRestore, RestoreStage
 from varagity.config import get_settings
-from varagity.pipeline.backup_flow import rag_export_flow
+from varagity.pipeline.backup_flow import rag_export_flow, rag_restore_flow
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +62,20 @@ EVENT_LOG = "log"
 # backup package's own lines (what was exported, a swept partial, drift).
 _RELAY_LOGGER = "varagity.backup"
 
-BackupOperation = Literal["export"]
-"""What a backup run can do (restore joins in a later phase)."""
+BackupOperation = Literal["export", "restore"]
+"""What a backup run can do."""
 
 RunState = Literal["running", "completed", "failed"]
+
+BackupStage = ExportStage | RestoreStage
+"""Every stage a backup run's ``progress`` frames can name."""
 
 Feed = tuple[str, BaseModel]
 """One feed item: ``(sse_event_name, payload_model)``."""
 
-# The flow each corpus exports with when none is injected.
+# The flows each corpus backs up and restores with when none is injected.
 _EXPORT_FLOWS: dict[str, Callable[..., RagExport]] = {"rag": rag_export_flow}
+_RESTORE_FLOWS: dict[str, Callable[..., RagRestore]] = {"rag": rag_restore_flow}
 
 
 def current_ingest_settings() -> dict[str, str]:
@@ -99,12 +103,14 @@ class _RunState:
         run_id: The run handle.
         corpus: The corpus being backed up.
         operation: What the run does.
-        ingest_settings: The reingest-affecting settings captured at start.
+        ingest_settings: The reingest-affecting settings captured at start
+            (what an export's bundle records).
         state: ``running`` | ``completed`` | ``failed``.
         started_at: Start timestamp.
         finished_at: Terminal timestamp (``None`` while running).
-        bundle: The published bundle's file name (``completed`` only).
-        saved_to: Its checkout-relative path (``completed`` only).
+        bundle: An export's published bundle (``completed`` only), or the
+            bundle a restore restores (from the start).
+        saved_to: An export's checkout-relative path (``completed`` only).
         error: The run-level failure (``failed`` only).
         summary: The final counters (``completed`` only).
     """
@@ -196,6 +202,7 @@ class BackupRunner:
         *,
         gate: CorpusGate | None = None,
         export_flow: Callable[..., RagExport] | None = None,
+        restore_flow: Callable[..., RagRestore] | None = None,
         ingest_settings: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         """Wire the runner's collaborators (all injectable for tests).
@@ -205,8 +212,13 @@ class BackupRunner:
             gate: The corpus's write gate; the process-wide one when omitted.
             export_flow: The export callable, ``rag_export_flow``-compatible
                 (injectable so tests run without stores or Prefect).
-            ingest_settings: Provider of the reingest-affecting settings the
-                bundle records; :func:`current_ingest_settings` by default.
+            restore_flow: The restore callable, ``rag_restore_flow``-
+                compatible; the corpus's own when omitted (``None`` for a
+                corpus that has none — its restores are refused).
+            ingest_settings: Provider of the reingest-affecting settings —
+                what an export's bundle records and what a restore's stale
+                flag is judged against; :func:`current_ingest_settings` by
+                default.
 
         Raises:
             KeyError: If no export flow exists for ``corpus`` and none was
@@ -215,6 +227,9 @@ class BackupRunner:
         self.corpus: Corpus = corpus
         self._gate = gate if gate is not None else get_corpus_gates()[corpus]
         self._export_flow = export_flow if export_flow is not None else _EXPORT_FLOWS[corpus]
+        self._restore_flow = (
+            restore_flow if restore_flow is not None else _RESTORE_FLOWS.get(corpus)
+        )
         self._ingest_settings = (
             ingest_settings if ingest_settings is not None else current_ingest_settings
         )
@@ -225,19 +240,28 @@ class BackupRunner:
 
     # ── run control ────────────────────────────────────────────────────
 
-    def start(self, operation: BackupOperation) -> BackupRunOut:
+    def start(self, operation: BackupOperation, bundle: str | None = None) -> BackupRunOut:
         """Start a background backup run.
 
         Args:
-            operation: What to run (``export``).
+            operation: What to run (``export`` | ``restore``).
+            bundle: The bundle a restore restores — a file name in the
+                corpus's exports folder (the route has already resolved and
+                verified it). Not taken by an export.
 
         Returns:
             The new run's handle/state snapshot (state ``running``).
 
         Raises:
             CorpusBusy: If any operation already holds the corpus — a second
-                export included.
+                export or restore included.
+            ValueError: If a restore names no bundle, an export names one, or
+                the corpus has no restore.
         """
+        if (operation == "restore") != (bundle is not None):
+            raise ValueError("a restore takes the bundle to restore; an export takes none")
+        if operation == "restore" and self._restore_flow is None:
+            raise ValueError(f"the {self.corpus} corpus has no restore")
         ingest_settings = self._ingest_settings()
         with self._lock:
             self._gate.claim(operation)
@@ -246,6 +270,7 @@ class BackupRunner:
                 corpus=self.corpus,
                 operation=operation,
                 ingest_settings=ingest_settings,
+                bundle=bundle,
             )
             started = run.to_out()
             self._run = run
@@ -284,6 +309,17 @@ class BackupRunner:
         """
         with self._lock:
             return self._run is not None and self._run.state == "running"
+
+    def ensure_free(self) -> None:
+        """Refuse at once if any operation holds the corpus (without claiming it).
+
+        The restore route's cheap pre-check: a busy corpus answers ``409``
+        before the bundle is hashed.
+
+        Raises:
+            CorpusBusy: If the corpus is held.
+        """
+        self._gate.ensure_free()
 
     # ── the event feed ─────────────────────────────────────────────────
 
@@ -332,12 +368,12 @@ class BackupRunner:
             subscribers = list(self._subscribers)
         _deliver(subscribers, item)
 
-    def _report_progress(self, stage: ExportStage, current: int | None, total: int | None) -> None:
-        """Turn the export's progress callback into ``progress`` frames.
+    def _report_progress(self, stage: BackupStage, current: int | None, total: int | None) -> None:
+        """Turn the flow's progress callback into ``progress`` frames.
 
         Args:
-            stage: The export stage.
-            current: Rows written so far in a counted stage.
+            stage: The export or restore stage.
+            current: Rows done so far in a counted stage.
             total: The stage's row count.
         """
         self._emit(EVENT_PROGRESS, BackupProgressEvent(stage=stage, current=current, total=total))
@@ -345,27 +381,37 @@ class BackupRunner:
     # ── the worker thread ──────────────────────────────────────────────
 
     def _execute(self, run: _RunState) -> None:
-        """Run the export flow; publish the terminal state.
+        """Run the export or restore flow; publish the terminal state.
 
         Args:
             run: The run this thread owns.
         """
         relay = _RelayHandler(self._emit)
         backup_logger = logging.getLogger(_RELAY_LOGGER)
-        # The export's own lines log at INFO; the feed must carry them
+        # The backup's own lines log at INFO; the feed must carry them
         # whatever the process LOG_LEVEL (root handlers still apply their
         # own level filters, so the console stays as quiet as configured).
         previous_level = backup_logger.level
         backup_logger.setLevel(logging.INFO)
         backup_logger.addHandler(relay)
-        result: RagExport | None = None
+        result: RagExport | RagRestore | None = None
         failure: str | None = None
         try:
-            result = self._export_flow(
-                exports_dir(self.corpus),
-                ingest_settings=run.ingest_settings,
-                on_progress=self._report_progress,
-            )
+            if run.operation == "restore":
+                assert self._restore_flow is not None and run.bundle is not None  # start() checked
+                result = self._restore_flow(
+                    exports_dir(self.corpus) / run.bundle,
+                    # The provider, not a snapshot: the stale flag is judged
+                    # against the settings current when it is written.
+                    ingest_settings=self._ingest_settings,
+                    on_progress=self._report_progress,
+                )
+            else:
+                result = self._export_flow(
+                    exports_dir(self.corpus),
+                    ingest_settings=run.ingest_settings,
+                    on_progress=self._report_progress,
+                )
         except Exception as error:
             logger.exception("backup run %s (%s %s) failed", run.run_id, self.corpus, run.operation)
             failure = f"{type(error).__name__}: {error}"
@@ -375,7 +421,11 @@ class BackupRunner:
             self._finish(run, result=result, error=failure)
 
     def _finish(
-        self, run: _RunState, *, result: RagExport | None = None, error: str | None = None
+        self,
+        run: _RunState,
+        *,
+        result: RagExport | RagRestore | None = None,
+        error: str | None = None,
     ) -> None:
         """Make the run terminal, publish its last frame, and free the corpus.
 
@@ -384,12 +434,12 @@ class BackupRunner:
 
         Args:
             run: The run ending.
-            result: The export's outcome, when it completed.
+            result: The flow's outcome, when it completed.
             error: The failure, when it did not.
         """
         with self._lock:
             run.finished_at = datetime.now(UTC)
-            if result is not None and error is None:
+            if isinstance(result, RagExport) and error is None:
                 run.state = "completed"
                 run.bundle = result.bundle.name
                 run.saved_to = display_path(self.corpus, result.bundle.name)
@@ -398,9 +448,21 @@ class BackupRunner:
                     size_bytes=result.bundle.size_bytes,
                     wall_clock_s=round(result.wall_clock_s, 3),
                 )
+            elif isinstance(result, RagRestore) and error is None:
+                run.state = "completed"
+                run.summary = BackupSummaryOut(
+                    counts=result.counts,
+                    size_bytes=result.size_bytes,
+                    wall_clock_s=round(result.wall_clock_s, 3),
+                    stale=result.stale,
+                )
             else:
                 run.state = "failed"
-                run.error = error or "the export returned no bundle"
+                run.error = error or (
+                    "the export returned no bundle"
+                    if run.operation == "export"
+                    else "the restore returned no result"
+                )
             item: Feed = (EVENT_STATUS, BackupStatusEvent(run=run.to_out()))
             self._events.append(item)
             subscribers, self._subscribers = self._subscribers, []
@@ -418,7 +480,7 @@ def get_backup_runners() -> dict[str, BackupRunner]:
 
     Returns:
         The lazily created runners — ``rag`` only, until the graph corpus
-        gains its own export.
+        gains its own backups.
     """
     global _default_runners
     with _default_runners_lock:

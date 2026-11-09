@@ -30,7 +30,13 @@ const UNREACHABLE = "API unreachable — is the stack up? (docker compose up -d)
  * same picture), the export & restore panel (ADR-019), the
  * ingested-document table, and the stale-corpus "Re-ingest to apply"
  * affordance. An empty corpus gets the guided upload → ingest → ask flow
- * instead of a bare table.
+ * instead of a bare table — unless there are backups to restore (the
+ * wiped-stack case, after `docker compose down -v`), which keeps the normal
+ * layout so the restore panel is right there.
+ *
+ * One operation per corpus: while a backup export or restore runs, the
+ * ingest controls are disabled (the server would answer `409 corpus_busy`),
+ * and while an ingest runs, so are the backup panel's.
  *
  * Renders the tab's column only — `CorpusTabs` owns the page header and
  * the scroll container both corpora share.
@@ -123,16 +129,36 @@ export function CorpusView() {
   }, [refreshDocuments]);
 
   const isRunning = ingest.run?.state === "running";
-  // The guided first-run flow: corpus confirmed empty and nothing has run
-  // (a live or terminal run renders the normal layout with its panel).
+  // Either kind of run holds the corpus; the other's controls wait.
+  const corpusBusy = isRunning || backup.running;
+  // No bundle to offer: the list loaded empty — or could not load, which
+  // leaves the first-run flow as it always was.
+  const noBackups =
+    backup.bundlesError !== null ||
+    (backup.bundles !== null && backup.bundles.length === 0);
+  // The guided first-run flow: corpus confirmed empty, nothing has run (a
+  // live or terminal run renders the normal layout with its panel), and no
+  // backup waits to be restored.
   const guided =
-    documents !== null && documents.length === 0 && ingest.run === null;
-  // What an export would save right now — the backup panel's "Now:" line.
-  const holding =
-    documents === null || documents.length === 0
+    documents !== null &&
+    documents.length === 0 &&
+    ingest.run === null &&
+    backup.view.run === null &&
+    noBackups;
+  // What the corpus holds right now — the backup panel's "Now:" line, and
+  // what a restore would replace.
+  const current =
+    documents === null
       ? null
-      : `${formatCount(documents.length, "documents")} · ${formatCount(
-          documents.reduce((sum, document) => sum + document.n_chunks, 0),
+      : {
+          documents: documents.length,
+          chunks: documents.reduce((sum, document) => sum + document.n_chunks, 0),
+        };
+  const holding =
+    current === null || current.documents === 0
+      ? null
+      : `${formatCount(current.documents, "documents")} · ${formatCount(
+          current.chunks,
           "chunks",
         )}`;
 
@@ -162,7 +188,7 @@ export function CorpusView() {
           <Button
             variant="outline"
             size="sm"
-            disabled={isRunning}
+            disabled={corpusBusy}
             onClick={() => void handleStartIngest(true)}
           >
             Re-ingest to apply
@@ -203,7 +229,7 @@ export function CorpusView() {
           {hasUploaded ? (
             <IngestPanel
               view={ingest}
-              disabled={isRunning}
+              disabled={corpusBusy}
               onIngest={() => void handleStartIngest(false)}
               onReingest={() => void handleStartIngest(true)}
             />
@@ -227,7 +253,12 @@ export function CorpusView() {
 
           <IngestPanel
             view={ingest}
-            disabled={isRunning}
+            disabled={corpusBusy}
+            busyNote={
+              backup.running
+                ? `Ingest waits while the ${backup.view.run?.operation ?? "backup"} runs.`
+                : null
+            }
             onIngest={() => void handleStartIngest(false)}
             onReingest={() => void handleStartIngest(true)}
           />
@@ -238,9 +269,12 @@ export function CorpusView() {
             bundles={backup.bundles}
             bundlesError={backup.bundlesError}
             holding={holding}
-            empty={documents !== null && documents.length === 0}
+            current={current}
+            empty={current !== null && current.documents === 0}
+            disabled={isRunning}
             error={backup.error}
             onExport={() => void backup.startExport()}
+            onRestore={backup.startRestore}
           />
 
           <DocumentTable documents={documents} onChanged={refreshDocuments} />
