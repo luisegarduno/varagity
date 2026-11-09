@@ -37,8 +37,8 @@ describe("CODEBASE_MAP shape", () => {
 
   it("matches the curated totals", () => {
     const { nodes, edges } = CODEBASE_MAP.graph;
-    expect(nodes).toHaveLength(34);
-    expect(edges).toHaveLength(54);
+    expect(nodes).toHaveLength(35);
+    expect(edges).toHaveLength(59);
     expect(CODEBASE_MAP.topModels).toHaveLength(3);
     expect(CODEBASE_MAP.topTools).toHaveLength(8);
     expect(CODEBASE_MAP.topIntegrations).toHaveLength(10);
