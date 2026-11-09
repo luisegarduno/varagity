@@ -1,24 +1,25 @@
-"""Prefect backup flows: the RAG export and restore (ADR-019).
+"""Prefect backup flows: the RAG export and restore, the graph export (ADR-019).
 
-Thin ``@flow`` shells over :func:`varagity.backup.rag.export_rag` and
-:func:`varagity.backup.rag.restore_rag`, for the reason the graph build is
+Thin ``@flow`` shells over :func:`varagity.backup.rag.export_rag`,
+:func:`varagity.backup.rag.restore_rag` and
+:func:`varagity.backup.graph.export_graph`, for the reason the graph build is
 one: the work belongs to the backup package (one corpus snapshot and one
 all-or-nothing bundle write; one replacing transaction and one index
-rebuild), while Prefect owns the *record* that a backup ran, how long it
-took, and whether it failed. One flow run per operation — not a task per
-member or per stage: an export is a single consistent read and a restore a
-single transaction, and slicing either into task runs would invent
-boundaries they do not have. Per-stage progress travels as the API runner's
-``progress`` events instead (tracking and streaming compose, as they do for
-ingest and the graph build).
+rebuild; one copy of the graph's workdir under its write lock), while
+Prefect owns the *record* that a backup ran, how long it took, and whether
+it failed. One flow run per operation — not a task per member or per stage:
+an export is a single consistent read and a restore a single transaction,
+and slicing either into task runs would invent boundaries they do not have.
+Per-stage progress travels as the API runner's ``progress`` events instead
+(tracking and streaming compose, as they do for ingest and the graph build).
 
 No Prefect-level retries: a failed export leaves no bundle behind (the
 partial is removed) and a failed restore leaves the previous corpus (its
 transaction rolled back) — or, failing in the BM25 rebuild after the commit,
 says so — so the honest response is to surface the failure and let the user
 press the button again, not to repeat the work silently. Parameter
-validation is off because the stores are live handles, not serializable
-payloads.
+validation is off because the stores (and the graph service) are live
+handles, not serializable payloads.
 """
 
 from collections.abc import Callable, Mapping
@@ -29,6 +30,7 @@ from pathlib import Path
 from prefect import flow
 from prefect.logging import get_run_logger
 
+from varagity.backup.graph import GraphExportProgressCallback, GraphExportReport, export_graph
 from varagity.backup.rag import (
     ProgressCallback,
     RagExport,
@@ -39,6 +41,7 @@ from varagity.backup.rag import (
     restore_rag,
 )
 from varagity.config import get_settings
+from varagity.graph.service import GraphService, get_graph_service
 from varagity.stores.app_settings_store import AppSettingsStore
 from varagity.stores.bm25_store import ElasticsearchBM25
 from varagity.stores.vector_store import ContextualVectorDB
@@ -149,3 +152,52 @@ def rag_restore_flow(
         " — the corpus is flagged stale" if stale else "",
     )
     return replace(result, stale=stale)
+
+
+@flow(name="graph-export", validate_parameters=False)
+def graph_export_flow(
+    dest: Path,
+    *,
+    on_progress: GraphExportProgressCallback | None = None,
+    service: GraphService | None = None,
+    stale: bool | None = None,
+) -> GraphExportReport:
+    """Export the message graph's working directory into a new bundle as a tracked flow run.
+
+    The copy runs under the graph service's write lock, so no build can
+    change a file mid-copy while graph chat keeps answering. Needs no model
+    service and opens no session — only postgres, for the stale flag.
+
+    Args:
+        dest: The exports folder (``<GRAPH_DOCS_PATH>/varagity-exports``).
+        on_progress: Called with ``(stage, current, total)`` per stage
+            (``snapshot`` → ``pack``, counting bytes → ``finalize``).
+        service: The graph service whose workdir to copy; the process's own
+            (the graph's single writer) when omitted.
+        stale: The graph-stale flag to record; when omitted, it is read from
+            ``app_settings`` once the files are copied, so a source deleted
+            mid-export is recorded.
+
+    Returns:
+        The published bundle and how long the export took.
+    """
+    logger = get_run_logger()
+
+    def read_stale() -> bool:
+        if stale is not None:
+            return stale
+        with AppSettingsStore() as settings_store:
+            return settings_store.is_graph_stale()
+
+    active = service if service is not None else get_graph_service()
+    result = export_graph(active, dest, read_stale=read_stale, on_progress=on_progress)
+    counts = result.counts
+    logger.info(
+        "graph export wrote %s: %d file(s), %d thread-day(s), %d bytes in %.1fs",
+        result.bundle.name,
+        result.files,
+        counts.get("thread_days", 0),
+        result.bundle.size_bytes,
+        result.wall_clock_s,
+    )
+    return result

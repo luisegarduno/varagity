@@ -448,7 +448,9 @@ The two sidecars are ours and earn their keep three times over
    the stale transcript forever. Comparing rendered content hashes against
    the manifest is what turns that into an explicit delete-then-reinsert.
    Never hand-edit the manifest: an entry whose hash does not match the
-   graph's content makes the stale transcript permanent.
+   graph's content makes the stale transcript permanent. (A
+   [graph backup](#the-graph-bundle) carries both sidecars with the
+   engine's files, so the diff is backed up with the graph it describes.)
 2. **They are the durable provenance index.** `doc_key → message_guids`
    survives a restart, so a citation still resolves to messages on a graph
    nothing has rebuilt in this process.
@@ -609,10 +611,13 @@ sequenceDiagram
 ## Backup bundles
 
 `docker compose down -v` deletes every named volume, and with them the
-processed corpus: the chunk rows, their contextual blurbs and embeddings,
-and the BM25 index. The source folders survive, because they are host binds.
-A **backup bundle** is written into a reserved folder inside one of those
-binds, so it survives beside the sources (`varagity/backup/`).
+processed corpora: the chunk rows, their contextual blurbs and embeddings,
+the BM25 index, and the extracted message graph in `graphdata`. The source
+folders survive, because they are host binds. A **backup bundle** is
+written into a reserved folder inside one of those binds, so it survives
+beside the sources (`varagity/backup/`). Each corpus has its own folder and
+its own bundle layout in the same container: the RAG bundle below, and
+[the graph bundle](#the-graph-bundle).
 
 ```text
 docs/varagity-exports/                          reserved: discovery skips it, uploads refuse it
@@ -629,9 +634,12 @@ docs/varagity-exports/                          reserved: discovery skips it, up
 - **The reserved folder.** `varagity-exports/` at the corpus root is never
   corpus. Ingest discovery (and so the CLI's ingest too) skips it whole, and
   both upload routes refuse a path under it, or a flat file named like it,
-  with the per-file reason `reserved_path`. Only the root's own folder is
-  reserved, matched case-insensitively. A `varagity-exports/` nested deeper
-  is ordinary corpus.
+  with the per-file reason `reserved_path`. On the graph side the build's
+  scan never counts it, the Graph sources listing never shows it, and the
+  graph delete answers `404` for anything in it (deleting a bundle there
+  would flag the graph stale for a file that was never a source). Only the
+  root's own folder is reserved, matched case-insensitively. A
+  `varagity-exports/` nested deeper is ordinary corpus.
 - **One consistent snapshot.** Every row comes from a single
   `REPEATABLE READ, READ ONLY` transaction
   (`ContextualVectorDB.iter_corpus`), streamed through server-side cursors.
@@ -666,12 +674,13 @@ record: the export-time facts a restore must judge the bundle by.
 | Field | Meaning |
 |---|---|
 | `format`, `version` | `"varagity-backup"`, `1` — what makes a zip a Varagity bundle, and its layout. |
-| `corpus` | `rag` (the graph corpus's bundle shares the container). |
+| `corpus` | `rag` or `graph` — `ChatRequest.corpus`'s vocabulary; a bundle restores only its own corpus. |
 | `created_at` | The snapshot instant (UTC). |
-| `embedding_model`, `embedding_dim` | `EMBEDDING_MODEL` / `EMBEDDING_DIM` at export. pgvector checks only the vector size, so the model name is the only guard against vectors from another embedding space. An export whose rows record a different `metadata.embedding_model` logs a warning. |
-| `stale` | The `_corpus_stale` flag at export. |
-| `counts` | `{"documents": …, "chunks": …}`. |
-| `ingest_settings` | The reingest-affecting settings at export (`CHUNKING_STRATEGY`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `CONTEXTUALIZE`, `OCR_ENGINE`), in the env-string form `app_settings` stores. They are read *before* the stale flag, so a settings change racing the export can only make the bundle more conservative, never less. |
+| `embedding_model`, `embedding_dim` | `EMBEDDING_MODEL` / `EMBEDDING_DIM` at export. pgvector checks only the vector size (and LightRAG only `embedding_dim`), so the model name is the only guard against vectors from another embedding space. An export whose rows record a different `metadata.embedding_model` logs a warning. |
+| `stale` | The corpus's stale flag at export: `_corpus_stale` for RAG, `_graph_stale` for the graph. |
+| `counts` | RAG: `{"documents": …, "chunks": …}`. Graph: `{"thread_days": …, "messages": …}`, plus `entities` and `relations` when the graph reported them (each from the workdir's size summary). |
+| `ingest_settings` | RAG only (`null` for the graph). The reingest-affecting settings at export (`CHUNKING_STRATEGY`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `CONTEXTUALIZE`, `OCR_ENGINE`), in the env-string form `app_settings` stores. They are read *before* the stale flag, so a settings change racing the export can only make the bundle more conservative, never less. |
+| `engine` | Graph only (`null` for RAG). `{name, package, version}` — the engine that wrote the files (`lightrag` / `lightrag-hku` / `1.5.4`), as the engine itself reports it (`GraphEngine.storage_format()`, read from package metadata). |
 | `members` | `{name, size_bytes, sha256}` per data member, in write order. |
 
 The zip's central directory lets `GET /api/backups/{corpus}` read
@@ -680,16 +689,71 @@ read, not an unpack. Chat history, conversation folders and settings-drawer
 overrides are deliberately **not** in a bundle: it backs up the corpus, not
 the app.
 
+### The graph bundle
+
+The message graph's bundle is [the graph workdir](#the-graph-workdir)
+verbatim — every file the engine wrote, plus the repo's two sidecars — in
+the same container, under one folder named for the engine:
+
+```text
+graph-docs/varagity-exports/varagity-graph-20261108-1315.zip
+├── lightrag/                               the workdir verbatim, *.tmp* skipped     deflated
+│   ├── kv_store_*.json ×8                  incl. the LLM cache later incremental builds rebuild from
+│   ├── vdb_*.json ×3                       embedding_dim + base64 float32 matrices
+│   ├── graph_chunk_entity_relation.graphml
+│   ├── varagity_manifest.json              what keeps the next build a diffing upsert
+│   └── varagity_graph_summary.json         the size cache — the bundle's counts
+└── bundle.json                             + engine format · summary counts · stale = _graph_stale
+```
+
+- **Verbatim, so everything comes back.** Nothing is converted or
+  re-derived: the doc-status resume ledger, the manifest (so the next build
+  stays a diffing upsert rather than re-extracting everything), and the LLM
+  response cache (which a later incremental build needs to rebuild the
+  entities a changed thread-day shares with others) all ride along. The
+  price is that a bundle is tied to the engine version that wrote it, which
+  is why the manifest records `engine`.
+- **Copied under the write lock.** The export holds `GraphService`'s write
+  lock — the one every build, resume and delete takes — for the whole copy,
+  so no build changes the graph mid-copy. Reads take no lock, so graph chat
+  and `/graph` keep answering throughout. A read does write one file:
+  LightRAG flushes its LLM response cache after every query. That is
+  harmless, because the engine writes each file to a temp sibling
+  (`<file>.tmp.<pid>.<thread>.<ns>`) and renames it into place, so every
+  member is a whole file, from before a query or after it. The temp files
+  are never copied, nor is anything a bundle can't carry (a folder, a
+  symlink, an unsafe name) — each is named in a warning instead.
+- **The member rule is a pattern, not a list.** A workdir holds only the
+  namespaces its engine has written so far, so no member is individually
+  required. Every member must be a flat file directly in `<engine>/`, its
+  name made of ASCII letters, digits, `_`, `.` and `-` and never hidden;
+  every file in the zip must be recorded in `bundle.json` with its sha256
+  (an unrecorded file could never be verified). The verdict tolerates the
+  `<engine>/` directory entry a hand re-zip (`zip -r`) adds.
+- **Counts come from the size summary** (`varagity_graph_summary.json`),
+  never from parsing the graphml: `thread_days` is its `docs`, `messages`
+  its `message_guids`. A graph whose first build was killed before writing
+  a summary still exports — its files are the resume state — with empty
+  counts.
+- **No model service.** An export needs only Postgres, for the
+  `_graph_stale` flag the bundle records; it opens no engine session. The
+  flag is read last, once every file is copied: deleting a graph source
+  flags the graph stale without taking any lock, so a source deleted
+  mid-export is still recorded.
+
 ### Restoring a bundle
 
 A restore **replaces** the corpus with the bundle's rows; nothing is merged,
-and nothing is re-parsed, re-chunked, re-contextualized or re-embedded. How
-it reads the bundle back:
+and nothing is re-parsed, re-chunked, re-contextualized or re-embedded.
+Today only the RAG corpus restores: graph bundles are listed with the same
+cheap verdict and can be downloaded, but `POST /api/backups/graph/restore`
+is not offered yet. How a restore reads the bundle back:
 
 - **Two depths of checking.** Every listed bundle gets the *cheap verdict*
   (`inspect_bundle`): the zip directory and `bundle.json` only. The format
-  version, the corpus, the member allowlist (exactly the three RAG members),
-  the zip-slip rules (no `..`, absolute path, backslash or symlink entry),
+  version, the corpus, the member allowlist (exactly the three RAG members;
+  for a graph bundle, [the pattern above](#the-graph-bundle)), the zip-slip
+  rules (no `..`, absolute path, backslash or symlink entry),
   each member's recorded size against the zip's, the vector matrix's size
   against `counts.chunks × embedding_dim × 4`, and finally the embedding
   model and dimension against this stack's. A restore then adds the sha256

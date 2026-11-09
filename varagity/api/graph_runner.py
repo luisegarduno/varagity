@@ -30,6 +30,15 @@ The build itself runs through
 tracked Prefect flow run, and through
 :class:`~varagity.graph.service.GraphService`, so the API stays the single
 writer of the graph working directory.
+
+**One writer per corpus** (ADR-019): a run also claims the graph corpus's
+:class:`~varagity.api.corpus_gate.CorpusGate` for its whole life, so a build
+and a graph backup never overlap — a start while a backup holds the corpus
+raises :class:`~varagity.api.corpus_gate.CorpusBusy` (``409 corpus_busy``),
+and the gate is released *before* the terminal frame, so a client that
+starts the next run on seeing it never races a stale claim. The reserved
+``varagity-exports/`` folder, where the graph's bundles live, is never part
+of the scanned corpus.
 """
 
 import asyncio
@@ -45,6 +54,7 @@ from uuid import uuid4
 import psycopg
 from pydantic import BaseModel
 
+from varagity.api.corpus_gate import CorpusGate, get_corpus_gates
 from varagity.api.schemas import (
     GraphBuildLogEvent,
     GraphBuildProgressEvent,
@@ -62,6 +72,7 @@ from varagity.graph.sources.base import (
     batch_for_path,
     find_message_source,
 )
+from varagity.paths import is_exports_path
 from varagity.pipeline.graph_flow import GraphBatches, graph_build_flow
 from varagity.stores.app_settings_store import AppSettingsStore
 
@@ -119,10 +130,20 @@ def scan_graph_corpus(root: Path) -> list[Path]:
         no registered source claims included (a contacts list, a
         ``chat.db``'s ``-wal`` sidecar). The caller decides what to do with
         them; the corpus listing shows the user everything they dropped in.
+        The one exception is the reserved ``varagity-exports/`` folder: its
+        backup bundles are never corpus, so a build never counts them as
+        scanned files.
     """
     if not root.is_dir():
         return []
-    return sorted((path for path in root.rglob("*") if path.is_file()), key=lambda p: p.as_posix())
+    return sorted(
+        (
+            path
+            for path in root.rglob("*")
+            if path.is_file() and not is_exports_path(path.relative_to(root))
+        ),
+        key=lambda p: p.as_posix(),
+    )
 
 
 def parse_summary(batch: MessageBatch) -> GraphParseSummary:
@@ -312,6 +333,7 @@ class GraphBuildRunner:
         *,
         service: GraphService | None = None,
         on_reingest_complete: Callable[[], None] | None = None,
+        gate: CorpusGate | None = None,
     ) -> None:
         """Wire the runner's collaborators (all injectable for tests).
 
@@ -322,8 +344,11 @@ class GraphBuildRunner:
                 singleton, resolved on first use, when omitted.
             on_reingest_complete: Hook fired after a ``reingest=true`` build
                 completes; defaults to clearing the graph-stale flag.
+            gate: The graph corpus's write gate; the process-wide one when
+                omitted.
         """
         self._flow = flow if flow is not None else graph_build_flow
+        self._gate = gate if gate is not None else get_corpus_gates()["graph"]
         self._service = service
         self._on_reingest_complete = (
             on_reingest_complete if on_reingest_complete is not None else _clear_graph_stale
@@ -369,10 +394,14 @@ class GraphBuildRunner:
 
         Raises:
             GraphBuildAlreadyRunning: If a build is already in flight.
+            CorpusBusy: If a graph backup holds the corpus.
         """
         with self._lock:
             if self._run is not None and self._run.state == "running":
                 raise GraphBuildAlreadyRunning(f"build {self._run.run_id} is still running")
+            # After the single-flight check, so a second build keeps its own
+            # graph_build_running answer; corpus_busy means a backup.
+            self._gate.claim("build")
             run = _RunState(
                 run_id=uuid4().hex[:12],
                 reingest=reingest,
@@ -389,7 +418,17 @@ class GraphBuildRunner:
         thread = threading.Thread(
             target=self._execute, args=(run,), name=f"graph-build-{run.run_id}", daemon=True
         )
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError as error:  # no thread to run it: end the run, free the corpus
+            with self._lock:
+                run.state = "failed"
+                run.error = f"{type(error).__name__}: {error}"
+                run.finished_at = datetime.now(UTC)
+            self._gate.release()
+            self._emit(EVENT_STATUS, GraphBuildStatusEvent(run=run.to_out()))
+            self._close_feed()
+            raise
         return started
 
     def snapshot(self) -> GraphBuildRunOut | None:
@@ -516,6 +555,9 @@ class GraphBuildRunner:
         finally:
             graph_logger.removeHandler(relay)
             graph_logger.setLevel(previous_level)
+            # Free the corpus before the terminal frame: a client that starts
+            # the next run (or a backup) on seeing it must find it free.
+            self._gate.release()
             self._emit(EVENT_STATUS, GraphBuildStatusEvent(run=run.to_out()))
             self._close_feed()
             if run.state == "completed" and run.reingest:
@@ -621,15 +663,18 @@ class GraphBuildRunner:
         files about to be removed) and reopened straight after, which both
         recreates the directory and keeps the window in which a concurrent
         *read* could see a half-removed workdir as short as an open takes.
-        Concurrent writes cannot race this: the runner is single-flight and
-        the service's write lock is the second gate.
+        Concurrent writes cannot race this: the run holds the graph corpus's
+        gate, so no backup export can be copying the files being removed
+        (ADR-019), and the wipe itself runs under the service's write lock,
+        like every other change to the workdir.
         """
         workdir = self.service.workdir
         logger.info("reingest: wiping the graph working directory %s", workdir)
         self._emit(EVENT_PROGRESS, GraphBuildProgressEvent(stage="reset"))
-        self.service.close()
-        shutil.rmtree(workdir, ignore_errors=True)
-        self.service.session()
+        with self.service.writing():
+            self.service.close()
+            shutil.rmtree(workdir, ignore_errors=True)
+            self.service.session()
 
     def _document_statuses(self) -> dict[str, int]:
         """Read the engine's document counts, tolerating an unopenable graph.

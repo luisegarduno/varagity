@@ -26,8 +26,8 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { backupFileUrl, type BundleOut, type TargetCorpus } from "@/lib/api";
 import {
+  backupProgress,
   backupStageLabel,
-  backupStageUnit,
   describeBundle,
   describeReplacement,
   describeStaleRestore,
@@ -49,7 +49,7 @@ const COPY: Record<TargetCorpus, { folder: string; blurb: string; empty: string 
   graph: {
     folder: "graph-docs/varagity-exports/",
     blurb:
-      "Save the extracted graph — entities, relations, vectors, the LLM cache and the build manifest — to one file.",
+      "Save the extracted graph — entities, relations, vectors, the LLM cache and the build manifest — to one file. It lands beside your message archives, so it survives docker compose down -v. Graph chat keeps answering while it is written; builds wait.",
     empty: "nothing built yet",
   },
 };
@@ -141,7 +141,12 @@ function RestoreSteps({ view }: { view: BackupView }) {
  * can't be restored; restoring over a non-empty corpus asks first, naming
  * what will be replaced and whether the corpus will come back stale. A
  * running restore walks its four steps, with a chunk bar while it loads and
- * re-indexes; a finished one shows its summary.
+ * re-indexes; a finished one shows its summary. Without `onRestore` (the
+ * graph tab, until its restore lands) the rows offer Download only.
+ *
+ * Both tabs host it: a graph export packs the engine's workdir, so its bar
+ * counts bytes (`182.0 MB / 256.0 MB packed`) where the RAG export's counts
+ * rows.
  */
 export function BackupPanel({
   corpus,
@@ -167,7 +172,7 @@ export function BackupPanel({
   current?: { documents: number; chunks: number } | null;
   /** The corpus is confirmed empty — nothing to export, nothing a restore would replace. */
   empty: boolean;
-  /** Another operation (an ingest) holds the corpus: no export or restore can start. */
+  /** Another operation (an ingest, a graph build) holds the corpus: no export or restore can start. */
   disabled?: boolean;
   /** Why the last Export or Restore was refused. */
   error: string | null;
@@ -180,6 +185,7 @@ export function BackupPanel({
   const running = run?.state === "running";
   const restoring = run?.operation === "restore";
   const stage = backupStageLabel(view);
+  const progress = backupProgress(view);
   const fresh = run?.state === "completed" && run.operation === "export" ? run.bundle : null;
   const busy = running || disabled;
 
@@ -266,26 +272,23 @@ export function BackupPanel({
 
           {restoring && running && <RestoreSteps view={view} />}
 
-          {running && view.total !== null && view.total > 0 && (
+          {running && progress && (
             <div>
               <div className="mb-1.5 text-xs text-muted-foreground tabular-nums">
-                {(view.current ?? 0).toLocaleString()} / {view.total.toLocaleString()}{" "}
-                {backupStageUnit(view.stage)}
+                {progress.done} / {progress.total} {progress.unit}
               </div>
               <div
                 role="progressbar"
                 aria-label={restoring ? "Restore progress" : "Export progress"}
                 aria-valuemin={0}
-                aria-valuemax={view.total}
-                aria-valuenow={view.current ?? 0}
-                aria-valuetext={`${view.current ?? 0} of ${view.total} ${backupStageUnit(view.stage)}`}
+                aria-valuemax={progress.max}
+                aria-valuenow={progress.current}
+                aria-valuetext={`${progress.done} of ${progress.total} ${progress.unit}`}
                 className="h-1.5 overflow-hidden rounded-full bg-muted"
               >
                 <div
                   className="h-full rounded-full bg-primary transition-[width] duration-300 motion-reduce:transition-none"
-                  style={{
-                    width: `${Math.min(100, ((view.current ?? 0) / view.total) * 100)}%`,
-                  }}
+                  style={{ width: `${progress.fraction * 100}%` }}
                 />
               </div>
             </div>

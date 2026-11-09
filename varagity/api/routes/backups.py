@@ -12,9 +12,10 @@ backlog to late joiners, the structured error envelope:
   listed too; an in-flight ``.partial`` never is.
 * ``POST /api/backups/{corpus}/export`` starts an export run. Everything
   that can refuse it is checked first, so a refusal is a clean status, never
-  a failed run: postgres unreachable (``503``), nothing ingested (``422
-  nothing_to_export``), the folder unwritable (``500``), another operation
-  holding the corpus (``409 corpus_busy``).
+  a failed run: postgres unreachable (``503``), nothing ingested — or, for
+  the graph, nothing ever built (``422 nothing_to_export``) — the folder
+  unwritable (``500``), another operation holding the corpus (``409
+  corpus_busy``: an ingest or build, another export, a restore).
 * ``POST /api/backups/{corpus}/restore`` starts a restore run, with the
   same up-front posture: the stores it writes unreachable (``503``), no such
   bundle (``404 bundle_not_found``), the corpus busy here (``409``), the
@@ -41,8 +42,11 @@ that can't reach the desktop; the bundle lands where the ticket wants it
 (beside the sources, inside the bind mount that survives ``down -v``), and
 the panel shows that path with Copy-path and Download.
 
-``corpus`` is a path parameter from the start; only ``rag`` is accepted
-until the graph corpus gains its own backups.
+``corpus`` is ``rag`` or ``graph`` (``ChatRequest.corpus``'s vocabulary) on
+every route but the restore, which accepts only ``rag`` until the graph's
+restore lands. While ``GRAPH_ENABLED=false``, every graph route answers ``403
+graph_disabled`` — except the status stream, which (like the graph build's)
+keeps reporting, so the tab can still render whatever ran.
 """
 
 import logging
@@ -78,7 +82,10 @@ from varagity.backup.bundle import (
     list_bundles,
     verify_bundle,
 )
+from varagity.backup.graph import workdir_files
 from varagity.backup.rag import ingest_drift
+from varagity.config import get_settings
+from varagity.graph.service import graph_workdir
 from varagity.paths import resolve_contained
 from varagity.stores.vector_store import ContextualVectorDB
 
@@ -86,12 +93,45 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["backups"])
 
-BackupCorpus = Literal["rag"]
-"""The corpora with backups (the graph corpus joins in a later phase)."""
+BackupCorpus = Literal["rag", "graph"]
+"""The corpora with backups — ``ChatRequest.corpus``'s vocabulary."""
+
+RestoreCorpus = Literal["rag"]
+"""The corpora a restore accepts (the graph's restore lands in a later phase)."""
 
 # The structured 500 code per corpus when its exports folder can't be
 # written — the same codes the corpus's upload route uses for its root.
 _NOT_WRITABLE_CODES = {"rag": "docs_path_not_writable", "graph": "graph_docs_path_not_writable"}
+
+
+def enabled_corpus(corpus: BackupCorpus) -> BackupCorpus:
+    """Resolve the ``{corpus}`` path parameter, refusing the graph while it is switched off.
+
+    A dependency rather than a line in each route body, so it runs *first*
+    — before the routes' store dependencies open a connection — and a
+    disabled graph answers ``403`` whatever else is down (ADR-017's degrade
+    semantics: a refusal, never a silent no-op).
+
+    Args:
+        corpus: The path's corpus.
+
+    Returns:
+        The same corpus.
+
+    Raises:
+        HTTPException: ``403 graph_disabled`` for ``graph`` while
+            ``GRAPH_ENABLED`` is false.
+    """
+    if corpus == "graph" and not get_settings().GRAPH_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "graph_disabled",
+                "message": "the graph subsystem is disabled (GRAPH_ENABLED=false) — "
+                "turn it on in settings to back up the graph",
+            },
+        )
+    return corpus
 
 
 class DamagedBundles:
@@ -151,6 +191,7 @@ def get_damaged_bundles() -> DamagedBundles:
     return _damaged_bundles
 
 
+EnabledCorpusDep = Annotated[BackupCorpus, Depends(enabled_corpus)]
 RunnersDep = Annotated[dict[str, BackupRunner], Depends(get_backup_runners)]
 PreflightDep = Annotated[Callable[[str, str], Awaitable[None]], Depends(get_backup_preflight)]
 VectorStoreDep = Annotated[ContextualVectorDB, Depends(get_vector_store)]
@@ -206,10 +247,11 @@ def _ensure_writable_exports_dir(corpus: BackupCorpus) -> Path:
         The exports folder.
 
     Raises:
-        HTTPException: ``500 docs_path_not_writable`` when the folder can't
-            be created or written (in compose, the ``./docs`` bind mount
-            must be writable by the api container's user — or a *file*
-            named ``varagity-exports`` is squatting on the folder's name).
+        HTTPException: ``500 docs_path_not_writable`` (``graph_docs_path_not_writable``
+            for the graph) when the folder can't be created or written (in
+            compose, the ``./docs`` / ``./graph-docs`` bind mount must be
+            writable by the api container's user — or a *file* named
+            ``varagity-exports`` is squatting on the folder's name).
     """
     directory = exports_dir(corpus)
     try:
@@ -267,8 +309,8 @@ def _bundle_path(corpus: BackupCorpus, name: str) -> Path:
     return target
 
 
-@router.get("/api/backups/{corpus}")
-def list_backups(corpus: BackupCorpus, damaged: DamagedDep) -> list[BundleOut]:
+@router.get("/api/backups/{corpus}", responses={403: {"model": ErrorResponse}})
+def list_backups(corpus: EnabledCorpusDep, damaged: DamagedDep) -> list[BundleOut]:
     """List the backup bundles in a corpus's ``varagity-exports/`` folder.
 
     A directory read plus one small member per bundle — the manifest is
@@ -284,18 +326,46 @@ def list_backups(corpus: BackupCorpus, damaged: DamagedDep) -> list[BundleOut]:
     Returns:
         One entry per bundle file, newest first (empty when the folder does
         not exist yet).
+
+    Raises:
+        HTTPException: ``403 graph_disabled`` for the graph while
+            ``GRAPH_ENABLED`` is false.
     """
-    current = current_ingest_settings()
+    # Drift is a RAG notion (the graph records no ingest settings).
+    current = current_ingest_settings() if corpus == "rag" else {}
     return [
         _bundle_out(listing, corpus, current, damaged)
         for listing in list_bundles(exports_dir(corpus), corpus)
     ]
 
 
+def _nothing_to_export(corpus: BackupCorpus, store: ContextualVectorDB) -> str | None:
+    """Say why a corpus has nothing to back up, if it hasn't.
+
+    Args:
+        corpus: The corpus about to be exported.
+        store: The per-request vector store (the RAG corpus's row count).
+
+    Returns:
+        The refusal's message, or ``None`` when there is something to export
+        — RAG: any ``documents`` row; graph: any file the export would copy
+        from the engine's workdir (the export's own rule, so the two never
+        disagree).
+    """
+    if corpus == "rag":
+        if store.document_count() == 0:
+            return "the corpus holds no documents — ingest something before exporting"
+        return None
+    if not workdir_files(graph_workdir()):
+        return "nothing has been built into the graph yet — build it before exporting"
+    return None
+
+
 @router.post(
     "/api/backups/{corpus}/export",
     status_code=202,
     responses={
+        403: {"model": ErrorResponse},
         409: {"model": ErrorResponse},
         422: {"model": ErrorResponse},
         500: {"model": ErrorResponse},
@@ -303,7 +373,7 @@ def list_backups(corpus: BackupCorpus, damaged: DamagedDep) -> list[BundleOut]:
     },
 )
 async def start_export(
-    corpus: BackupCorpus,
+    corpus: EnabledCorpusDep,
     runners: RunnersDep,
     preflight: PreflightDep,
     store: VectorStoreDep,
@@ -312,33 +382,36 @@ async def start_export(
 
     The bundle is written into ``<corpus root>/varagity-exports/`` as
     ``varagity-<corpus>-<UTC yyyymmdd-HHMM>.zip`` (a same-minute repeat gets
-    a ``-2`` suffix — never a replace), from one consistent snapshot of the
-    corpus.
+    a ``-2`` suffix — never a replace): for RAG, from one consistent
+    snapshot of the corpus; for the graph, the engine's workdir copied under
+    the graph's write lock, while graph chat keeps answering.
 
     Args:
         corpus: The corpus to export.
         runners: The process-wide backup runners.
         preflight: The awaitable reachability check (structured 503).
-        store: The per-request vector store (the nothing-to-export check).
+        store: The per-request vector store (the RAG nothing-to-export
+            check).
 
     Returns:
         The new run's snapshot (state ``running``).
 
     Raises:
-        HTTPException: ``503 postgres_unreachable`` when the database is
-            down; ``422 nothing_to_export`` when nothing is ingested; ``500
-            docs_path_not_writable`` when the exports folder can't be
-            written; ``409 corpus_busy`` while any operation — another
-            export included — holds the corpus (the message names it).
+        HTTPException: ``403 graph_disabled`` for the graph while
+            ``GRAPH_ENABLED`` is false; ``503 postgres_unreachable`` when
+            the database is down; ``422 nothing_to_export`` when nothing is
+            ingested (or, for the graph, nothing has been built); ``500
+            docs_path_not_writable`` / ``graph_docs_path_not_writable`` when
+            the exports folder can't be written; ``409 corpus_busy`` while
+            any operation — another export, an ingest or build, a restore —
+            holds the corpus (the message names it).
     """
     await preflight(corpus, "export")
-    if await run_in_threadpool(store.document_count) == 0:
+    refusal = await run_in_threadpool(_nothing_to_export, corpus, store)
+    if refusal is not None:
         raise HTTPException(
             status_code=422,
-            detail={
-                "code": "nothing_to_export",
-                "message": "the corpus holds no documents — ingest something before exporting",
-            },
+            detail={"code": "nothing_to_export", "message": refusal},
         )
     await run_in_threadpool(_ensure_writable_exports_dir, corpus)
     try:
@@ -370,7 +443,7 @@ def _corpus_busy(error: CorpusBusy) -> HTTPException:
     },
 )
 async def start_restore(
-    corpus: BackupCorpus,
+    corpus: RestoreCorpus,
     payload: BackupRestoreRequest,
     runners: RunnersDep,
     preflight: PreflightDep,
@@ -457,11 +530,13 @@ async def backup_status(
     """Stream the corpus's current (or last) backup run as SSE.
 
     Frames: ``status`` (snapshot; also terminal, with the summary — and an
-    export's saved path), ``progress`` (an export's ``snapshot`` →
-    ``documents`` → ``chunks`` → ``finalize``; a restore's ``validate`` →
-    ``load`` → ``index`` → ``bm25``), ``log`` (relayed ``varagity.backup``
-    lines). With no run in this API process the stream is a single idle
-    ``status`` frame; after a terminal run it replays that run and closes.
+    export's saved path), ``progress`` (a RAG export's ``snapshot`` →
+    ``documents`` → ``chunks`` → ``finalize``; a graph export's ``snapshot``
+    → ``pack``, in bytes → ``finalize``; a restore's ``validate`` → ``load``
+    → ``index`` → ``bm25``), ``log`` (relayed ``varagity.backup`` lines).
+    With no run in this API process the stream is a single idle ``status``
+    frame; after a terminal run it replays that run and closes. Never
+    refused for a disabled graph: a tab must still render what ran.
 
     Args:
         corpus: The corpus whose backup run to follow.
@@ -482,10 +557,11 @@ async def backup_status(
             "description": "The bundle, as a `Content-Disposition: attachment` download.",
             "content": {"application/zip": {"schema": {"type": "string", "format": "binary"}}},
         },
+        403: {"model": ErrorResponse},
         404: {"model": ErrorResponse},
     },
 )
-def download_backup(corpus: BackupCorpus, name: str) -> FileResponse:
+def download_backup(corpus: EnabledCorpusDep, name: str) -> FileResponse:
     """Return one bundle as a file download.
 
     A plain ``GET`` answering with ``Content-Disposition: attachment``, so
@@ -500,8 +576,10 @@ def download_backup(corpus: BackupCorpus, name: str) -> FileResponse:
         The bundle's bytes as ``application/zip``.
 
     Raises:
-        HTTPException: ``404 bundle_not_found`` when no such bundle lives in
-            the folder — which covers a name trying to escape it.
+        HTTPException: ``403 graph_disabled`` for the graph while
+            ``GRAPH_ENABLED`` is false; ``404 bundle_not_found`` when no such
+            bundle lives in the folder — which covers a name trying to
+            escape it.
     """
     path = _bundle_path(corpus, name)
     return FileResponse(path, media_type="application/zip", filename=name)

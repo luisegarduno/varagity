@@ -28,6 +28,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 
 from tests.sse import parse_sse
+from tests.unit.test_backup_graph import build_workdir
 from tests.unit.test_backup_rag import (
     FakeRebuildBM25,
     FakeRestoreStore,
@@ -36,6 +37,7 @@ from tests.unit.test_backup_rag import (
     document,
     rezip,
 )
+from tests.unit.test_graph_service import FAKE_FORMAT, FakeEngine
 from varagity.api.backup_runner import (
     EVENT_LOG,
     EVENT_PROGRESS,
@@ -50,6 +52,7 @@ from varagity.api.deps import get_backup_preflight, get_vector_store
 from varagity.api.main import create_app
 from varagity.api.routes import backups as backups_routes
 from varagity.api.routes.backups import DamagedBundles, get_damaged_bundles
+from varagity.backup.graph import GraphExportReport, export_graph
 from varagity.backup.rag import (
     CHUNKS_MEMBER,
     RagExport,
@@ -58,6 +61,8 @@ from varagity.backup.rag import (
     export_rag,
     restore_rag,
 )
+from varagity.graph.base import GRAPH_ENGINE_REGISTRY
+from varagity.graph.service import GraphService
 
 TICK = 0.02  # worker-thread scheduling slack for wait loops
 DIM = 4
@@ -340,17 +345,26 @@ class TestRunnerWiring:
             "OCR_ENGINE": "tesseract",
         }
 
-    def test_the_process_has_one_rag_runner_on_the_shared_gate(self) -> None:
+    def test_the_process_has_one_runner_per_corpus_on_its_shared_gate(self) -> None:
         from varagity.api.corpus_gate import get_corpus_gates
 
         runners = get_backup_runners()
-        assert set(runners) == {"rag"}
-        assert get_backup_runners()["rag"] is runners["rag"]
-        assert runners["rag"]._gate is get_corpus_gates()["rag"]
+        assert set(runners) == {"rag", "graph"}
+        for corpus in ("rag", "graph"):
+            assert get_backup_runners()[corpus] is runners[corpus]
+            assert runners[corpus]._gate is get_corpus_gates()[corpus]
+
+    def test_each_corpus_exports_with_its_own_flow(self) -> None:
+        from varagity.pipeline.backup_flow import graph_export_flow, rag_export_flow
+
+        assert BackupRunner("rag", gate=CorpusGate("rag"))._export_flow is rag_export_flow
+        graph = BackupRunner("graph", gate=CorpusGate("graph"))
+        assert graph._export_flow is graph_export_flow
+        assert graph._restore_flow is None  # the graph's restore lands in phase 4
 
     def test_a_corpus_without_an_export_flow_is_refused_at_construction(self) -> None:
         with pytest.raises(KeyError):
-            BackupRunner("graph", gate=CorpusGate("graph"))
+            BackupRunner("everything", gate=CorpusGate("everything"))  # type: ignore[arg-type]
 
 
 class FakeVectorStore:
@@ -372,9 +386,11 @@ def make_app(
     preflight: Callable[[str, str], Any] | None = None,
     lock_free: bool = True,
     damaged: DamagedBundles | None = None,
+    graph_runner: BackupRunner | None = None,
 ) -> FastAPI:
     application = create_app()
-    application.dependency_overrides[get_backup_runners] = lambda: {"rag": runner}
+    runners = {"rag": runner} if graph_runner is None else {"rag": runner, "graph": graph_runner}
+    application.dependency_overrides[get_backup_runners] = lambda: runners
 
     async def _noop(corpus: str, operation: str) -> None:
         return None
@@ -586,18 +602,19 @@ class TestRoutes:
     @pytest.mark.parametrize(
         ("method", "path"),
         [
-            ("GET", "/api/backups/graph"),
-            ("POST", "/api/backups/graph/export"),
-            ("POST", "/api/backups/graph/restore"),
-            ("GET", "/api/backups/graph/status"),
-            ("GET", "/api/backups/graph/files/x.zip"),
             ("GET", "/api/backups/everything"),
+            ("POST", "/api/backups/everything/export"),
+            ("GET", "/api/backups/everything/status"),
+            ("GET", "/api/backups/everything/files/x.zip"),
+            ("POST", "/api/backups/graph/restore"),  # the graph's restore lands in phase 4
         ],
     )
-    async def test_only_the_rag_corpus_has_backups_yet(
+    async def test_unknown_corpora_and_a_graph_restore_are_validation_errors(
         self, docs_root: Path, method: str, path: str
     ) -> None:
-        response = await request(make_app(make_runner(docs_root)), method, path)
+        response = await request(
+            make_app(make_runner(docs_root)), method, path, json={"name": "g.zip"}
+        )
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "validation_error"
 
@@ -977,3 +994,305 @@ class TestListedVerdicts:
         assert memory.reason("graph", listing) is None  # per corpus
         memory.remember("rag", "gone.zip", docs_root / "gone.zip", "never stat-able")  # no-op
         assert get_damaged_bundles() is get_damaged_bundles()  # one per process
+
+
+# ── the graph export (phase 3) ────────────────────────────────────────────
+
+
+@pytest.fixture
+def graph_stack(
+    docs_root: Path,
+    tmp_path: Path,
+    settings_env: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> GraphService:
+    """The graph corpus beside the documents: a real service over a fake engine.
+
+    Its workdir is ``GRAPH_STORAGE_PATH/lightrag`` — what the export route's
+    nothing-to-export check derives — and nothing is built in it yet.
+    """
+    settings_env(
+        GRAPH_DOCS_PATH=str(tmp_path / "graph-docs"),
+        GRAPH_STORAGE_PATH=str(tmp_path / "graph-data"),
+        GRAPH_ENGINE="lightrag",
+        GRAPH_ENABLED="true",
+    )
+    (tmp_path / "graph-docs").mkdir()
+    monkeypatch.setitem(GRAPH_ENGINE_REGISTRY, "_backup_probe", FakeEngine())
+    return GraphService("_backup_probe", workdir=tmp_path / "graph-data" / "lightrag")
+
+
+def scripted_graph_flow(
+    service: GraphService, *, hold: threading.Event | None = None
+) -> Callable[..., GraphExportReport]:
+    """A graph-export-flow double: the real export over the given service."""
+
+    def flow(dest: Path, *, on_progress: Any = None) -> GraphExportReport:
+        if hold is not None:
+            assert hold.wait(timeout=5)
+        return export_graph(service, dest, read_stale=lambda: False, on_progress=on_progress)
+
+    return flow
+
+
+def make_graph_runner(service: GraphService, **kwargs: Any) -> BackupRunner:
+    flow = kwargs.pop("flow", None) or scripted_graph_flow(service)
+    kwargs.setdefault("gate", CorpusGate("graph"))
+    return BackupRunner("graph", export_flow=flow, **kwargs)
+
+
+def graph_app(docs_root: Path, runner: BackupRunner, **kwargs: Any) -> FastAPI:
+    return make_app(make_runner(docs_root), graph_runner=runner, **kwargs)
+
+
+class TestGraphExport:
+    async def test_graph_export_round_trip(
+        self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
+    ) -> None:
+        """★ 202 → snapshot · pack · finalize replayed → listed with its engine → served."""
+        build_workdir(graph_stack.workdir)
+        runner = make_graph_runner(graph_stack)
+        app = graph_app(docs_root, runner)
+
+        started = await request(app, "POST", "/api/backups/graph/export")
+        assert started.status_code == 202
+        body = started.json()
+        assert (body["corpus"], body["operation"], body["state"]) == ("graph", "export", "running")
+        await wait_terminal(runner)
+
+        events = parse_sse(await stream_body(app, "/api/backups/graph/status"))
+        stages = [data["stage"] for name, data in events if name == "progress"]
+        assert stages[0] == "snapshot" and stages[-1] == "finalize"
+        packing = [data for name, data in events if name == "progress" and data["stage"] == "pack"]
+        assert packing[-1]["current"] == packing[-1]["total"] > 0  # counted in bytes
+        final = events[-1][1]["run"]
+        assert final["state"] == "completed"
+        name = final["bundle"]
+        assert name.startswith("varagity-graph-")
+        assert final["saved_to"] == f"graph-docs/varagity-exports/{name}"
+        assert final["summary"]["counts"] == {
+            "thread_days": 2,
+            "messages": 3,
+            "entities": 5,
+            "relations": 3,
+        }
+
+        (entry,) = (await request(app, "GET", "/api/backups/graph")).json()
+        assert entry["name"] == name
+        assert entry["manifest"]["corpus"] == "graph"
+        assert entry["manifest"]["engine"] == FAKE_FORMAT.model_dump()
+        assert entry["manifest"]["ingest_settings"] is None
+        assert entry["restorable"] is True and entry["reason"] is None
+        assert entry["drift"] == []  # drift is a RAG notion
+        assert (await request(app, "GET", "/api/backups/rag")).json() == []  # its own folder
+
+        download = await request(app, "GET", f"/api/backups/graph/files/{name}")
+        assert download.status_code == 200
+        assert download.headers["content-type"] == "application/zip"
+        assert download.headers["content-disposition"] == f'attachment; filename="{name}"'
+        bundle = tmp_path / "graph-docs" / "varagity-exports" / name
+        assert download.content == bundle.read_bytes()
+
+    @pytest.mark.parametrize("layout", ["missing", "only-temp-files"])
+    async def test_an_unbuilt_graph_is_nothing_to_export(
+        self, docs_root: Path, graph_stack: GraphService, layout: str
+    ) -> None:
+        if layout == "only-temp-files":
+            graph_stack.workdir.mkdir(parents=True)
+            (graph_stack.workdir / "kv_store_doc_status.json.tmp.1.2.3").write_bytes(b"half")
+        runner = make_graph_runner(graph_stack)
+        response = await request(graph_app(docs_root, runner), "POST", "/api/backups/graph/export")
+        assert response.status_code == 422
+        error = response.json()["error"]
+        assert error["code"] == "nothing_to_export"
+        assert error["message"] == (
+            "nothing has been built into the graph yet — build it before exporting"
+        )
+        assert runner.snapshot() is None  # refused before any run existed
+
+    async def test_the_preflight_is_asked_about_the_graph_export(
+        self, docs_root: Path, graph_stack: GraphService
+    ) -> None:
+        calls: list[tuple[str, str]] = []
+
+        async def down(corpus: str, operation: str) -> None:
+            calls.append((corpus, operation))
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "postgres_unreachable", "message": "postgres unreachable"},
+            )
+
+        response = await request(
+            graph_app(docs_root, make_graph_runner(graph_stack), preflight=down),
+            "POST",
+            "/api/backups/graph/export",
+        )
+        assert response.status_code == 503
+        assert calls == [("graph", "export")]
+
+    async def test_a_build_holding_the_graph_is_corpus_busy(
+        self, docs_root: Path, graph_stack: GraphService
+    ) -> None:
+        build_workdir(graph_stack.workdir)
+        gate = CorpusGate("graph")
+        gate.claim("build")
+        runner = make_graph_runner(graph_stack, gate=gate)
+        response = await request(graph_app(docs_root, runner), "POST", "/api/backups/graph/export")
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "corpus_busy"
+        assert "a build is running" in error["message"]
+        assert runner.snapshot() is None
+
+    async def test_an_unwritable_graph_docs_root_is_a_structured_500(
+        self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
+    ) -> None:
+        build_workdir(graph_stack.workdir)
+        root = tmp_path / "graph-docs"
+        root.chmod(0o555)
+        try:
+            response = await request(
+                graph_app(docs_root, make_graph_runner(graph_stack)),
+                "POST",
+                "/api/backups/graph/export",
+            )
+        finally:
+            root.chmod(0o755)
+        assert response.status_code == 500
+        error = response.json()["error"]
+        assert error["code"] == "graph_docs_path_not_writable"
+        assert "graph-docs/varagity-exports/" in error["message"]
+
+    async def test_the_two_corpora_back_up_side_by_side(
+        self, docs_root: Path, graph_stack: GraphService
+    ) -> None:
+        """Each corpus has its own gate: a RAG export never holds up the graph's."""
+        build_workdir(graph_stack.workdir)
+        hold = threading.Event()
+        rag = make_runner(docs_root, flow=scripted_flow(docs_root, hold=hold))
+        graph = make_graph_runner(graph_stack)
+        app = make_app(rag, graph_runner=graph)
+        try:
+            assert (await request(app, "POST", "/api/backups/rag/export")).status_code == 202
+            assert (await request(app, "POST", "/api/backups/graph/export")).status_code == 202
+            await wait_terminal(graph)
+            snapshot = graph.snapshot()
+            assert snapshot is not None and snapshot.state == "completed"
+            assert rag.running is True
+        finally:
+            hold.set()
+        await wait_terminal(rag)
+
+    async def test_a_held_write_lock_fails_the_run_cleanly(
+        self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
+    ) -> None:
+        """A writer outside any runner (a delete, say) holds the lock: no half-copied bundle."""
+        build_workdir(graph_stack.workdir)
+        gate = CorpusGate("graph")
+        runner = make_graph_runner(graph_stack, gate=gate)
+        with graph_stack.writing():
+            runner.start("export")
+            await wait_terminal(runner)
+        snapshot = runner.snapshot()
+        assert snapshot is not None and snapshot.state == "failed"
+        assert snapshot.error is not None
+        assert snapshot.error.startswith("GraphBuildInProgress: the graph is being written")
+        assert gate.holder is None
+        exports = tmp_path / "graph-docs" / "varagity-exports"
+        assert not exports.exists() or list(exports.iterdir()) == []
+
+    async def test_the_graph_runner_never_reads_the_ingest_settings(
+        self, docs_root: Path, graph_stack: GraphService
+    ) -> None:
+        def boom() -> dict[str, str]:
+            raise AssertionError("ingest settings are a RAG notion")
+
+        build_workdir(graph_stack.workdir)
+        runner = make_graph_runner(graph_stack, ingest_settings=boom)
+        runner.start("export")
+        await wait_terminal(runner)
+        snapshot = runner.snapshot()
+        assert snapshot is not None and snapshot.state == "completed"
+
+    async def test_a_rag_bundle_in_the_graph_folder_lists_why_it_cannot_restore(
+        self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
+    ) -> None:
+        exported = exported_bundle(docs_root)
+        exports = tmp_path / "graph-docs" / "varagity-exports"
+        exports.mkdir()
+        (exports / exported.name).write_bytes(exported.read_bytes())
+        (entry,) = (
+            await request(
+                graph_app(docs_root, make_graph_runner(graph_stack)), "GET", "/api/backups/graph"
+            )
+        ).json()
+        assert entry["restorable"] is False
+        assert entry["reason"] == (
+            "A document corpus backup — it cannot restore the message graph."
+        )
+        assert entry["drift"] == []
+
+
+class TestDisabledGraph:
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("GET", "/api/backups/graph"),
+            ("POST", "/api/backups/graph/export"),
+            ("GET", "/api/backups/graph/files/varagity-graph-20261108-1315.zip"),
+        ],
+    )
+    async def test_graph_backups_answer_403_while_the_graph_is_off(
+        self,
+        docs_root: Path,
+        graph_stack: GraphService,
+        settings_env: Callable[..., None],
+        method: str,
+        path: str,
+    ) -> None:
+        build_workdir(graph_stack.workdir)
+        settings_env(GRAPH_ENABLED="false")
+        runner = make_graph_runner(graph_stack)
+        response = await request(graph_app(docs_root, runner), method, path)
+        assert response.status_code == 403
+        error = response.json()["error"]
+        assert error["code"] == "graph_disabled"
+        assert "GRAPH_ENABLED=false" in error["message"]
+        assert runner.snapshot() is None
+
+    async def test_the_403_comes_before_any_store_is_touched(
+        self, docs_root: Path, graph_stack: GraphService, settings_env: Callable[..., None]
+    ) -> None:
+        """A disabled graph is refused even with postgres down — the cheapest answer first."""
+        settings_env(GRAPH_ENABLED="false")
+        app = graph_app(docs_root, make_graph_runner(graph_stack))
+
+        def unreachable() -> None:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "postgres_unreachable", "message": "postgres unreachable"},
+            )
+
+        app.dependency_overrides[get_vector_store] = unreachable
+        response = await request(app, "POST", "/api/backups/graph/export")
+        assert response.status_code == 403
+
+    async def test_the_status_stream_still_reports(
+        self, docs_root: Path, graph_stack: GraphService, settings_env: Callable[..., None]
+    ) -> None:
+        settings_env(GRAPH_ENABLED="false")
+        events = parse_sse(
+            await stream_body(
+                graph_app(docs_root, make_graph_runner(graph_stack)), "/api/backups/graph/status"
+            )
+        )
+        assert events == [("status", {"run": None})]
+
+    async def test_the_document_corpus_is_unaffected(
+        self, docs_root: Path, graph_stack: GraphService, settings_env: Callable[..., None]
+    ) -> None:
+        settings_env(GRAPH_ENABLED="false")
+        response = await request(
+            graph_app(docs_root, make_graph_runner(graph_stack)), "GET", "/api/backups/rag"
+        )
+        assert response.status_code == 200

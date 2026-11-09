@@ -360,21 +360,30 @@ picture one opened at the start did. `progress` frames walk
 - **One build at a time**: a second `POST` is a structured `409
   graph_build_running`; a preflight rejects with `503` when a model service
   is down. `GRAPH_ENABLED=false` refuses with `403 graph_disabled`.
+- **One writer per corpus** (ADR-019): a build claims the graph corpus's
+  gate for its whole run, so a build during a graph backup export is `409
+  corpus_busy`, and an export during a build is refused the same way. The
+  `reingest=true` wipe runs under the service's write lock too, so no
+  backup can ever copy a workdir being removed. The build's scan never
+  counts the reserved `graph-docs/varagity-exports/` folder.
 - **Killing the process is safe**: the durable statuses are the run's
   memory, and both sidecars are written atomically.
 - **The graph-stale flag** is cleared only by a *completed* API-driven
   `reingest=true` run — deleting a source file sets it, and the tab says so
   until a rebuild retracts those messages.
 
-## The backup flows (`rag-export` / `rag-restore`)
+## The backup flows (`rag-export` / `rag-restore` / `graph-export`)
 
 `rag-export` (`varagity/pipeline/backup_flow.py`) writes the chunk corpus
 into a backup bundle ([Data model](data-model.md#backup-bundles)), and
-`rag-restore` turns a bundle back into the corpus. Both are thin `@flow`
-shells over `varagity.backup.rag` (`export_rag`, `restore_rag`), for the
-same reason `graph-build` is one: the work belongs to the backup package,
-while Prefect owns the *record* that a backup ran, how long it took, and
-whether it failed.
+`rag-restore` turns a bundle back into the corpus; `graph-export` writes the
+message graph's workdir into one ([below](#the-graph-export-graph-export)).
+All three are thin `@flow` shells over the backup package
+(`varagity.backup.rag`'s `export_rag` and `restore_rag`,
+`varagity.backup.graph`'s `export_graph`), for the same reason
+`graph-build` is one: the work belongs to the backup package, while Prefect
+owns the *record* that a backup ran, how long it took, and whether it
+failed.
 
 ```mermaid
 flowchart LR
@@ -440,21 +449,54 @@ flowchart LR
 - **No retries**, for the export's reason: a failure is either a rollback or
   says what it left, so the user presses Restore again.
 
+### The graph export (`graph-export`)
+
+```mermaid
+flowchart LR
+    start(["graph_export_flow(dest)"]) --> lock["snapshot<br/>GraphService.writing() · list the workdir"]
+    lock --> pack["pack<br/>each file → &lt;engine&gt;/name, deflated · counted in bytes"]
+    pack --> fin["finalize<br/>read _graph_stale (app_settings) · bundle.json · fsync · os.replace"]
+```
+
+- **The write lock does the hard part.** The flow copies the graph's
+  working directory ([Data model](data-model.md#the-graph-bundle)) under
+  `GraphService.writing()`, the lock every build, resume and delete takes,
+  so no file changes mid-copy; reads take no lock, so graph chat and
+  `/graph` keep answering. The engine's `*.tmp*` files are skipped, and so
+  is anything a bundle can't carry (each named in a relayed warning).
+- **The engine names its own format.** The manifest records
+  `GraphEngine.storage_format()` — for LightRAG, `lightrag-hku` and its
+  installed version, read from package metadata, so the backup code never
+  hardcodes the library and the registry stays import-light. The counts
+  come from the workdir's size summary, never from parsing the graphml.
+- **No model service, no session, no retries.** The flow copies files the
+  API itself owns and never opens the engine. It reads the stale flag from
+  Postgres last, just before sealing, because deleting a graph source sets
+  it without taking any lock: a source deleted mid-export is still
+  recorded. A failure removes the partial bundle, and the user presses
+  Export again. Progress travels as `snapshot` → `pack` (bytes copied of
+  the files' total, about 50 frames) → `finalize`.
+
 ### API-triggered exports and restores
 
-`POST /api/backups/rag/export` and `POST /api/backups/rag/restore` are the
-ingest runner's shape again: a daemon thread inside the API process, an
-immediate `202` handle, and `GET /api/backups/rag/status` streaming the run
-as SSE with full backlog replay
+`POST /api/backups/{corpus}/export` and `POST /api/backups/rag/restore` are
+the ingest runner's shape again: a daemon thread inside the API process, an
+immediate `202` handle, and `GET /api/backups/{corpus}/status` streaming the
+run as SSE with full backlog replay
 ([HTTP API](api.md#the-backup-status-stream-get-apibackupscorpusstatus)).
+Each corpus (`rag`, `graph`) has its own runner and gate, so a graph export
+and a RAG restore run side by side.
 
 - **The corpus gate.** `BackupRunner` (`varagity/api/backup_runner.py`)
   claims the corpus's `CorpusGate` (`varagity/api/corpus_gate.py`) for the
-  whole run, and so does the ingest runner. A second backup run, an ingest
-  during a backup, or a backup during an ingest is refused with `409
-  corpus_busy`, which names the holder (a second ingest keeps its own `409
-  ingest_already_running`). The gate is the one-at-a-time rule *inside* the
-  API process; the advisory corpus lock (above) is its cross-process half.
+  whole run, and so do the ingest runner (RAG) and the graph build runner
+  (graph). A second backup run, an ingest or build during a backup, or a
+  backup during an ingest or build is refused with `409 corpus_busy`, which
+  names the holder (a second ingest or build keeps its own `409
+  ingest_already_running` / `graph_build_running`). The gate is the
+  one-at-a-time rule *inside* the API process; for RAG, the advisory corpus
+  lock (above) is its cross-process half — the graph needs none, since the
+  API is its only writer.
 - **A restore refuses before it starts.** The route checks the gate, hashes
   every member of the bundle (`verify_bundle`), and checks the corpus lock
   before the `202`, so a bad bundle or a busy corpus is a clean `422`/`409`,
@@ -464,9 +506,13 @@ as SSE with full backlog replay
   so `varagity.backup` never imports the API layer. The flow reads the stale
   flag itself, *after* those settings.
 - **The saved path.** A completed run reports `bundle` and `saved_to`
-  (`docs/varagity-exports/<name>`), relative to the checkout. The API sees
-  `/app/docs` in compose, but the user's file manager sees `./docs`, so the
-  corpus folder's own name is the path that reads right in both modes.
+  (`docs/varagity-exports/<name>` or `graph-docs/varagity-exports/<name>`),
+  relative to the checkout. The API sees `/app/docs` in compose, but the
+  user's file manager sees `./docs`, so the corpus folder's own name is the
+  path that reads right in both modes.
+- **The graph's kill switch.** While `GRAPH_ENABLED=false`, the graph's
+  list, export and download answer `403 graph_disabled` (before any store is
+  touched); its status stream keeps reporting.
 
 ## Evaluation flows
 

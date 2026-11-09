@@ -56,10 +56,21 @@ export interface BackupRunHandle {
  * finished RAG restore also invalidates the document table and the
  * settings catalog: the rows were replaced, and the restore rewrote the
  * stale flag the banner reads.
+ *
+ * `enabled: false` holds the bundle list back — the graph tab passes it
+ * until the status poll says the graph is on, since a disabled graph's
+ * backups answer `403 graph_disabled` (its panel isn't shown then). The
+ * status stream is followed regardless: it is never refused.
  */
-export function useBackupRun(corpus: TargetCorpus): BackupRunHandle {
+export function useBackupRun(
+  corpus: TargetCorpus,
+  { enabled = true }: { enabled?: boolean } = {},
+): BackupRunHandle {
   const queryClient = useQueryClient();
-  const { data: bundles = null, error: listError } = useQuery(backupsQuery(corpus));
+  const { data: bundles = null, error: listError } = useQuery({
+    ...backupsQuery(corpus),
+    enabled,
+  });
   const [view, setView] = useState<BackupView>(initialBackupView);
   const [error, setError] = useState<string | null>(null);
   const followingRef = useRef(false);

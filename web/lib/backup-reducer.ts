@@ -17,6 +17,7 @@ import type {
   BackupSummary,
   BundleManifest,
   BundleOut,
+  GraphStatus,
 } from "@/lib/api";
 
 /** One relayed `varagity.backup` log line. */
@@ -30,13 +31,14 @@ export interface BackupView {
   run: BackupRun | null;
   /**
    * The stage the run last reported — `snapshot` | `documents` | `chunks` |
-   * `finalize` for an export, `validate` | `load` | `index` | `bm25` for a
-   * restore. `null` before the first frame and once terminal.
+   * `finalize` for a RAG export, `snapshot` | `pack` | `finalize` for a
+   * graph export, `validate` | `load` | `index` | `bm25` for a restore.
+   * `null` before the first frame and once terminal.
    */
   stage: string | null;
-  /** Rows written so far in a counted stage (`null` otherwise). */
+  /** Rows (`pack`: bytes) done so far in a counted stage (`null` otherwise). */
   current: number | null;
-  /** The counted stage's row total (`null` otherwise). */
+  /** The counted stage's row (`pack`: byte) total (`null` otherwise). */
   total: number | null;
   /** Relayed log tail, oldest first (capped). */
   logs: BackupLogLine[];
@@ -103,6 +105,8 @@ export function backupStageLabel(view: BackupView): string | null {
       return "writing documents";
     case "chunks":
       return "writing chunks and vectors";
+    case "pack":
+      return "packing the graph's files";
     case "finalize":
       return "sealing the bundle";
     case "validate":
@@ -129,9 +133,50 @@ export function backupStageUnit(stage: string | null): string {
       return "chunks loaded";
     case "bm25":
       return "chunks indexed";
+    case "pack":
+      return "packed";
     default:
       return "rows";
   }
+}
+
+/** Stages that count bytes rather than rows — a graph export copies files. */
+const BYTE_STAGES: ReadonlySet<string> = new Set(["pack"]);
+
+/** A counted stage's progress, ready for the panel's bar and its caption. */
+export interface BackupProgress {
+  /** Done so far, worded — `"6,200"`, or `"182.0 MB"` for a byte-counted stage. */
+  done: string;
+  /** The stage's total, worded the same way. */
+  total: string;
+  /** What is being counted (`"chunks loaded"`, `"packed"`). */
+  unit: string;
+  /** The raw counts, for the progressbar's aria values. */
+  current: number;
+  max: number;
+  /** `current / max`, clamped to 1 (a file that grew mid-copy never overflows). */
+  fraction: number;
+}
+
+/**
+ * Where a counted stage is — rows for every RAG stage, **bytes** for a graph
+ * export's `pack`, so `182.0 MB / 256.0 MB packed` rather than a raw byte
+ * count. `null` while the stage counts nothing.
+ */
+export function backupProgress(view: BackupView): BackupProgress | null {
+  if (view.total === null || view.total <= 0) return null;
+  const current = view.current ?? 0;
+  const word = BYTE_STAGES.has(view.stage ?? "")
+    ? formatBytes
+    : (value: number) => value.toLocaleString();
+  return {
+    done: word(current),
+    total: word(view.total),
+    unit: backupStageUnit(view.stage),
+    current,
+    max: view.total,
+    fraction: Math.min(1, current / view.total),
+  };
 }
 
 /** A restore's four stages, in order, as the panel's step strip names them. */
@@ -200,7 +245,7 @@ export function describeReplacement(
     manifest === null
       ? "this backup's rows"
       : `this backup's ${Object.entries(manifest.counts)
-          .map(([noun, count]) => formatCount(count, noun))
+          .map(([key, count]) => formatCount(count, countNoun(key)))
           .join(" and ")}`;
   return `Replaces ${now} in both stores with ${incoming}. Nothing is re-parsed, re-contextualized or re-embedded. Conversations keep their evidence snapshots.`;
 }
@@ -229,11 +274,25 @@ export function describeStaleRestore(bundle: BundleOut): string | null {
   return `${parts.join("; ")} — the corpus will be flagged stale until a re-ingest.`;
 }
 
-/** Singular nouns for the `counts` keys a manifest carries. */
+/** Singular forms of the plural nouns a count is worded with. */
 const SINGULAR: Record<string, string> = {
   documents: "document",
   chunks: "chunk",
+  "thread-days": "thread-day",
+  messages: "message",
+  entities: "entity",
+  relations: "relation",
 };
+
+/** `counts` keys whose display noun isn't the key itself (the rest read as-is). */
+const COUNT_NOUNS: Record<string, string> = {
+  thread_days: "thread-days",
+};
+
+/** The plural noun a manifest's `counts` key is worded with (`thread_days` → `thread-days`). */
+export function countNoun(key: string): string {
+  return COUNT_NOUNS[key] ?? key;
+}
 
 /** `2 → "2 documents"`, `1 → "1 document"` — locale-grouped digits. */
 export function formatCount(count: number, noun: string): string {
@@ -255,17 +314,25 @@ export function formatBytes(bytes: number): string {
 
 /** What one bundle holds, and how it was made — the list row's second line. */
 export interface BundleDescription {
-  /** `"142 documents · 10,233 chunks"`. */
+  /** `"142 documents · 10,233 chunks"`, or `"799 thread-days · 64,592 messages"`. */
   contents: string;
-  /** `"recursive_character 400/50 · contextualized"`, or `null` when unknown. */
+  /**
+   * `"recursive_character 400/50 · contextualized"` for a RAG bundle, the
+   * engine that wrote a graph bundle's files (`"lightrag-hku 1.5.4"`), or
+   * `null` when unknown.
+   */
   settings: string | null;
 }
 
 /** Summarize a bundle's manifest for its row in the backups list. */
 export function describeBundle(manifest: BundleManifest): BundleDescription {
   const contents = Object.entries(manifest.counts)
-    .map(([noun, count]) => formatCount(count, noun))
+    .map(([key, count]) => formatCount(count, countNoun(key)))
     .join(" · ");
+  // A graph bundle is its engine's files verbatim, so what it was "made
+  // under" is that engine's version — the thing a restore holds it to.
+  const engine = manifest.engine ?? null;
+  if (engine !== null) return { contents, settings: `${engine.package} ${engine.version}` };
   const ingest = manifest.ingest_settings ?? null;
   if (ingest === null) return { contents, settings: null };
   const parts: string[] = [];
@@ -278,4 +345,29 @@ export function describeBundle(manifest: BundleManifest): BundleDescription {
   if (ingest.CONTEXTUALIZE === "true") parts.push("contextualized");
   else if (ingest.CONTEXTUALIZE === "false") parts.push("not contextualized");
   return { contents, settings: parts.length > 0 ? parts.join(" · ") : null };
+}
+
+/**
+ * What the graph holds right now, for its panel's "Now:" line —
+ * `"799 thread-days · 64,592 messages · 5,000 entities · 6,680 relations"`,
+ * straight off the status poll (the engine's document counts, all statuses,
+ * and the workdir's size summary). Figures the graph would not report are
+ * left out; `null` when it reports nothing at all.
+ */
+export function describeGraphHolding(status: GraphStatus): string | null {
+  const threadDays = Object.values(status.documents).reduce((sum, count) => sum + count, 0);
+  const parts: string[] = [];
+  if (threadDays > 0) parts.push(formatCount(threadDays, "thread-days"));
+  if (status.message_guids != null) parts.push(formatCount(status.message_guids, "messages"));
+  if (status.entities != null) parts.push(formatCount(status.entities, "entities"));
+  if (status.relations != null) parts.push(formatCount(status.relations, "relations"));
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/**
+ * Whether the graph is confirmed unbuilt — nothing counted anywhere, so
+ * there is nothing to export (the server would answer `nothing_to_export`).
+ */
+export function graphIsEmpty(status: GraphStatus): boolean {
+  return describeGraphHolding(status) === null;
 }

@@ -1238,8 +1238,9 @@ class BundleManifestOut(BundleManifest):
 
     The file format's own model (:class:`varagity.backup.bundle.BundleManifest`)
     on the wire unchanged — the panel shows what a bundle holds (``counts``)
-    and what it was made under (the embedding model and dimension, the
-    ingest settings, the stale flag) straight from the manifest.
+    and what it was made under (the embedding model and dimension, a RAG
+    bundle's ingest settings, a graph bundle's engine format, the stale
+    flag) straight from the manifest.
     """
 
 
@@ -1298,9 +1299,10 @@ class BackupSummaryOut(BaseModel):
 
     Attributes:
         counts: An export's: what the bundle holds — ``documents`` and
-            ``chunks`` for a RAG bundle. A restore's: what it wrote —
-            ``documents``, ``chunks``, and ``bm25`` (the chunks the rebuilt
-            index holds).
+            ``chunks`` for a RAG bundle; ``thread_days``, ``messages`` and
+            (when the graph reported them) ``entities`` and ``relations``
+            for a graph bundle. A restore's: what it wrote — ``documents``,
+            ``chunks``, and ``bm25`` (the chunks the rebuilt index holds).
         size_bytes: The bundle's size on disk.
         wall_clock_s: Seconds from the snapshot to the published bundle (an
             export), or from validation to a searchable index (a restore).
@@ -1328,9 +1330,10 @@ class BackupRunOut(BaseModel):
             an export names nothing until its bundle is whole). A restore's:
             the bundle it restores, from the start.
         saved_to: Where an export's bundle landed, relative to the checkout
-            (``docs/varagity-exports/<name>``) — the path "Copy path"
-            copies, right in both host and compose mode. ``None`` for a
-            restore.
+            (``docs/varagity-exports/<name>``, or
+            ``graph-docs/varagity-exports/<name>`` for the graph) — the path
+            "Copy path" copies, right in both host and compose mode.
+            ``None`` for a restore.
         started_at: When the run started.
         finished_at: When it reached a terminal state (``None`` while
             running).
@@ -1367,24 +1370,36 @@ class BackupStatusEvent(BaseModel):
 class BackupProgressEvent(BaseModel):
     """Payload of the backup-status SSE ``progress`` event.
 
-    An export walks ``snapshot`` (open one consistent read of the corpus) →
-    ``documents`` → ``chunks`` (rows written, with ``current``/``total``) →
+    A RAG export walks ``snapshot`` (open one consistent read of the corpus)
+    → ``documents`` → ``chunks`` (rows written, with ``current``/``total``) →
     ``finalize`` (the vector matrix, the manifest, the atomic rename). A
-    restore walks ``validate`` (the bundle's verdict again) → ``load`` (the
-    replacing transaction's binary COPY, chunks loaded so far) → ``index``
-    (the vector index rebuild and the commit — the restore takes effect) →
-    ``bm25`` (the BM25 index refilled from the restored rows, chunks so far).
+    graph export walks ``snapshot`` (take the graph's write lock, list its
+    workdir) → ``pack`` (the workdir's files copied in, counted in **bytes**)
+    → ``finalize``. A restore walks ``validate`` (the bundle's verdict again)
+    → ``load`` (the replacing transaction's binary COPY, chunks loaded so
+    far) → ``index`` (the vector index rebuild and the commit — the restore
+    takes effect) → ``bm25`` (the BM25 index refilled from the restored
+    rows, chunks so far).
 
     Attributes:
-        stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (an
-            export) or ``validate`` | ``load`` | ``index`` | ``bm25`` (a
+        stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (a
+            RAG export), ``snapshot`` | ``pack`` | ``finalize`` (a graph
+            export), or ``validate`` | ``load`` | ``index`` | ``bm25`` (a
             restore).
-        current: Rows written so far in a counted stage.
-        total: The stage's row count.
+        current: Rows (``pack``: bytes) done so far in a counted stage.
+        total: The stage's row (``pack``: byte) count.
     """
 
     stage: Literal[
-        "snapshot", "documents", "chunks", "finalize", "validate", "load", "index", "bm25"
+        "snapshot",
+        "documents",
+        "chunks",
+        "pack",
+        "finalize",
+        "validate",
+        "load",
+        "index",
+        "bm25",
     ]
     current: int | None = None
     total: int | None = None
@@ -1394,8 +1409,8 @@ class BackupLogEvent(BaseModel):
     """Payload of the backup-status SSE ``log`` event.
 
     Relayed ``varagity.backup`` log records (what was exported or restored,
-    a swept partial, an embedding-model drift warning), so the panel shows
-    what the server log would.
+    a swept partial, an embedding-model drift warning, a graph workdir entry
+    the export had to skip), so the panel shows what the server log would.
 
     Attributes:
         level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).

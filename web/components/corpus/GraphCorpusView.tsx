@@ -4,7 +4,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { DatabaseIcon, PowerOffIcon, Trash2Icon, UploadIcon } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 
+import { BackupPanel } from "@/components/corpus/BackupPanel";
 import { GraphBuildPanel } from "@/components/corpus/GraphBuildPanel";
+import { useBackupRun } from "@/components/corpus/use-backup";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -27,6 +29,7 @@ import {
   type GraphDocument,
   type GraphStatus,
 } from "@/lib/api";
+import { describeGraphHolding, graphIsEmpty } from "@/lib/backup-reducer";
 import {
   initialGraphBuildView,
   reduceGraphBuildEvent,
@@ -86,6 +89,12 @@ function parseLabel(document: GraphDocument): string | null {
  * deleting a source **flags the graph stale** rather than retracting its
  * messages: only a rebuild can do that, and saying so beats diverging
  * quietly (stage-2 decision #16).
+ *
+ * The export & restore panel (ADR-019) sits under the build: one operation
+ * per corpus, so while an export runs the build controls are disabled (the
+ * server would answer `409 corpus_busy`), and while a build runs, so is
+ * Export. Graph chat keeps answering throughout — an export only holds the
+ * graph's write lock.
  */
 export function GraphCorpusView() {
   const queryClient = useQueryClient();
@@ -107,6 +116,14 @@ export function GraphCorpusView() {
   const enabled = status?.enabled ?? true;
   const stale = status?.stale ?? false;
   const running = build.run?.state === "running" || (status?.building ?? false);
+  // The export & restore panel's own run + bundle list. The list waits for
+  // the status poll to say the graph is on: a disabled graph's backups
+  // answer 403, and its panel isn't rendered anyway.
+  const backup = useBackupRun("graph", { enabled: status?.enabled === true });
+  // What the graph holds now — the panel's "Now:" line — and whether it is
+  // confirmed unbuilt (nothing to export); unknown while the poll loads.
+  const holding = status === null ? null : describeGraphHolding(status);
+  const empty = status !== null && graphIsEmpty(status);
 
   const statusErrorMessage =
     statusError === null
@@ -269,7 +286,7 @@ export function GraphCorpusView() {
           <Button
             variant="outline"
             size="sm"
-            disabled={running || !enabled}
+            disabled={running || backup.running || !enabled}
             onClick={() => void handleBuild({ reingest: true })}
           >
             Re-build to apply
@@ -373,11 +390,30 @@ export function GraphCorpusView() {
       {enabled && (
         <GraphBuildPanel
           view={build}
-          disabled={running}
+          disabled={running || backup.running}
+          busyNote={
+            backup.running
+              ? `Builds wait while the ${backup.view.run?.operation ?? "backup"} runs.`
+              : null
+          }
           onBuild={({ messageLimit }) => void handleBuild({ messageLimit })}
           onRebuild={({ messageLimit }) =>
             void handleBuild({ reingest: true, messageLimit })
           }
+        />
+      )}
+
+      {enabled && (
+        <BackupPanel
+          corpus="graph"
+          view={backup.view}
+          bundles={backup.bundles}
+          bundlesError={backup.bundlesError}
+          holding={holding}
+          empty={empty}
+          disabled={running}
+          error={backup.error}
+          onExport={() => void backup.startExport()}
         />
       )}
 

@@ -35,9 +35,13 @@ Two refusals come out of both: :class:`BundleInvalid` (not a sound bundle;
 mismatch is refused, never converted).
 
 This module knows the container, not the corpora: what goes *inside* a bundle
-is :mod:`varagity.backup.rag`'s business (and, later, the graph's) — except
-each corpus's member allowlist, which the verdict needs — and nothing here
-knows about HTTP.
+is :mod:`varagity.backup.rag`'s and :mod:`varagity.backup.graph`'s business —
+except each corpus's member allowlist, which the verdict needs — and nothing
+here knows about HTTP. The two allowlists differ in kind: a RAG bundle holds
+exactly three named members, while a graph bundle holds whatever files its
+engine's working directory held, so its rule is a pattern — flat files with
+safe names, under one folder named for the engine (``lightrag/…``) — and its
+manifest records that engine's file format (:attr:`BundleManifest.engine`).
 """
 
 import hashlib
@@ -49,7 +53,7 @@ import stat
 import zipfile
 import zlib
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -59,6 +63,7 @@ from typing import IO, Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from varagity.config import get_settings
+from varagity.graph.records import EngineFormat
 from varagity.paths import EXPORTS_DIRNAME, resolve_contained
 
 logger = logging.getLogger(__name__)
@@ -109,14 +114,25 @@ _READ_BYTES = 4 << 20
 # A Windows drive prefix ("C:"), refused as an absolute member path.
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 
-# What a bundle of each corpus holds besides its manifest: the restore's
-# member allowlist, matched exactly. The names are varagity.backup.rag's
-# member constants, hardcoded again here because that module imports this
-# one — a unit test pins the two together (the repo's tuple↔registry
-# convention). A corpus missing here cannot be restored at all yet.
+# What a bundle of a fixed-layout corpus holds besides its manifest: the
+# restore's member allowlist, matched exactly. The names are
+# varagity.backup.rag's member constants, hardcoded again here because that
+# module imports this one — a unit test pins the two together (the repo's
+# tuple↔registry convention). The graph corpus has no fixed list (see
+# _GRAPH_FILE_NAME).
 _CORPUS_MEMBERS: dict[str, frozenset[str]] = {
     "rag": frozenset({"documents.jsonl", "chunks.jsonl", "embeddings.f32"}),
 }
+
+# A graph bundle's data members are its engine's working directory, verbatim:
+# each file directly inside it, under one folder named for the engine
+# ("lightrag/kv_store_full_docs.json"). Which files a workdir holds depends on
+# what the engine has written so far (a namespace it never wrote has no
+# file), so the rule is a name pattern, not a list: ASCII letters, digits,
+# "_", "." and "-", never hidden, never a path — every name an engine writes
+# (LightRAG's twelve namespace files, the repo's two sidecars). The folder
+# (the engine's registry name) is held to the same pattern.
+_GRAPH_FILE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}")
 
 # How a verdict names each corpus to a person.
 _CORPUS_NOUNS: dict[str, str] = {"rag": "document corpus", "graph": "message graph"}
@@ -153,10 +169,16 @@ class BundleManifest(BaseModel):
             only vector size, so the model name is the only guard against
             restoring vectors from another embedding space.
         embedding_dim: ``EMBEDDING_DIM`` at export.
-        stale: The corpus's stale flag at export.
-        counts: What the bundle holds (rag: ``documents``, ``chunks``).
+        stale: The corpus's stale flag at export (``_corpus_stale`` or
+            ``_graph_stale``).
+        counts: What the bundle holds — rag: ``documents``, ``chunks``;
+            graph: ``thread_days``, ``messages``, and the ``entities`` and
+            ``relations`` the graph reported (each only when known).
         ingest_settings: The reingest-affecting settings at export, in
             env-string form (rag only; ``None`` for a corpus without them).
+        engine: The graph engine's file format at export — the workdir is
+            copied verbatim, so it is only as portable as the engine version
+            that wrote it (graph only; ``None`` for the RAG corpus).
         members: Every data member with its size and sha256, in write order.
     """
 
@@ -169,6 +191,7 @@ class BundleManifest(BaseModel):
     stale: bool
     counts: dict[str, int]
     ingest_settings: dict[str, str] | None = None
+    engine: EngineFormat | None = None
     members: list[BundleMember]
 
 
@@ -197,6 +220,14 @@ class BundleIncompatible(BundleError):
     (pgvector compares only the vector size), so restoring a mismatch would
     succeed and then retrieve the wrong passages — it is refused instead,
     never converted.
+    """
+
+
+class NothingToExport(RuntimeError):
+    """Raised when a corpus holds nothing to back up — an empty bundle is not a backup.
+
+    The RAG corpus with no ``documents`` row, or a graph whose working
+    directory has no file to copy (nothing has ever been built).
     """
 
 
@@ -362,6 +393,24 @@ def is_bundle_name(name: str) -> bool:
         and "\\" not in name
         and name.lower().endswith(BUNDLE_SUFFIX)
     )
+
+
+def is_graph_file_name(name: str) -> bool:
+    """Report whether a working-directory file name may ride in a graph bundle.
+
+    The graph bundle's member rule (and the rule for the engine folder those
+    members sit under), shared by the export — which must never write a
+    member the restore's verdict would refuse — and the verdict itself.
+
+    Args:
+        name: A bare file (or folder) name.
+
+    Returns:
+        ``True`` for a visible name of at most 255 ASCII letters, digits,
+        ``_``, ``.`` and ``-`` — every name an engine writes, and never one
+        that could be a path, a hidden file, ``.`` or ``..``.
+    """
+    return _GRAPH_FILE_NAME.fullmatch(name) is not None
 
 
 def bundle_name(directory: Path, corpus: Corpus, *, now: datetime | None = None) -> str:
@@ -544,6 +593,7 @@ class BundleWriter:
         stale: bool,
         counts: dict[str, int],
         ingest_settings: dict[str, str] | None = None,
+        engine: EngineFormat | None = None,
     ) -> BundleManifest:
         """Write ``bundle.json`` as the bundle's last member.
 
@@ -554,6 +604,8 @@ class BundleWriter:
             counts: What the bundle holds.
             ingest_settings: The reingest-affecting settings at export, if
                 the corpus has them.
+            engine: The graph engine's file format, if the corpus is the
+                graph.
 
         Returns:
             The manifest, as written.
@@ -573,6 +625,7 @@ class BundleWriter:
             stale=stale,
             counts=dict(counts),
             ingest_settings=dict(ingest_settings) if ingest_settings is not None else None,
+            engine=engine,
             members=list(self._members),
         )
         info = zipfile.ZipInfo(MANIFEST_NAME, date_time=self._date_time)
@@ -834,6 +887,72 @@ def _unsafe(info: zipfile.ZipInfo) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class _MemberRule:
+    """What one corpus's bundle may and must hold besides its manifest.
+
+    Attributes:
+        allows: Whether a data member may have this name.
+        required: Names every bundle of the corpus must record.
+        folders: Directory entries tolerated and ignored — a bundle re-zipped
+            by hand (``zip -r``) carries one for its member folder, and an
+            empty directory entry holds nothing to verify.
+    """
+
+    allows: Callable[[str], bool]
+    required: frozenset[str] = frozenset()
+    folders: frozenset[str] = frozenset()
+
+
+def _graph_folder(manifest: BundleManifest) -> str:
+    """The folder a graph bundle's files ride under: the name of the engine that wrote them.
+
+    Args:
+        manifest: The graph bundle's manifest.
+
+    Returns:
+        The engine's registry name (``lightrag``).
+
+    Raises:
+        BundleInvalid: If the manifest records no engine, or one whose name
+            couldn't be a folder.
+    """
+    engine = manifest.engine
+    if engine is None:
+        raise BundleInvalid(f"{MANIFEST_NAME} does not record the graph engine that wrote it.")
+    if not is_graph_file_name(engine.name):
+        raise BundleInvalid(
+            f"{MANIFEST_NAME} records the graph engine {engine.name!r}, which is not a folder name."
+        )
+    return engine.name
+
+
+def _member_rule(manifest: BundleManifest, corpus: Corpus) -> _MemberRule:
+    """The member allowlist a bundle of ``corpus`` is held to.
+
+    Args:
+        manifest: The bundle's (already validated) manifest.
+        corpus: The corpus being restored.
+
+    Returns:
+        RAG: exactly its three members, all required. Graph: flat files with
+        safe names under ``<engine>/``, none individually required (a
+        workdir holds only the namespaces its engine has written).
+
+    Raises:
+        BundleInvalid: If a graph manifest names no usable engine folder.
+    """
+    if corpus == "graph":
+        prefix = f"{_graph_folder(manifest)}/"
+
+        def in_folder(name: str) -> bool:
+            return name.startswith(prefix) and is_graph_file_name(name[len(prefix) :])
+
+        return _MemberRule(allows=in_folder, folders=frozenset({prefix}))
+    members = _CORPUS_MEMBERS[corpus]
+    return _MemberRule(allows=members.__contains__, required=members)
+
+
 def _check_members(infos: list[zipfile.ZipInfo], manifest: BundleManifest, corpus: Corpus) -> None:
     """Hold the zip's entries to the manifest and to the corpus's allowlist.
 
@@ -845,14 +964,10 @@ def _check_members(infos: list[zipfile.ZipInfo], manifest: BundleManifest, corpu
     Raises:
         BundleInvalid: For an unsafe, duplicated, unexpected, missing or
             unrecorded member, or one whose recorded size differs from the
-            zip's (a damaged or hand-edited bundle).
-        BundleIncompatible: If this stack can't restore the corpus at all.
+            zip's (a damaged or hand-edited bundle); for a graph bundle, also
+            a manifest that names no usable engine folder.
     """
-    allowed = _CORPUS_MEMBERS.get(corpus)
-    if allowed is None:
-        raise BundleIncompatible(
-            f"This stack cannot restore {_CORPUS_NOUNS.get(corpus, corpus)} backups yet."
-        )
+    rule = _member_rule(manifest, corpus)
     for info in infos:
         problem = _unsafe(info)
         if problem is not None:
@@ -864,15 +979,21 @@ def _check_members(infos: list[zipfile.ZipInfo], manifest: BundleManifest, corpu
         repeated = sorted(name for name, count in Counter(names).items() if count > 1)
         if repeated:
             raise BundleInvalid(f"{holder} {repeated[0]!r} more than once.")
-    entries = {info.filename: info for info in infos if info.filename != MANIFEST_NAME}
+    entries = {
+        info.filename: info
+        for info in infos
+        if info.filename != MANIFEST_NAME and not (info.is_dir() and info.filename in rule.folders)
+    }
     recorded = {member.name for member in manifest.members}
-    unexpected = sorted((set(entries) | recorded) - allowed)
+    unexpected = sorted(name for name in set(entries) | recorded if not rule.allows(name))
     if unexpected:
         raise BundleInvalid(f"Unexpected member(s): {', '.join(unexpected)}.")
     missing = sorted(recorded - set(entries))
     if missing:
         raise BundleInvalid(f"Missing member(s): {', '.join(missing)}.")
-    unrecorded = sorted(allowed - recorded)
+    # Required members, and any file the zip holds that the manifest never
+    # hashed — an unrecorded file could never be verified, so never restored.
+    unrecorded = sorted((rule.required | set(entries)) - recorded)
     if unrecorded:
         raise BundleInvalid(f"{MANIFEST_NAME} does not record {', '.join(unrecorded)}.")
     for member in manifest.members:

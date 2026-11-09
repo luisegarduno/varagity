@@ -67,6 +67,7 @@ ADR-017's numbers stay reproducible.
 """
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import os
@@ -94,6 +95,7 @@ from varagity.graph.manifest import (
 )
 from varagity.graph.records import (
     BuildReport,
+    EngineFormat,
     GraphAnswer,
     GraphEntity,
     GraphEvidence,
@@ -117,6 +119,15 @@ from varagity.models.llm import LLMClient, clean_response
 from varagity.tokens import count_tokens
 
 logger = logging.getLogger(__name__)
+
+# The adapter's registry key — what GRAPH_ENGINE selects, and so the name of
+# the working directory it stores the graph in (`GRAPH_STORAGE_PATH/lightrag`).
+ENGINE_NAME = "lightrag"
+
+# The distribution that owns the workdir's file format. A graph backup is the
+# workdir verbatim (ADR-019), so it records this package's installed version
+# — read from its metadata, which costs no import of the library itself.
+ENGINE_PACKAGE = "lightrag-hku"
 
 # LightRAG's own query modes: local / global / hybrid / naive / mix. `hybrid`
 # fuses its dual-level (entity + relation) keyword retrieval and is the
@@ -499,9 +510,32 @@ def export_from_knowledge_graph(graph: Any) -> GraphExport:
     )
 
 
-@register("lightrag")
+@register(ENGINE_NAME)
 class LightRAGEngine:
     """LightRAG behind the :class:`~varagity.graph.base.GraphEngine` protocol."""
+
+    def storage_format(self) -> EngineFormat:
+        """Name the file format this engine's workdir is in: the installed ``lightrag-hku``.
+
+        Every file in the workdir is LightRAG's own JSON/GraphML (plus the
+        repo's two sidecars), so the distribution's version *is* the
+        format's version. Read through :mod:`importlib.metadata` — the
+        registry must stay free of the engine library, which only
+        :meth:`session` may import (stage-1 decision #8).
+
+        Returns:
+            ``lightrag`` / ``lightrag-hku`` / the installed version.
+
+        Raises:
+            importlib.metadata.PackageNotFoundError: If ``lightrag-hku`` is
+                not installed (it is a main dependency, so only a broken
+                environment gets here — where no session could open either).
+        """
+        return EngineFormat(
+            name=ENGINE_NAME,
+            package=ENGINE_PACKAGE,
+            version=importlib.metadata.version(ENGINE_PACKAGE),
+        )
 
     @contextmanager
     def session(self, workdir: Path) -> Iterator[GraphSession]:

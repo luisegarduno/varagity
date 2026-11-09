@@ -27,6 +27,10 @@ forces:
 * **Deleting a source file flags the graph stale.** The graph still holds
   that file's messages — only a ``reingest`` rebuild retracts them — so the
   flag is set and the tab says so (stage-2 decision #16).
+* **The reserved ``varagity-exports/`` folder is not corpus** (ADR-019): the
+  graph's backup bundles live there, so the listing never shows them, the
+  delete never removes one (it would flag the graph stale for a file that
+  was never a source), and the build's scan never counts them.
 * **Builds are API-only** (stage-2 decision #4): the engine's storages are
   single-writer per working directory, and this process owns them. There is
   deliberately no CLI graph build.
@@ -54,6 +58,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
+from varagity.api.corpus_gate import CorpusBusy
 from varagity.api.deps import get_app_settings_store, get_graph_build_preflight
 from varagity.api.graph_runner import (
     GraphBuildAlreadyRunning,
@@ -81,7 +86,7 @@ from varagity.graph.manifest import load_manifest, load_summary
 from varagity.graph.records import GraphExport, GraphExportEdge, GraphExportNode
 from varagity.graph.service import GraphService, GraphUnavailable, get_graph_service
 from varagity.graph.sources.base import find_message_source
-from varagity.paths import resolve_contained
+from varagity.paths import is_exports_path, resolve_contained
 from varagity.stores.app_settings_store import AppSettingsStore
 
 logger = logging.getLogger(__name__)
@@ -280,7 +285,8 @@ def list_graph_documents(runner: RunnerDep) -> list[GraphDocumentOut]:
     what has been dropped in — sidecars and contacts files included. Files
     the last build parsed also carry their ``doc_id`` and a parse summary;
     files no build has scanned carry ``None`` for both, because parsing a
-    multi-gigabyte database is a build's job.
+    multi-gigabyte database is a build's job. The reserved
+    ``varagity-exports/`` folder's backup bundles are never listed.
 
     Args:
         runner: The process-wide graph build runner (holds the last scan).
@@ -294,7 +300,7 @@ def list_graph_documents(runner: RunnerDep) -> list[GraphDocumentOut]:
     if not graph_root.is_dir():
         return entries
     for path in sorted(graph_root.rglob("*"), key=lambda item: item.as_posix()):
-        if not path.is_file():
+        if not path.is_file() or is_exports_path(path.relative_to(graph_root)):
             continue
         relative = path.relative_to(graph_root).as_posix()
         stat = path.stat()
@@ -354,11 +360,13 @@ def delete_graph_document(name: str, store: SettingsStoreDep) -> GraphDocumentDe
     Raises:
         HTTPException: ``404 graph_document_not_found`` when no such file
             lives inside ``GRAPH_DOCS_PATH`` — which covers a path trying to
-            escape it, since an escaping path is not a file this route has.
+            escape it, since an escaping path is not a file this route has,
+            and anything in the reserved ``varagity-exports/`` folder (a
+            backup bundle is not a graph source, whatever path reaches it).
     """
     graph_root = Path(get_settings().GRAPH_DOCS_PATH).resolve()
     target = resolve_contained(graph_root / name, graph_root)
-    if target is None or not target.is_file():
+    if target is None or not target.is_file() or is_exports_path(target.relative_to(graph_root)):
         raise HTTPException(
             status_code=404,
             detail={
@@ -410,8 +418,10 @@ async def start_graph_build(
 
     Raises:
         HTTPException: ``403 graph_disabled`` when the kill switch is off;
-            ``409 graph_build_running`` while a build is in flight; ``503
-            <service>_unreachable`` when a required model service is down.
+            ``409 graph_build_running`` while a build is in flight; ``409
+            corpus_busy`` while a graph backup holds the corpus (ADR-019 —
+            the message names it); ``503 <service>_unreachable`` when a
+            required model service is down.
     """
     _require_enabled()
     await preflight()
@@ -425,6 +435,11 @@ async def start_graph_build(
         raise HTTPException(
             status_code=409,
             detail={"code": "graph_build_running", "message": str(error)},
+        ) from error
+    except CorpusBusy as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "corpus_busy", "message": str(error)},
         ) from error
 
 

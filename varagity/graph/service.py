@@ -10,10 +10,12 @@ session behind a process singleton, in the shape
 
 Two locks, doing different jobs:
 
-* **A build lock**, non-reentrant and single-flight. A second build attempt
-  raises :class:`GraphBuildInProgress` rather than queueing, because the
-  caller (an HTTP route) wants a ``409``, not a request that blocks for a
-  day. Deletes take it too — they mutate the same graph.
+* **A build lock**, non-reentrant and single-flight — the *write* lock. A
+  second build attempt raises :class:`GraphBuildInProgress` rather than
+  queueing, because the caller (an HTTP route) wants a ``409``, not a
+  request that blocks for a day. Deletes take it too — they mutate the same
+  graph — and so does a backup export (ADR-019), through :meth:`GraphService.writing`:
+  holding it is what guarantees no file changes while the workdir is copied.
 * **An open lock**, so two concurrent first-callers cannot open two sessions
   over the same directory.
 
@@ -38,6 +40,7 @@ from varagity.config import get_settings
 from varagity.graph.base import GraphSession, get_graph_engine
 from varagity.graph.records import (
     BuildReport,
+    EngineFormat,
     GraphAnswer,
     GraphExport,
     GraphRetrieval,
@@ -127,12 +130,21 @@ class GraphService:
 
     @property
     def building(self) -> bool:
-        """Whether a build or delete currently holds the write lock.
+        """Whether a write — a build, resume, delete, or backup export — holds the write lock.
 
         Returns:
             ``True`` while one is in flight.
         """
         return self._build_lock.locked()
+
+    def storage_format(self) -> EngineFormat:
+        """Name the format the engine's workdir files are in (what a backup records).
+
+        Returns:
+            The engine's :meth:`~varagity.graph.base.GraphEngine.storage_format`
+            — read from package metadata, so this opens no session.
+        """
+        return self._engine.storage_format()
 
     def session(self) -> GraphSession:
         """Return the open session, opening it on first use.
@@ -184,7 +196,7 @@ class GraphService:
             GraphBuildInProgress: If another build or delete is running.
             GraphUnavailable: If the session cannot be opened.
         """
-        with self._writing():
+        with self.writing():
             return self.session().build(batches, verbose=verbose, prune_removed=prune_removed)
 
     def resume(self, *, verbose: int = 0) -> BuildReport:
@@ -200,7 +212,7 @@ class GraphService:
             GraphBuildInProgress: If another build or delete is running.
             GraphUnavailable: If the session cannot be opened.
         """
-        with self._writing():
+        with self.writing():
             return self.session().resume(verbose=verbose)
 
     def delete_documents(self, doc_keys: Sequence[str]) -> int:
@@ -218,7 +230,7 @@ class GraphService:
                 extraction.
             GraphUnavailable: If the session cannot be opened.
         """
-        with self._writing():
+        with self.writing():
             return self.session().delete_documents(doc_keys)
 
     def retrieve(
@@ -319,17 +331,27 @@ class GraphService:
         except Exception:
             logger.warning("graph session teardown failed", exc_info=True)
 
-    def _writing(self) -> "_WriteLock":
+    def writing(self) -> "_WriteLock":
         """Take the single-flight write lock for the duration of a block.
 
+        The lock :meth:`build`, :meth:`resume` and :meth:`delete_documents`
+        take, public so a caller that must see the workdir hold still can
+        take it too — a backup export copies the files under it (ADR-019),
+        so no build, resume or delete can start mid-copy, while reads stay
+        unlocked and chat keeps answering. Never blocks: a held lock is an
+        answer (the caller's ``409``), not a wait.
+
         Returns:
-            A context manager holding the lock.
+            A context manager holding the lock (released on block exit,
+            however the block ends).
 
         Raises:
             GraphBuildInProgress: If it is already held.
         """
         if not self._build_lock.acquire(blocking=False):
-            raise GraphBuildInProgress("a graph build is already running")
+            raise GraphBuildInProgress(
+                "the graph is being written — a build, delete or backup export holds its write lock"
+            )
         return _WriteLock(self._build_lock)
 
 

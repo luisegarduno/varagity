@@ -659,7 +659,8 @@ export interface paths {
          *     what has been dropped in — sidecars and contacts files included. Files
          *     the last build parsed also carry their ``doc_id`` and a parse summary;
          *     files no build has scanned carry ``None`` for both, because parsing a
-         *     multi-gigabyte database is a build's job.
+         *     multi-gigabyte database is a build's job. The reserved
+         *     ``varagity-exports/`` folder's backup bundles are never listed.
          *
          *     Args:
          *         runner: The process-wide graph build runner (holds the last scan).
@@ -735,7 +736,9 @@ export interface paths {
          *     Raises:
          *         HTTPException: ``404 graph_document_not_found`` when no such file
          *             lives inside ``GRAPH_DOCS_PATH`` — which covers a path trying to
-         *             escape it, since an escaping path is not a file this route has.
+         *             escape it, since an escaping path is not a file this route has,
+         *             and anything in the reserved ``varagity-exports/`` folder (a
+         *             backup bundle is not a graph source, whatever path reaches it).
          */
         delete: operations["delete_graph_document_api_graph_documents__name__delete"];
         options?: never;
@@ -776,8 +779,10 @@ export interface paths {
          *
          *     Raises:
          *         HTTPException: ``403 graph_disabled`` when the kill switch is off;
-         *             ``409 graph_build_running`` while a build is in flight; ``503
-         *             <service>_unreachable`` when a required model service is down.
+         *             ``409 graph_build_running`` while a build is in flight; ``409
+         *             corpus_busy`` while a graph backup holds the corpus (ADR-019 —
+         *             the message names it); ``503 <service>_unreachable`` when a
+         *             required model service is down.
          */
         post: operations["start_graph_build_api_graph_build_post"];
         delete?: never;
@@ -963,6 +968,10 @@ export interface paths {
          *     Returns:
          *         One entry per bundle file, newest first (empty when the folder does
          *         not exist yet).
+         *
+         *     Raises:
+         *         HTTPException: ``403 graph_disabled`` for the graph while
+         *             ``GRAPH_ENABLED`` is false.
          */
         get: operations["list_backups_api_backups__corpus__get"];
         put?: never;
@@ -988,24 +997,29 @@ export interface paths {
          *
          *     The bundle is written into ``<corpus root>/varagity-exports/`` as
          *     ``varagity-<corpus>-<UTC yyyymmdd-HHMM>.zip`` (a same-minute repeat gets
-         *     a ``-2`` suffix — never a replace), from one consistent snapshot of the
-         *     corpus.
+         *     a ``-2`` suffix — never a replace): for RAG, from one consistent
+         *     snapshot of the corpus; for the graph, the engine's workdir copied under
+         *     the graph's write lock, while graph chat keeps answering.
          *
          *     Args:
          *         corpus: The corpus to export.
          *         runners: The process-wide backup runners.
          *         preflight: The awaitable reachability check (structured 503).
-         *         store: The per-request vector store (the nothing-to-export check).
+         *         store: The per-request vector store (the RAG nothing-to-export
+         *             check).
          *
          *     Returns:
          *         The new run's snapshot (state ``running``).
          *
          *     Raises:
-         *         HTTPException: ``503 postgres_unreachable`` when the database is
-         *             down; ``422 nothing_to_export`` when nothing is ingested; ``500
-         *             docs_path_not_writable`` when the exports folder can't be
-         *             written; ``409 corpus_busy`` while any operation — another
-         *             export included — holds the corpus (the message names it).
+         *         HTTPException: ``403 graph_disabled`` for the graph while
+         *             ``GRAPH_ENABLED`` is false; ``503 postgres_unreachable`` when
+         *             the database is down; ``422 nothing_to_export`` when nothing is
+         *             ingested (or, for the graph, nothing has been built); ``500
+         *             docs_path_not_writable`` / ``graph_docs_path_not_writable`` when
+         *             the exports folder can't be written; ``409 corpus_busy`` while
+         *             any operation — another export, an ingest or build, a restore —
+         *             holds the corpus (the message names it).
          */
         post: operations["start_export_api_backups__corpus__export_post"];
         delete?: never;
@@ -1075,11 +1089,13 @@ export interface paths {
          * @description Stream the corpus's current (or last) backup run as SSE.
          *
          *     Frames: ``status`` (snapshot; also terminal, with the summary — and an
-         *     export's saved path), ``progress`` (an export's ``snapshot`` →
-         *     ``documents`` → ``chunks`` → ``finalize``; a restore's ``validate`` →
-         *     ``load`` → ``index`` → ``bm25``), ``log`` (relayed ``varagity.backup``
-         *     lines). With no run in this API process the stream is a single idle
-         *     ``status`` frame; after a terminal run it replays that run and closes.
+         *     export's saved path), ``progress`` (a RAG export's ``snapshot`` →
+         *     ``documents`` → ``chunks`` → ``finalize``; a graph export's ``snapshot``
+         *     → ``pack``, in bytes → ``finalize``; a restore's ``validate`` → ``load``
+         *     → ``index`` → ``bm25``), ``log`` (relayed ``varagity.backup`` lines).
+         *     With no run in this API process the stream is a single idle ``status``
+         *     frame; after a terminal run it replays that run and closes. Never
+         *     refused for a disabled graph: a tab must still render what ran.
          *
          *     Args:
          *         corpus: The corpus whose backup run to follow.
@@ -1120,8 +1136,10 @@ export interface paths {
          *         The bundle's bytes as ``application/zip``.
          *
          *     Raises:
-         *         HTTPException: ``404 bundle_not_found`` when no such bundle lives in
-         *             the folder — which covers a name trying to escape it.
+         *         HTTPException: ``403 graph_disabled`` for the graph while
+         *             ``GRAPH_ENABLED`` is false; ``404 bundle_not_found`` when no such
+         *             bundle lives in the folder — which covers a name trying to
+         *             escape it.
          */
         get: operations["download_backup_api_backups__corpus__files__name__get"];
         put?: never;
@@ -1186,9 +1204,10 @@ export interface components {
          *             an export names nothing until its bundle is whole). A restore's:
          *             the bundle it restores, from the start.
          *         saved_to: Where an export's bundle landed, relative to the checkout
-         *             (``docs/varagity-exports/<name>``) — the path "Copy path"
-         *             copies, right in both host and compose mode. ``None`` for a
-         *             restore.
+         *             (``docs/varagity-exports/<name>``, or
+         *             ``graph-docs/varagity-exports/<name>`` for the graph) — the path
+         *             "Copy path" copies, right in both host and compose mode.
+         *             ``None`` for a restore.
          *         started_at: When the run started.
          *         finished_at: When it reached a terminal state (``None`` while
          *             running).
@@ -1234,9 +1253,10 @@ export interface components {
          *
          *     Attributes:
          *         counts: An export's: what the bundle holds — ``documents`` and
-         *             ``chunks`` for a RAG bundle. A restore's: what it wrote —
-         *             ``documents``, ``chunks``, and ``bm25`` (the chunks the rebuilt
-         *             index holds).
+         *             ``chunks`` for a RAG bundle; ``thread_days``, ``messages`` and
+         *             (when the graph reported them) ``entities`` and ``relations``
+         *             for a graph bundle. A restore's: what it wrote — ``documents``,
+         *             ``chunks``, and ``bm25`` (the chunks the rebuilt index holds).
          *         size_bytes: The bundle's size on disk.
          *         wall_clock_s: Seconds from the snapshot to the published bundle (an
          *             export), or from validation to a searchable index (a restore).
@@ -1276,8 +1296,9 @@ export interface components {
          *
          *     The file format's own model (:class:`varagity.backup.bundle.BundleManifest`)
          *     on the wire unchanged — the panel shows what a bundle holds (``counts``)
-         *     and what it was made under (the embedding model and dimension, the
-         *     ingest settings, the stale flag) straight from the manifest.
+         *     and what it was made under (the embedding model and dimension, a RAG
+         *     bundle's ingest settings, a graph bundle's engine format, the stale
+         *     flag) straight from the manifest.
          */
         BundleManifestOut: {
             /**
@@ -1311,6 +1332,7 @@ export interface components {
             ingest_settings?: {
                 [key: string]: string;
             } | null;
+            engine?: components["schemas"]["EngineFormat"] | null;
             /** Members */
             members: components["schemas"]["BundleMember"][];
         };
@@ -1659,6 +1681,32 @@ export interface components {
             extraction_mix: {
                 [key: string]: number;
             };
+        };
+        /**
+         * EngineFormat
+         * @description Which engine wrote a graph's working directory, in which version of its files.
+         *
+         *     A graph backup is the workdir verbatim (ADR-019), so it is only as
+         *     portable as the engine's on-disk format: a bundle records this beside
+         *     its files, and a restore holds it to the running engine's. The engine
+         *     reports its own format (:meth:`~varagity.graph.base.GraphEngine.storage_format`)
+         *     — the registry is pluggable, so nothing outside an adapter names a
+         *     library.
+         *
+         *     Attributes:
+         *         name: The engine's registry name — what ``GRAPH_ENGINE`` selects, and
+         *             the name of its working directory (``lightrag``).
+         *         package: The distribution whose code reads and writes the files
+         *             (``lightrag-hku``).
+         *         version: That distribution's installed version (``1.5.4``).
+         */
+        EngineFormat: {
+            /** Name */
+            name: string;
+            /** Package */
+            package: string;
+            /** Version */
+            version: string;
         };
         /**
          * ErrorBody
@@ -2545,8 +2593,8 @@ export interface components {
          * @description Payload of the backup-status SSE ``log`` event.
          *
          *     Relayed ``varagity.backup`` log records (what was exported or restored,
-         *     a swept partial, an embedding-model drift warning), so the panel shows
-         *     what the server log would.
+         *     a swept partial, an embedding-model drift warning, a graph workdir entry
+         *     the export had to skip), so the panel shows what the server log would.
          *
          *     Attributes:
          *         level: The log level name (``INFO`` | ``WARNING`` | ``ERROR``).
@@ -2562,27 +2610,31 @@ export interface components {
          * BackupProgressEvent
          * @description Payload of the backup-status SSE ``progress`` event.
          *
-         *     An export walks ``snapshot`` (open one consistent read of the corpus) →
-         *     ``documents`` → ``chunks`` (rows written, with ``current``/``total``) →
+         *     A RAG export walks ``snapshot`` (open one consistent read of the corpus)
+         *     → ``documents`` → ``chunks`` (rows written, with ``current``/``total``) →
          *     ``finalize`` (the vector matrix, the manifest, the atomic rename). A
-         *     restore walks ``validate`` (the bundle's verdict again) → ``load`` (the
-         *     replacing transaction's binary COPY, chunks loaded so far) → ``index``
-         *     (the vector index rebuild and the commit — the restore takes effect) →
-         *     ``bm25`` (the BM25 index refilled from the restored rows, chunks so far).
+         *     graph export walks ``snapshot`` (take the graph's write lock, list its
+         *     workdir) → ``pack`` (the workdir's files copied in, counted in **bytes**)
+         *     → ``finalize``. A restore walks ``validate`` (the bundle's verdict again)
+         *     → ``load`` (the replacing transaction's binary COPY, chunks loaded so
+         *     far) → ``index`` (the vector index rebuild and the commit — the restore
+         *     takes effect) → ``bm25`` (the BM25 index refilled from the restored
+         *     rows, chunks so far).
          *
          *     Attributes:
-         *         stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (an
-         *             export) or ``validate`` | ``load`` | ``index`` | ``bm25`` (a
+         *         stage: ``snapshot`` | ``documents`` | ``chunks`` | ``finalize`` (a
+         *             RAG export), ``snapshot`` | ``pack`` | ``finalize`` (a graph
+         *             export), or ``validate`` | ``load`` | ``index`` | ``bm25`` (a
          *             restore).
-         *         current: Rows written so far in a counted stage.
-         *         total: The stage's row count.
+         *         current: Rows (``pack``: bytes) done so far in a counted stage.
+         *         total: The stage's row (``pack``: byte) count.
          */
         BackupProgressEvent: {
             /**
              * Stage
              * @enum {string}
              */
-            stage: "snapshot" | "documents" | "chunks" | "finalize" | "validate" | "load" | "index" | "bm25";
+            stage: "snapshot" | "documents" | "chunks" | "pack" | "finalize" | "validate" | "load" | "index" | "bm25";
             /**
              * Current
              * @default null
@@ -4131,7 +4183,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                corpus: "rag";
+                corpus: "rag" | "graph";
             };
             cookie?: never;
         };
@@ -4144,6 +4196,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BundleOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4162,7 +4223,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                corpus: "rag";
+                corpus: "rag" | "graph";
             };
             cookie?: never;
         };
@@ -4175,6 +4236,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BackupRunOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -4282,7 +4352,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                corpus: "rag";
+                corpus: "rag" | "graph";
             };
             cookie?: never;
         };
@@ -4313,8 +4383,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                corpus: "rag";
                 name: string;
+                corpus: "rag" | "graph";
             };
             cookie?: never;
         };
@@ -4327,6 +4397,15 @@ export interface operations {
                 };
                 content: {
                     "application/zip": string;
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Not Found */

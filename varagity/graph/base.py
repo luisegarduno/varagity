@@ -42,6 +42,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from varagity.graph.records import (
     BuildReport,
+    EngineFormat,
     GraphAnswer,
     GraphExport,
     GraphRetrieval,
@@ -199,6 +200,10 @@ class GraphSession(Protocol):
 class GraphEngine(Protocol):
     """Opens working sessions against a graph engine (spec_graphrag §8).
 
+    It also names the format its working-directory files are in
+    (:meth:`storage_format`), which is what lets a graph backup refuse a
+    bundle another engine version wrote rather than hand it the wrong files.
+
     ``runtime_checkable`` for the same reason
     :class:`~varagity.chat.base.ChatEngine` is: the protocol will appear in
     stage-2 Prefect flow signatures, and Prefect builds a pydantic parameter
@@ -219,6 +224,21 @@ class GraphEngine(Protocol):
         Returns:
             A context manager yielding the session; exiting it tears down
             whatever the engine started (subprocesses, event loops, stores).
+        """
+        ...
+
+    def storage_format(self) -> EngineFormat:
+        """Name the format this engine's working-directory files are in.
+
+        What a graph backup records beside the workdir it copies (ADR-019),
+        and what a restore holds a bundle to — the files are only as portable
+        as the engine version that wrote them. Must stay **import-light**,
+        like the rest of the registered surface: read the installed version
+        from package metadata, never by importing the engine library.
+
+        Returns:
+            The engine's registry name, its distribution, and that
+            distribution's installed version.
         """
         ...
 

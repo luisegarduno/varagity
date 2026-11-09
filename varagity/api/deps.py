@@ -387,10 +387,13 @@ def get_graph_build_preflight() -> Callable[[], Awaitable[None]]:
 # the operation reads or writes: a RAG export reads the rows (and the
 # corpus-stale flag beside them) from postgres, and nothing else; a RAG
 # restore replaces the rows in postgres and rebuilds the BM25 index in
-# Elasticsearch from them.
+# Elasticsearch from them. A graph export copies files the API itself owns
+# (the graph self-stores) and opens no engine session — postgres only, for
+# the graph-stale flag the bundle records.
 BACKUP_REQUIRED_SERVICES: dict[tuple[str, str], tuple[str, ...]] = {
     ("rag", "export"): ("postgres",),
     ("rag", "restore"): ("postgres", "elasticsearch"),
+    ("graph", "export"): ("postgres",),
 }
 
 
@@ -401,7 +404,7 @@ async def require_backup_services(corpus: str, operation: str) -> None:
     outage is a clean structured error instead of an instantly failed run.
 
     Args:
-        corpus: The corpus being backed up (``rag``).
+        corpus: The corpus being backed up (``rag`` | ``graph``).
         operation: The backup operation (``export`` | ``restore``).
 
     Raises:
