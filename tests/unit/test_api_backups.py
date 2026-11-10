@@ -52,6 +52,7 @@ from varagity.api.deps import get_backup_preflight, get_vector_store
 from varagity.api.main import create_app
 from varagity.api.routes import backups as backups_routes
 from varagity.api.routes.backups import DamagedBundles, get_damaged_bundles
+from varagity.api.schemas import BackupLogEvent
 from varagity.backup.graph import GraphExportReport, GraphRestore, export_graph, restore_graph
 from varagity.backup.rag import (
     CHUNKS_MEMBER,
@@ -325,6 +326,84 @@ class TestRunnerLifecycle:
         logs = [p for name, p in await collect(runner) if name == EVENT_LOG]
         assert [(log.level, log.message) for log in logs][0] == ("WARNING", "drift spotted")
         assert all("too quiet" not in log.message for log in logs)
+
+    async def test_side_by_side_runs_relay_only_their_own_lines(self, docs_root: Path) -> None:
+        """★ Both corpora log to `varagity.backup`; each feed carries its own run's lines."""
+        both_running = threading.Barrier(2, timeout=5)
+        rag_logged = threading.Event()
+
+        def rag_flow(dest: Path, *, ingest_settings: dict[str, str], on_progress: Any) -> Any:
+            both_running.wait()
+            logging.getLogger("varagity.backup.rag").info("rag line")
+            rag_logged.set()
+            return scripted_flow(docs_root)(
+                dest, ingest_settings=ingest_settings, on_progress=on_progress
+            )
+
+        def graph_flow(dest: Path, *, on_progress: Any) -> Any:
+            both_running.wait()
+            assert rag_logged.wait(timeout=5)  # the rag line is logged while this run is live
+            logging.getLogger("varagity.backup.graph").info("graph line")
+            raise RuntimeError("no graph here")  # what it returns doesn't matter
+
+        rag = make_runner(docs_root, flow=rag_flow)
+        graph = BackupRunner("graph", export_flow=graph_flow, gate=CorpusGate("graph"))
+        rag.start("export")
+        graph.start("export")
+        await wait_terminal(rag)
+        await wait_terminal(graph)
+
+        def lines(feed: list[Feed]) -> list[str]:
+            return [
+                payload.message
+                for name, payload in feed
+                if name == EVENT_LOG and isinstance(payload, BackupLogEvent)
+            ]
+
+        rag_lines = lines(await collect(rag))
+        graph_lines = lines(await collect(graph))
+        assert "rag line" in rag_lines and "graph line" not in rag_lines
+        assert graph_lines == ["graph line"]
+
+    async def test_the_info_pin_outlives_an_overlapping_run(
+        self, docs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The run that pinned INFO first can end first without silencing the other."""
+        backup_logger = logging.getLogger("varagity.backup")
+        monkeypatch.setattr(backup_logger, "level", logging.WARNING)
+        graph_running = threading.Event()
+        rag_running = threading.Event()
+        graph_done = threading.Event()
+
+        def graph_flow(dest: Path, *, on_progress: Any) -> Any:
+            graph_running.set()
+            assert rag_running.wait(timeout=5)  # both runs hold the pin now
+            raise RuntimeError("ends first")
+
+        def rag_flow(dest: Path, *, ingest_settings: dict[str, str], on_progress: Any) -> Any:
+            rag_running.set()
+            assert graph_done.wait(timeout=5)  # the first run to pin has ended
+            logging.getLogger("varagity.backup.rag").info("still relayed")
+            return scripted_flow(docs_root)(
+                dest, ingest_settings=ingest_settings, on_progress=on_progress
+            )
+
+        rag = make_runner(docs_root, flow=rag_flow)
+        graph = BackupRunner("graph", export_flow=graph_flow, gate=CorpusGate("graph"))
+        graph.start("export")
+        assert await asyncio.to_thread(graph_running.wait, 5)
+        rag.start("export")
+        await wait_terminal(graph)
+        graph_done.set()
+        await wait_terminal(rag)
+
+        rag_lines = [
+            payload.message
+            for name, payload in await collect(rag)
+            if name == EVENT_LOG and isinstance(payload, BackupLogEvent)
+        ]
+        assert "still relayed" in rag_lines
+        assert backup_logger.level == logging.WARNING  # the last run put it back
 
 
 class TestRunnerWiring:
