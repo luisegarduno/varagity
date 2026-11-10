@@ -16,8 +16,9 @@ the CLI's ``rich`` display. This module owns both halves:
   so an ingest and a backup export or restore never overlap in this process:
   a start while a backup holds the corpus raises
   :class:`~varagity.api.corpus_gate.CorpusBusy` (``409 corpus_busy``). The
-  gate is released *before* the terminal frame, so a client that starts the
-  next run on seeing it never races a stale claim.
+  run turns terminal and frees the corpus in one critical section, *before*
+  the terminal frame: a start that sees the run finished — by its frame or
+  by the single-flight check — always finds the corpus free.
 * **Progress without pipeline edits.** The runner wraps the flow's
   ``@task``-wrapped stages (:data:`~varagity.pipeline.ingest_flow.TASK_STAGES`)
   with event emitters — tracking and streaming compose — and passes the
@@ -320,11 +321,7 @@ class IngestRunner:
         try:
             thread.start()
         except RuntimeError as error:  # no thread to run it: end the run, free the corpus
-            with self._lock:
-                run.state = "failed"
-                run.error = f"{type(error).__name__}: {error}"
-                run.finished_at = datetime.now(UTC)
-            self._gate.release()
+            self._settle(run, error=f"{type(error).__name__}: {error}")
             self._emit(EVENT_STATUS, IngestStatusEvent(run=run.to_out()))
             self._close_feed()
             raise
@@ -420,27 +417,54 @@ class IngestRunner:
             )
         except Exception as error:
             logger.exception("ingest run %s failed", run.run_id)
-            with self._lock:
-                run.state = "failed"
-                run.error = f"{type(error).__name__}: {error}"
-                run.finished_at = datetime.now(UTC)
+            self._settle(run, error=f"{type(error).__name__}: {error}")
         else:
-            with self._lock:
-                run.state = "completed"
-                run.summary = summary
-                run.finished_at = datetime.now(UTC)
+            self._settle(run, summary=summary)
         finally:
             ingest_logger.removeHandler(relay)
             ingest_logger.setLevel(previous_level)
-            # Free the corpus before the terminal frame: a client that starts
-            # the next run (or a backup) on seeing it must find it free.
-            self._gate.release()
+            # Whatever got past both arms (a BaseException) still ends the
+            # run and frees the corpus; a settled run is left as it is.
+            self._settle(run, error="the ingest run was interrupted")
             self._emit(EVENT_STATUS, IngestStatusEvent(run=run.to_out()))
             self._close_feed()
             if run.state == "completed":
                 self._record_run_metrics(run)
                 if run.reingest:
                     self._on_reingest_complete()
+
+    def _settle(
+        self,
+        run: _RunState,
+        *,
+        summary: IngestSummary | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Make the run terminal and free the corpus — together, and once.
+
+        One critical section, like the backup runner's ``_finish``: a start
+        that finds this run finished (the single-flight check reads its
+        state under the same lock) always finds the corpus free too, rather
+        than losing the gate claim to the run that just ended and answering
+        ``409 corpus_busy`` for it. A no-op on a run already terminal, so a
+        second call can never release a claim a newer run has since made.
+
+        Args:
+            run: The run ending.
+            summary: Its counters, when it completed.
+            error: Its failure, when it did not (wins over ``summary``).
+        """
+        with self._lock:
+            if run.state != "running":
+                return
+            run.finished_at = datetime.now(UTC)
+            if error is None:
+                run.state = "completed"
+                run.summary = summary
+            else:
+                run.state = "failed"
+                run.error = error
+            self._gate.release()
 
     @staticmethod
     def _record_run_metrics(run: _RunState) -> None:

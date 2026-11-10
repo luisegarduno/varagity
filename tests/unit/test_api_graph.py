@@ -681,6 +681,34 @@ class TestCorpusGate:
         assert holder_at_terminal == [None]
         assert gate.holder is None
 
+    @pytest.mark.parametrize("fails", [False, True], ids=["completed", "failed"])
+    async def test_the_build_turns_terminal_and_frees_the_corpus_in_one_step(
+        self, graph_root: Path, tmp_path: Path, fails: bool
+    ) -> None:
+        """★ No start can find the build finished while it still holds the corpus."""
+
+        class WatchedGate(CorpusGate):
+            def __init__(self) -> None:
+                super().__init__("graph")
+                self.runner: GraphBuildRunner | None = None
+                self.released_under_lock: list[bool] = []
+
+            def release(self) -> None:
+                assert self.runner is not None
+                self.released_under_lock.append(self.runner._lock.locked())
+                super().release()
+
+        def broken(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("boom")
+
+        gate = WatchedGate()
+        runner, _ = make_runner(tmp_path, gate=gate, **({"flow": broken} if fails else {}))
+        gate.runner = runner
+        runner.start()
+        await wait_terminal(runner)
+        assert gate.released_under_lock == [True]  # once, inside the critical section
+        assert gate.holder is None
+
     async def test_a_backup_holding_the_corpus_refuses_the_build(
         self, graph_root: Path, tmp_path: Path
     ) -> None:
