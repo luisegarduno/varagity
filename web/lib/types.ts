@@ -853,7 +853,10 @@ export interface paths {
          *     poll never walks a multi-megabyte graphml (stage-2 decision #18), and
          *     skips the engine entirely when nothing has been built here — an
          *     unbuilt graph must not make a status poll open a session and pay an
-         *     engine's startup.
+         *     engine's startup. ``workdir_files`` lists the workdir (a directory
+         *     read, no file opened) by the graph export's own rule, so the backup
+         *     panel's "nothing built yet" can never disagree with the export route's
+         *     ``nothing_to_export``.
          *
          *     Args:
          *         runner: The process-wide graph build runner (build state).
@@ -2088,6 +2091,12 @@ export interface components {
          *         entities: Entity count from the workdir's summary sidecar.
          *         relations: Relation count from the same.
          *         message_guids: Messages the workdir's manifest accounts for.
+         *         workdir_files: Files in the engine's working directory that a
+         *             backup would copy (ADR-019) — ``0`` when nothing has been built.
+         *             The backup panel's "nothing built yet": the export route's own
+         *             ``nothing_to_export`` rule, so the two can never disagree (an
+         *             unopenable graph, or a first build killed before its summary,
+         *             still has files to back up and to replace).
          *         last_build: The current (or last) build run in this API process.
          */
         GraphStatusOut: {
@@ -2110,6 +2119,11 @@ export interface components {
             relations?: number | null;
             /** Message Guids */
             message_guids?: number | null;
+            /**
+             * Workdir Files
+             * @default 0
+             */
+            workdir_files: number;
             last_build?: components["schemas"]["GraphBuildRunOut"] | null;
         };
         /**

@@ -1064,6 +1064,12 @@ class GraphStatusOut(BaseModel):
         entities: Entity count from the workdir's summary sidecar.
         relations: Relation count from the same.
         message_guids: Messages the workdir's manifest accounts for.
+        workdir_files: Files in the engine's working directory that a
+            backup would copy (ADR-019) — ``0`` when nothing has been built.
+            The backup panel's "nothing built yet": the export route's own
+            ``nothing_to_export`` rule, so the two can never disagree (an
+            unopenable graph, or a first build killed before its summary,
+            still has files to back up and to replace).
         last_build: The current (or last) build run in this API process.
     """
 
@@ -1074,6 +1080,7 @@ class GraphStatusOut(BaseModel):
     entities: int | None = None
     relations: int | None = None
     message_guids: int | None = None
+    workdir_files: int = 0
     last_build: GraphBuildRunOut | None = None
 
 

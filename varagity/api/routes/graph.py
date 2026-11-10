@@ -89,6 +89,7 @@ from varagity.api.schemas import (
     GraphUploadResponse,
     UploadedFileOut,
 )
+from varagity.backup.graph import workdir_files
 from varagity.config import get_settings
 from varagity.graph.manifest import load_manifest, load_summary
 from varagity.graph.records import GraphExport, GraphExportEdge, GraphExportNode
@@ -490,7 +491,10 @@ def graph_status(runner: RunnerDep, service: ServiceDep, store: SettingsStoreDep
     poll never walks a multi-megabyte graphml (stage-2 decision #18), and
     skips the engine entirely when nothing has been built here — an
     unbuilt graph must not make a status poll open a session and pay an
-    engine's startup.
+    engine's startup. ``workdir_files`` lists the workdir (a directory
+    read, no file opened) by the graph export's own rule, so the backup
+    panel's "nothing built yet" can never disagree with the export route's
+    ``nothing_to_export``.
 
     Args:
         runner: The process-wide graph build runner (build state).
@@ -511,6 +515,7 @@ def graph_status(runner: RunnerDep, service: ServiceDep, store: SettingsStoreDep
     )
     if not service.workdir.is_dir():
         return status
+    status.workdir_files = len(workdir_files(service.workdir))
     summary = load_summary(service.workdir)
     if summary is not None:
         status.entities = summary.entities

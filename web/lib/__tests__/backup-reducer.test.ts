@@ -598,7 +598,14 @@ describe("describeBundle for a graph bundle", () => {
 });
 
 function status(overrides?: Partial<GraphStatus>): GraphStatus {
-  return { enabled: true, stale: false, building: false, documents: {}, ...overrides };
+  return {
+    enabled: true,
+    stale: false,
+    building: false,
+    documents: {},
+    workdir_files: 0,
+    ...overrides,
+  };
 }
 
 describe("the graph's holding", () => {
@@ -608,6 +615,7 @@ describe("the graph's holding", () => {
       message_guids: 64_592,
       entities: 5000,
       relations: 6680,
+      workdir_files: 14,
     });
     expect(describeGraphHolding(built)).toBe(
       `799 thread-days · ${(64_592).toLocaleString()} messages · ${(5000).toLocaleString()} entities · ${(6680).toLocaleString()} relations`,
@@ -624,6 +632,14 @@ describe("the graph's holding", () => {
     expect(describeGraphHolding(status())).toBeNull();
     expect(graphIsEmpty(status())).toBe(true);
     expect(graphIsEmpty(status({ entities: null, relations: null, message_guids: null }))).toBe(true);
+  });
+
+  it("files on disk are a graph, even one that reports no size", () => {
+    // An unopenable graph (no statuses), or a first build killed before its
+    // summary: nothing to describe, but files to export — and to replace.
+    const silent = status({ workdir_files: 9 });
+    expect(describeGraphHolding(silent)).toBeNull();
+    expect(graphIsEmpty(silent)).toBe(false);
   });
 });
 
