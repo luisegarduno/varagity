@@ -35,8 +35,9 @@ writer of the graph working directory.
 :class:`~varagity.api.corpus_gate.CorpusGate` for its whole life, so a build
 and a graph backup never overlap — a start while a backup holds the corpus
 raises :class:`~varagity.api.corpus_gate.CorpusBusy` (``409 corpus_busy``),
-and the gate is released *before* the terminal frame, so a client that
-starts the next run on seeing it never races a stale claim. The reserved
+and the run turns terminal and frees the corpus in one critical section,
+*before* the terminal frame — so a start that sees the run finished, by its
+frame or by the single-flight check, always finds the corpus free. The reserved
 ``varagity-exports/`` folder, where the graph's bundles live, is never part
 of the scanned corpus.
 """
@@ -421,11 +422,7 @@ class GraphBuildRunner:
         try:
             thread.start()
         except RuntimeError as error:  # no thread to run it: end the run, free the corpus
-            with self._lock:
-                run.state = "failed"
-                run.error = f"{type(error).__name__}: {error}"
-                run.finished_at = datetime.now(UTC)
-            self._gate.release()
+            self._settle(run, summary=None, error=f"{type(error).__name__}: {error}")
             self._emit(EVENT_STATUS, GraphBuildStatusEvent(run=run.to_out()))
             self._close_feed()
             raise
@@ -540,28 +537,55 @@ class GraphBuildRunner:
             report = self._run_build(run)
         except Exception as error:
             logger.exception("graph build %s failed", run.run_id)
-            summary = self._summary(run, None)
-            with self._lock:
-                run.state = "failed"
-                run.error = f"{type(error).__name__}: {error}"
-                run.summary = summary
-                run.finished_at = datetime.now(UTC)
+            self._settle(
+                run, summary=self._summary(run, None), error=f"{type(error).__name__}: {error}"
+            )
         else:
-            summary = self._summary(run, report)
-            with self._lock:
-                run.state = "completed"
-                run.summary = summary
-                run.finished_at = datetime.now(UTC)
+            self._settle(run, summary=self._summary(run, report))
         finally:
             graph_logger.removeHandler(relay)
             graph_logger.setLevel(previous_level)
-            # Free the corpus before the terminal frame: a client that starts
-            # the next run (or a backup) on seeing it must find it free.
-            self._gate.release()
+            # Whatever got past both arms (a BaseException) still ends the
+            # run and frees the corpus; a settled run is left as it is.
+            self._settle(run, summary=None, error="the graph build was interrupted")
             self._emit(EVENT_STATUS, GraphBuildStatusEvent(run=run.to_out()))
             self._close_feed()
             if run.state == "completed" and run.reingest:
                 self._on_reingest_complete()
+
+    def _settle(
+        self,
+        run: _RunState,
+        *,
+        summary: GraphBuildSummaryOut | None,
+        error: str | None = None,
+    ) -> None:
+        """Make the run terminal and free the corpus — together, and once.
+
+        One critical section, like the backup runner's ``_finish``: a start
+        that finds this build finished (the single-flight check reads its
+        state under the same lock) always finds the corpus free too, rather
+        than losing the gate claim to the build that just ended and
+        answering ``409 corpus_busy`` for it. A no-op on a run already
+        terminal, so a second call can never release a claim a newer build
+        has since made.
+
+        Args:
+            run: The run ending.
+            summary: Its final counters (also kept for a failed build).
+            error: Its failure, when it did not complete.
+        """
+        with self._lock:
+            if run.state != "running":
+                return
+            run.finished_at = datetime.now(UTC)
+            run.summary = summary
+            if error is None:
+                run.state = "completed"
+            else:
+                run.state = "failed"
+                run.error = error
+            self._gate.release()
 
     def _run_build(self, run: _RunState) -> BuildReport:
         """Do the run's work on the worker thread.

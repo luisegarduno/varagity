@@ -297,6 +297,41 @@ class TestRunnerLifecycle:
         assert holder_at_terminal == [None]
         assert gate.holder is None
 
+    @pytest.mark.parametrize("fails", [False, True], ids=["completed", "failed"])
+    async def test_the_run_turns_terminal_and_frees_the_corpus_in_one_step(
+        self, fails: bool
+    ) -> None:
+        """★ No start can find the run finished while it still holds the corpus.
+
+        The release happens under the runner's lock — the one the
+        single-flight check reads the run's state under — so a start between
+        "the run is finished" and "the corpus is free" can't exist: it would
+        pass the single-flight check, lose the claim to the finished run and
+        answer 409 corpus_busy for it.
+        """
+
+        class WatchedGate(CorpusGate):
+            def __init__(self) -> None:
+                super().__init__("rag")
+                self.runner: IngestRunner | None = None
+                self.released_under_lock: list[bool] = []
+
+            def release(self) -> None:
+                assert self.runner is not None
+                self.released_under_lock.append(self.runner._lock.locked())
+                super().release()
+
+        def broken(**kwargs: Any) -> Any:
+            raise RuntimeError("boom")
+
+        gate = WatchedGate()
+        runner = make_runner(gate=gate, **({"flow": broken} if fails else {}))
+        gate.runner = runner
+        runner.start(reingest=False)
+        await wait_terminal(runner)
+        assert gate.released_under_lock == [True]  # once, inside the critical section
+        assert gate.holder is None
+
     async def test_a_backup_holding_the_corpus_refuses_the_ingest(self) -> None:
         gate = CorpusGate("rag")
         gate.claim("export")
