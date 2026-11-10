@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 from varagity.api.corpus_gate import CorpusBusy
-from varagity.api.deps import get_ingest_preflight
+from varagity.api.deps import corpus_busy_error, get_ingest_preflight
 from varagity.api.ingest_runner import IngestAlreadyRunning, IngestRunner, get_ingest_runner
 from varagity.api.schemas import ErrorResponse, IngestRunOut, IngestStartRequest
 
@@ -66,10 +66,7 @@ async def start_ingest(
             detail={"code": "ingest_already_running", "message": str(error)},
         ) from error
     except CorpusBusy as error:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "corpus_busy", "message": str(error)},
-        ) from error
+        raise corpus_busy_error(error) from error
 
 
 @router.get("/api/ingest/status", response_class=EventSourceResponse)

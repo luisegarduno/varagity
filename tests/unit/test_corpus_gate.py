@@ -86,6 +86,23 @@ class TestCorpusGate:
         assert len(refused) == 7
 
 
+class TestEnsureNotHeldBy:
+    def test_refuses_only_the_named_holders_without_claiming(self) -> None:
+        gate = CorpusGate("rag")
+        gate.ensure_not_held_by(("export", "restore"))  # free: nothing to refuse
+        gate.claim("restore")
+        with pytest.raises(CorpusBusy, match="a restore is running") as caught:
+            gate.ensure_not_held_by(("export", "restore"))
+        assert caught.value.holder == "restore"
+        assert gate.holder == "restore"  # untouched by the refusal
+
+    def test_another_holder_passes(self) -> None:
+        gate = CorpusGate("rag")
+        gate.claim("ingest")
+        gate.ensure_not_held_by(("export", "restore"))  # a delete beside an ingest is fine
+        assert gate.holder == "ingest"
+
+
 def test_the_process_has_one_gate_per_corpus() -> None:
     gates = get_corpus_gates()
     assert set(gates) == {"rag", "graph"}

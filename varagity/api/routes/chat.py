@@ -46,6 +46,7 @@ from varagity.api.deps import (
     get_llm,
     get_retriever_resolver,
     get_services_preflight,
+    refuse_corpus_restoring,
 )
 from varagity.api.schemas import (
     ChatOverrides,
@@ -95,9 +96,6 @@ _STATS_WARMUP_TOKENS = 8
 # every chunk; at ~56 tok/s that is a frame per ~18 ms, which would swamp
 # the deltas the user actually came for. 250 ms reads as live.
 _STATS_MIN_INTERVAL_S = 0.25
-
-# How a corpus-restoring refusal names each corpus to the person asking.
-_CORPUS_NOUNS = {"rag": "document corpus", "graph": "message graph"}
 
 # Per-transcript cap on the evidence excerpt, both on the wire and in the
 # persisted snapshot. A retrieved graph passage is a slice of a whole
@@ -521,7 +519,7 @@ async def prepare_chat(
     # about to be replaced. (With the kill switch off the turn degrades to
     # the documents without touching the graph, so only they matter then.)
     if corpus == "graph" and settings.GRAPH_ENABLED:
-        _refuse_while_restoring(gates, "graph")
+        refuse_corpus_restoring(gates["graph"])
     # The degrade decision comes next because it decides *what* to preflight:
     # a graph turn never touches Elasticsearch, a degraded one always does.
     # Opening the session dials no service — it initializes local storages —
@@ -531,7 +529,7 @@ async def prepare_chat(
     # from the documents — must not be mid-restore: its tables are empty or
     # half-loaded until the restore commits, and retrieval would either wait
     # behind the restore or answer from nothing.
-    _refuse_while_restoring(gates, "graph" if graph is not None else "rag")
+    refuse_corpus_restoring(gates["graph" if graph is not None else "rag"])
     await (graph_preflight() if graph is not None else services_preflight())
 
     history: list[Turn] = []
@@ -571,31 +569,6 @@ async def prepare_chat(
         graph_service=graph,
         graph_mode=settings.GRAPH_QUERY_MODE,
     )
-
-
-def _refuse_while_restoring(gates: dict[str, CorpusGate], corpus: str) -> None:
-    """Answer ``503 corpus_restoring`` while a backup restore holds ``corpus``.
-
-    Args:
-        gates: The process's per-corpus write gates (a restore holds its
-            corpus's gate for the whole run).
-        corpus: The corpus the turn would read (``"rag"`` | ``"graph"``).
-
-    Raises:
-        HTTPException: ``503 corpus_restoring``, naming the corpus — a wait,
-            not a fault: ask again once the restore finishes.
-    """
-    if gates[corpus].holder == "restore":
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "corpus_restoring",
-                "message": (
-                    f"the {_CORPUS_NOUNS[corpus]} is being restored from a backup — "
-                    "ask again when the restore finishes"
-                ),
-            },
-        )
 
 
 def _swallow_outcome(future: "asyncio.Future[_TurnOutcome]") -> None:
