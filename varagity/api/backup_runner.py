@@ -20,6 +20,11 @@ run is — the same contract ingest and the graph build already keep, so the
 * **Replay + live fan-out.** Events accumulate per run; a subscriber gets
   the full backlog first, then live events until the terminal ``status``
   frame — connecting mid-run or after completion renders the same picture.
+* **Each run relays its own lines.** Both corpora's runs log to the one
+  ``varagity.backup`` namespace and can run side by side, so a run's relay
+  forwards only the records its own worker logs (a context variable marks
+  them), and the namespace's INFO pin is shared by count — the first run
+  to finish can't silence the other's feed.
 * **A refused bundle is remembered.** A restore verifies every member as
   it loads it; when that finds the bundle unsound or damaged, the run
   records it in :class:`DamagedBundles`, so the list shows it as such and
@@ -38,6 +43,7 @@ import dataclasses
 import logging
 import threading
 from collections.abc import AsyncIterator, Callable
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -85,6 +91,13 @@ EVENT_LOG = "log"
 # The logger namespace whose records are relayed into the event feed — the
 # backup package's own lines (what was exported, a swept partial, drift).
 _RELAY_LOGGER = "varagity.backup"
+
+# The backup run the current worker is doing: what a relay matches records
+# against, since both corpora's runs log to the one namespace above. The
+# flows run on the worker thread itself (Prefect runs a sync flow in its
+# caller's thread), and a context variable also survives a context-copying
+# hop where a bare thread id would not.
+_CURRENT_RUN: ContextVar[str | None] = ContextVar("varagity_backup_run", default=None)
 
 BackupOperation = Literal["export", "restore"]
 """What a backup run can do."""
@@ -215,6 +228,45 @@ def get_damaged_bundles() -> DamagedBundles:
     return _damaged_bundles
 
 
+class _LevelPin:
+    """Hold a logger at INFO while any run relays it — shared by count.
+
+    Both corpora's runners relay the one ``varagity.backup`` namespace and
+    may run at once. Each saving and restoring the level on its own would
+    let the first run to finish put the level back under the other — whose
+    INFO lines then stop reaching its feed whenever ``LOG_LEVEL`` is above
+    INFO — and leave INFO pinned once the last one ends. Here the first pin
+    saves the level and the last unpin restores it.
+
+    Args:
+        name: The logger to pin.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._logger = logging.getLogger(name)
+        self._lock = threading.Lock()
+        self._pins = 0
+        self._saved = logging.NOTSET
+
+    def pin(self) -> None:
+        """Hold the logger at INFO (the first pin saves its level)."""
+        with self._lock:
+            if self._pins == 0:
+                self._saved = self._logger.level
+                self._logger.setLevel(logging.INFO)
+            self._pins += 1
+
+    def unpin(self) -> None:
+        """Release one pin (the last restores the saved level)."""
+        with self._lock:
+            self._pins -= 1
+            if self._pins == 0:
+                self._logger.setLevel(self._saved)
+
+
+_relay_level = _LevelPin(_RELAY_LOGGER)
+
+
 @dataclasses.dataclass
 class _RunState:
     """Mutable state of one backup run (guarded by the runner's lock).
@@ -269,23 +321,29 @@ class _RunState:
 
 
 class _RelayHandler(logging.Handler):
-    """Forward ``varagity.backup`` log records into the event feed.
+    """Forward one run's ``varagity.backup`` log records into its event feed.
 
     Args:
         emit: The runner's emit function.
+        run_id: The run whose records to relay — a record logged while
+            :data:`_CURRENT_RUN` names another run (the other corpus's,
+            running beside it) or none is not this run's line.
     """
 
-    def __init__(self, emit: Callable[[str, BaseModel], None]) -> None:
+    def __init__(self, emit: Callable[[str, BaseModel], None], run_id: str) -> None:
         super().__init__(level=logging.INFO)
         self._emit = emit
+        self._run_id = run_id
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Relay one record as a ``log`` event.
+        """Relay one record as a ``log`` event, if this run logged it.
 
         Args:
             record: The log record (its formatted message only — tracebacks
                 stay in the server log).
         """
+        if _CURRENT_RUN.get() != self._run_id:
+            return
         try:
             self._emit(
                 EVENT_LOG, BackupLogEvent(level=record.levelname, message=record.getMessage())
@@ -510,13 +568,14 @@ class BackupRunner:
         Args:
             run: The run this thread owns.
         """
-        relay = _RelayHandler(self._emit)
+        relay = _RelayHandler(self._emit, run.run_id)
         backup_logger = logging.getLogger(_RELAY_LOGGER)
+        # This worker's records are this run's (the relay matches on it).
+        token = _CURRENT_RUN.set(run.run_id)
         # The backup's own lines log at INFO; the feed must carry them
         # whatever the process LOG_LEVEL (root handlers still apply their
         # own level filters, so the console stays as quiet as configured).
-        previous_level = backup_logger.level
-        backup_logger.setLevel(logging.INFO)
+        _relay_level.pin()
         backup_logger.addHandler(relay)
         result: ExportResult | RestoreResult | None = None
         failure: str | None = None
@@ -529,7 +588,8 @@ class BackupRunner:
                 self._remember_refused(run, error)
         finally:
             backup_logger.removeHandler(relay)
-            backup_logger.setLevel(previous_level)
+            _relay_level.unpin()
+            _CURRENT_RUN.reset(token)
             self._finish(run, result=result, error=failure)
 
     def _remember_refused(self, run: _RunState, error: BundleInvalid) -> None:
