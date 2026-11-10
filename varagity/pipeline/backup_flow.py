@@ -32,6 +32,7 @@ from pathlib import Path
 from prefect import flow
 from prefect.logging import get_run_logger
 
+from varagity.backup.bundle import BundleManifest
 from varagity.backup.graph import (
     GraphExportProgressCallback,
     GraphExportReport,
@@ -41,6 +42,7 @@ from varagity.backup.graph import (
     restore_graph,
 )
 from varagity.backup.rag import (
+    BM25RebuildFailed,
     ProgressCallback,
     RagExport,
     RagRestore,
@@ -116,10 +118,14 @@ def rag_restore_flow(
     """Restore the chunk corpus from a bundle as a tracked flow run.
 
     Replaces both stores' corpus with the bundle's rows (re-rooted onto this
-    stack's ``DOCS_PATH``) and rebuilds the BM25 index from them, then — and
-    only once all of that succeeded — writes the corpus-stale flag the
-    bundle implies: stale if it was stale at export, or if its rows were
-    made under other reingest-affecting settings than this stack's.
+    stack's ``DOCS_PATH``) and rebuilds the BM25 index from them, then
+    writes the corpus-stale flag the bundle implies: stale if it was stale
+    at export, or if its rows were made under other reingest-affecting
+    settings than this stack's. The flag follows the rows: it is written
+    once they committed — after a complete restore, and also when only the
+    BM25 rebuild failed (the rows are the bundle's by then, so the previous
+    corpus's flag would misdescribe them) — and never after a restore that
+    rolled back.
 
     Args:
         bundle: The bundle file (inside ``<DOCS_PATH>/varagity-exports``).
@@ -141,16 +147,39 @@ def rag_restore_flow(
     """
     logger = get_run_logger()
     docs_root = Path(get_settings().DOCS_PATH)
-    with ExitStack() as stack:
-        active_store = store if store is not None else stack.enter_context(ContextualVectorDB())
-        active_bm25 = bm25 if bm25 is not None else stack.enter_context(ElasticsearchBM25())
-        result = restore_rag(bundle, active_store, active_bm25, docs_root, on_progress=on_progress)
-    stale = derive_corpus_stale(result.manifest, ingest_settings())
-    if settings_store is not None:
-        settings_store.set_corpus_stale(stale)
-    else:
-        with AppSettingsStore() as owned_settings:
-            owned_settings.set_corpus_stale(stale)
+
+    def write_stale(manifest: BundleManifest) -> bool:
+        stale = derive_corpus_stale(manifest, ingest_settings())
+        if settings_store is not None:
+            settings_store.set_corpus_stale(stale)
+        else:
+            with AppSettingsStore() as owned_settings:
+                owned_settings.set_corpus_stale(stale)
+        return stale
+
+    try:
+        with ExitStack() as stack:
+            active_store = store if store is not None else stack.enter_context(ContextualVectorDB())
+            active_bm25 = bm25 if bm25 is not None else stack.enter_context(ElasticsearchBM25())
+            result = restore_rag(
+                bundle, active_store, active_bm25, docs_root, on_progress=on_progress
+            )
+    except BM25RebuildFailed as error:
+        # The rows committed before the rebuild failed: they are the bundle's
+        # now, so the flag must describe them too — then the run still fails.
+        if error.manifest is not None:
+            try:
+                stale = write_stale(error.manifest)
+            except Exception:  # the rebuild's failure stays the run's answer
+                logger.exception("rag restore could not write the corpus-stale flag")
+            else:
+                logger.warning(
+                    "rag restore committed the rows of %s but not the BM25 index%s",
+                    bundle.name,
+                    " — the corpus is flagged stale" if stale else "",
+                )
+        raise
+    stale = write_stale(result.manifest)
     logger.info(
         "rag restore loaded %s: %d document(s), %d chunk(s), %d in BM25 in %.1fs%s",
         result.bundle_name,

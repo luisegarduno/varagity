@@ -104,7 +104,23 @@ class BM25RebuildFailed(RuntimeError):
     The Postgres commit already happened, so the restore took effect;
     restoring the same bundle again rebuilds the index (and rewrites the
     identical rows on the way).
+
+    Attributes:
+        manifest: The restored bundle's manifest — the rows now in the
+            corpus are its rows, so the corpus-stale flag must still be
+            derived from it (``None`` only for an instance rebuilt from its
+            message alone, e.g. unpickled).
     """
+
+    def __init__(self, message: str, manifest: BundleManifest | None = None) -> None:
+        """Word the failure and keep the manifest of the rows that did commit.
+
+        Args:
+            message: What failed, and how to repair it.
+            manifest: The restored bundle's manifest.
+        """
+        super().__init__(message)
+        self.manifest = manifest
 
 
 @dataclass(frozen=True)
@@ -855,7 +871,8 @@ def restore_rag(
             raise BM25RebuildFailed(
                 f"the rows are restored, but the BM25 index could not be rebuilt "
                 f"({type(error).__name__}: {error}) — restore the same bundle again to "
-                "repair it"
+                "repair it",
+                manifest,
             ) from error
     wall_clock_s = time.perf_counter() - started
     logger.info(

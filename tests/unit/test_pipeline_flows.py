@@ -796,7 +796,7 @@ class TestRagRestoreFlow:
         assert flags.writes == [False]
 
     def test_a_failed_restore_writes_no_flag(self, docs_root: Path) -> None:
-        """★ Only a completed restore may say what the corpus now is."""
+        """★ A restore that rolled back leaves the flag to the rows it left."""
         import zipfile
 
         from varagity.backup.bundle import BundleDamaged
@@ -818,6 +818,45 @@ class TestRagRestoreFlow:
                 settings_store=flags,
             )
         assert flags.writes == []
+
+    def test_a_bm25_failure_after_the_commit_still_flags_the_restored_rows(
+        self, docs_root: Path
+    ) -> None:
+        """★ The rows committed: the flag must describe them, then the run fails."""
+        from varagity.backup.rag import BM25RebuildFailed
+        from varagity.pipeline import rag_restore_flow
+
+        flags = FakeFlagStore()
+        store = FakeRestoreStore()
+        with pytest.raises(BM25RebuildFailed, match="restore the same bundle again"):
+            rag_restore_flow(
+                self.bundle(docs_root),
+                ingest_settings=lambda: {"CHUNK_SIZE": "800"},  # the bundle's differs
+                store=store,
+                bm25=FakeRebuildBM25(fail_with=ConnectionError("es went away")),
+                settings_store=flags,
+            )
+        assert [row.doc_id for row in store.documents] == ["doc-a"]  # committed
+        assert flags.writes == [True]  # derived from the bundle that is now the corpus
+
+    def test_a_flag_write_failing_too_keeps_the_rebuild_failure_as_the_answer(
+        self, docs_root: Path
+    ) -> None:
+        from varagity.backup.rag import BM25RebuildFailed
+        from varagity.pipeline import rag_restore_flow
+
+        class DownFlagStore(FakeFlagStore):
+            def set_corpus_stale(self, stale: bool) -> None:
+                raise ConnectionError("postgres went away too")
+
+        with pytest.raises(BM25RebuildFailed, match="restore the same bundle again"):
+            rag_restore_flow(
+                self.bundle(docs_root),
+                ingest_settings=lambda: dict(self.SETTINGS),
+                store=FakeRestoreStore(),
+                bm25=FakeRebuildBM25(fail_with=ConnectionError("es went away")),
+                settings_store=DownFlagStore(),
+            )
 
     def test_the_flow_opens_its_own_stores_when_none_are_given(
         self, docs_root: Path, monkeypatch: pytest.MonkeyPatch

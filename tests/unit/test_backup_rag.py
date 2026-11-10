@@ -538,6 +538,9 @@ class TestRestore:
         assert "ConnectionError: es went away" in str(caught.value)
         assert len(store.chunks) == 5  # committed
         assert store.log[-1] == "unlock"
+        # The committed rows' bundle rides the error, so the flag can follow them.
+        assert caught.value.manifest is not None
+        assert caught.value.manifest.counts["chunks"] == 5
 
     def test_a_malformed_line_is_invalid_and_rolls_back(self, docs_root: Path) -> None:
         bundle = exported(docs_root)
