@@ -24,11 +24,14 @@ Reading has two depths, because hashing is the expensive part:
   stack's, and for a graph bundle the engine format its files are in. No
   data member is opened, so a folder of large bundles still lists in
   milliseconds.
-* :func:`verify_bundle` adds the sha256 of every member — what a restore
-  runs before it touches a store, and the only check that sees a bundle
-  damaged *inside* an intact zip. :func:`open_bundle` hands out the same
-  verifying streams to the restore itself, so the bytes it loads are checked
-  again as they are read.
+* :func:`open_bundle` hands out **verifying streams**: every byte a restore
+  loads passes through a member's sha256, which is checked when the member
+  is drained — the only check that sees a bundle damaged *inside* an intact
+  zip. A restore reads the bundle exactly once this way, and its writes
+  only take effect after every member checked out (the RAG restore's
+  transaction commits, the graph restore's staged folder is swapped in), so
+  a damaged bundle can never restore. :func:`verify_bundle` runs the same
+  check standalone — every member hashed, nothing loaded.
 
 Two refusals come out of both: :class:`BundleInvalid` (not a sound bundle;
 :class:`BundleDamaged` when only its bytes are wrong) and
@@ -1171,8 +1174,9 @@ def inspect_bundle(path: Path, corpus: Corpus) -> BundleVerdict:
     size against the zip's, the embedding model and dimension against this
     stack's settings, and for a graph bundle the engine that wrote its files
     against this stack's (:func:`running_engine_format`). What it can't see
-    is a member damaged *inside* an intact zip with unchanged sizes;
-    :func:`verify_bundle` hashes for that.
+    is a member damaged *inside* an intact zip with unchanged sizes: the
+    restore's verifying streams (:func:`open_bundle`) — or
+    :func:`verify_bundle`, standalone — hash for that.
 
     Args:
         path: The bundle file.
@@ -1379,11 +1383,13 @@ def open_bundle(path: Path, manifest: BundleManifest) -> Iterator[BundleSource]:
 
 
 def verify_bundle(path: Path, corpus: Corpus) -> BundleManifest:
-    """Run every check a restore needs before it touches a store.
+    """Run every check a restore makes, without restoring anything.
 
     :func:`inspect_bundle`'s verdict, then the sha256 of every member —
-    every byte of the bundle is read once. A restore refuses the bundle on
-    any failure, so a damaged bundle can never restore.
+    every byte of the bundle is read once. A restore makes the same checks
+    as it loads (through :func:`open_bundle`'s verifying streams, so it
+    reads the bundle only once); this is the standalone form, for a caller
+    that wants the full verdict without a restore.
 
     Args:
         path: The bundle file.

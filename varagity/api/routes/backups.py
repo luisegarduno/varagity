@@ -17,13 +17,15 @@ backlog to late joiners, the structured error envelope:
   unwritable (``500``), another operation holding the corpus (``409
   corpus_busy``: an ingest or build, another export, a restore).
 * ``POST /api/backups/{corpus}/restore`` starts a restore run, with the
-  same up-front posture: the stores it writes unreachable (``503``), no such
-  bundle (``404 bundle_not_found``), the corpus busy here (``409``), the
-  bundle unsound or damaged (``422 bundle_invalid`` — every member's sha256
-  is checked here, before the ``202``) or not this stack's to restore (``422
-  bundle_incompatible`` — another embedding space, or for the graph another
-  engine or engine version), and for RAG an ingest in another process
-  holding the corpus lock (``409 corpus_busy``).
+  same up-front posture for everything a cheap look can see: the stores it
+  writes unreachable (``503``), no such bundle (``404 bundle_not_found``),
+  the corpus busy here (``409``), the bundle unsound — or already found
+  damaged by an earlier restore — (``422 bundle_invalid``) or not this
+  stack's to restore (``422 bundle_incompatible`` — another embedding
+  space, or for the graph another engine or engine version), and for RAG an
+  ingest in another process holding the corpus lock (``409 corpus_busy``).
+  The sha256 of every member is checked by the run itself, as it loads the
+  bundle — one read, with progress, and before anything takes effect.
 * ``GET /api/backups/{corpus}/status`` streams the run's ``status`` /
   ``progress`` / ``log`` events.
 * ``GET /api/backups/{corpus}/files/{name}`` returns a bundle as an
@@ -31,11 +33,14 @@ backlog to late joiners, the structured error envelope:
   CORS involved — resolving ``name`` inside the folder or answering
   ``404 bundle_not_found``.
 
-**Why the list never hashes.** A sha256 pass reads the whole bundle, and the
-list is loaded on every panel visit. So the list shows the cheap verdict,
-and a restore — which always hashes — *remembers* a damaged bundle by name,
-size and mtime, in this process: from then on the list shows that bundle as
-damaged instead of offering it again, until the file changes.
+**Why neither the list nor the route hashes.** A sha256 pass reads the
+whole bundle: the list is loaded on every panel visit, and a restore reads
+the bundle anyway to load it. So both show the cheap verdict, and the
+restore run — which verifies every member as it loads it, before its
+transaction commits or its staged graph is swapped in — *remembers* a
+bundle it refused, by name, size and mtime, in this process: from then on
+the list shows that bundle as damaged and the route refuses it, instead of
+offering it again, until the file changes.
 
 **Why "save to the folder" rather than "open the folder".** No browser API
 can open a folder on the user's machine, and the API runs in a container
@@ -51,7 +56,6 @@ keeps reporting, so the tab can still render whatever ran.
 
 import logging
 import os
-import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Annotated, Literal
@@ -61,9 +65,15 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
-from varagity.api.backup_runner import BackupRunner, current_ingest_settings, get_backup_runners
+from varagity.api.backup_runner import (
+    BackupRunner,
+    DamagedBundles,
+    current_ingest_settings,
+    get_backup_runners,
+    get_damaged_bundles,
+)
 from varagity.api.corpus_gate import CorpusBusy
-from varagity.api.deps import get_backup_preflight, get_vector_store
+from varagity.api.deps import corpus_busy_error, get_backup_preflight, get_vector_store
 from varagity.api.schemas import (
     BackupRestoreRequest,
     BackupRunOut,
@@ -72,15 +82,15 @@ from varagity.api.schemas import (
     ErrorResponse,
 )
 from varagity.backup.bundle import (
-    BundleDamaged,
     BundleIncompatible,
     BundleInvalid,
     BundleListing,
+    BundleManifest,
     display_path,
     exports_dir,
+    inspect_bundle,
     is_bundle_name,
     list_bundles,
-    verify_bundle,
 )
 from varagity.backup.graph import workdir_files
 from varagity.backup.rag import ingest_drift
@@ -129,63 +139,6 @@ def enabled_corpus(corpus: BackupCorpus) -> BackupCorpus:
             },
         )
     return corpus
-
-
-class DamagedBundles:
-    """Bundles a restore found damaged, remembered in-process.
-
-    Keyed by corpus, name, size and mtime: a bundle whose bytes were
-    replaced (copied over, re-exported under the same name) is a new file
-    and is judged afresh. In-process only — the next API start forgets, and
-    the next restore of that bundle refuses (and remembers) it again.
-    """
-
-    def __init__(self) -> None:
-        """Start with nothing remembered."""
-        self._lock = threading.Lock()
-        self._reasons: dict[tuple[str, str, int, int], str] = {}
-
-    def remember(self, corpus: str, name: str, path: Path, reason: str) -> None:
-        """Remember that a restore found this bundle damaged.
-
-        Args:
-            corpus: The bundle's corpus.
-            name: Its file name in the exports folder.
-            path: The file (stat'ed for its size and mtime).
-            reason: What the restore found.
-        """
-        try:
-            info = path.stat()
-        except OSError:
-            return  # gone already: nothing left to mislist
-        with self._lock:
-            self._reasons[(corpus, name, info.st_size, info.st_mtime_ns)] = reason
-
-    def reason(self, corpus: str, listing: BundleListing) -> str | None:
-        """Report why a listed bundle was found damaged, if it was.
-
-        Args:
-            corpus: The listing's corpus.
-            listing: The bundle as the folder lists it now.
-
-        Returns:
-            The remembered reason, or ``None`` when this exact file (name,
-            size, mtime) was never refused for damage.
-        """
-        with self._lock:
-            return self._reasons.get((corpus, listing.name, listing.size_bytes, listing.mtime_ns))
-
-
-_damaged_bundles = DamagedBundles()
-
-
-def get_damaged_bundles() -> DamagedBundles:
-    """Provide the process's damaged-bundle memory (FastAPI dependency, override seam).
-
-    Returns:
-        The one :class:`DamagedBundles` for the life of the process.
-    """
-    return _damaged_bundles
 
 
 EnabledCorpusDep = Annotated[BackupCorpus, Depends(enabled_corpus)]
@@ -414,19 +367,27 @@ async def start_export(
     try:
         return runners[corpus].start("export")
     except CorpusBusy as error:
-        raise _corpus_busy(error) from error
+        raise corpus_busy_error(error) from error
 
 
-def _corpus_busy(error: CorpusBusy) -> HTTPException:
-    """Build the structured 409 for a corpus another operation holds.
+def _restorable_manifest(path: Path, corpus: BackupCorpus) -> BundleManifest:
+    """The cheap verdict a restore is started on — the list's own check.
+
+    The zip's central directory and ``bundle.json`` alone, never a member's
+    bytes: the run verifies every member's sha256 as it loads it.
 
     Args:
-        error: The gate's refusal (its message names the holder).
+        path: The bundle file.
+        corpus: The corpus it would restore.
 
     Returns:
-        The ``409 corpus_busy`` to raise.
+        The bundle's manifest.
+
+    Raises:
+        BundleInvalid: If the bundle is unsound.
+        BundleIncompatible: If this stack must not restore it.
     """
-    return HTTPException(status_code=409, detail={"code": "corpus_busy", "message": str(error)})
+    return inspect_bundle(path, corpus).manifest_or_raise()
 
 
 @router.post(
@@ -456,10 +417,13 @@ async def start_restore(
     and the BM25 index is rebuilt from the restored rows. For the graph, the
     engine's working directory becomes the bundle's — extracted beside the
     live one and swapped in, the previous graph put back if the restored one
-    won't open — and nothing is re-extracted. Everything that can refuse the
-    bundle runs first, so a bad bundle answers ``422`` and never becomes a
-    failed run — including the sha256 of every member, which only this
-    check (not the list) reads.
+    won't open — and nothing is re-extracted. Everything a cheap look can
+    see refuses the bundle here, before the ``202``: the list's verdict, and
+    a damage an earlier restore of this very file found. The sha256 of every
+    member is the run's job — it reads the bundle once, to load it, and
+    nothing takes effect until every member checked out — so a bundle
+    damaged inside an intact zip fails its first run (the corpus untouched)
+    and is refused here from then on.
 
     Args:
         corpus: The corpus to restore.
@@ -467,8 +431,8 @@ async def start_restore(
         runners: The process-wide backup runners.
         preflight: The awaitable reachability check (structured 503).
         store: The per-request vector store (the RAG corpus-lock check).
-        damaged: The process's remembered restore failures (a damaged
-            bundle is recorded here, so the list then shows it damaged).
+        damaged: The process's remembered restore failures (a bundle an
+            earlier restore found damaged is refused here, before the run).
 
     Returns:
         The new run's snapshot (state ``running``).
@@ -480,8 +444,9 @@ async def start_restore(
             ``404 bundle_not_found`` for a name that is not a bundle in the
             folder; ``409 corpus_busy`` while another operation holds the
             corpus, or (RAG) an ingest in another process holds the corpus
-            lock; ``422 bundle_invalid`` for an unsound or damaged bundle;
-            ``422 bundle_incompatible`` for one from another embedding model
+            lock; ``422 bundle_invalid`` for an unsound bundle, or one an
+            earlier restore found damaged; ``422 bundle_incompatible`` for
+            one from another embedding model
             or dimension, corpus, or format version — or, for the graph,
             another engine or engine major.minor version.
     """
@@ -489,12 +454,12 @@ async def start_restore(
     path = _bundle_path(corpus, payload.name)
     runner = runners[corpus]
     try:
-        # Cheap, and first: a busy corpus shouldn't cost a full hash.
+        # First: a busy corpus shouldn't cost even the manifest read.
         runner.ensure_free()
     except CorpusBusy as error:
-        raise _corpus_busy(error) from error
+        raise corpus_busy_error(error) from error
     try:
-        await run_in_threadpool(verify_bundle, path, corpus)
+        await run_in_threadpool(_restorable_manifest, path, corpus)
     except BundleIncompatible as error:
         raise HTTPException(
             status_code=422,
@@ -504,12 +469,10 @@ async def start_restore(
             },
         ) from error
     except BundleInvalid as error:
-        if isinstance(error, BundleDamaged):
-            damaged.remember(corpus, payload.name, path, str(error))
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "bundle_invalid", "message": f"cannot restore {payload.name}: {error}"},
-        ) from error
+        raise _bundle_invalid(payload.name, str(error)) from error
+    remembered = await run_in_threadpool(damaged.reason_for, corpus, payload.name, path)
+    if remembered is not None:
+        raise _bundle_invalid(payload.name, remembered)
     # The cross-process half of the gate is RAG's alone: the graph's only
     # writer is this process, so its gate already says everything.
     if corpus == "rag" and not await run_in_threadpool(store.corpus_lock_free):
@@ -526,7 +489,23 @@ async def start_restore(
     try:
         return runner.start("restore", payload.name)
     except CorpusBusy as error:
-        raise _corpus_busy(error) from error
+        raise corpus_busy_error(error) from error
+
+
+def _bundle_invalid(name: str, reason: str) -> HTTPException:
+    """Build the structured ``422 bundle_invalid`` for a bundle that can't restore.
+
+    Args:
+        name: The bundle's file name.
+        reason: Why (the verdict's, or a damage an earlier restore found).
+
+    Returns:
+        The ``422 bundle_invalid`` to raise.
+    """
+    return HTTPException(
+        status_code=422,
+        detail={"code": "bundle_invalid", "message": f"cannot restore {name}: {reason}"},
+    )
 
 
 @router.get("/api/backups/{corpus}/status", response_class=EventSourceResponse)

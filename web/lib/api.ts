@@ -420,12 +420,14 @@ export function startExport(corpus: TargetCorpus): Promise<BackupRun> {
  * Start restoring a corpus from one of its bundles and return the run handle.
  *
  * Restore **replaces** the corpus with the bundle's rows (no reprocessing).
- * Everything that can refuse it answers before the run exists:
+ * Everything a cheap look can see answers before the run exists:
  * `404 bundle_not_found`, `409 corpus_busy` (another operation holds the
  * corpus, or an ingest in another process holds its lock),
- * `422 bundle_invalid` (unsound or damaged — the server hashes every member
- * here) and `422 bundle_incompatible` (another embedding model, dimension,
- * corpus or format version).
+ * `422 bundle_invalid` (unsound, or found damaged by an earlier restore) and
+ * `422 bundle_incompatible` (another embedding model, dimension, corpus or
+ * format version). The run itself checks every member's sha256 as it loads
+ * the bundle: a bundle damaged inside an intact zip fails its first run with
+ * the corpus untouched, and is refused here from then on.
  */
 export function startRestore(corpus: TargetCorpus, name: string): Promise<BackupRun> {
   const body: BackupRestoreRequest = { name };
