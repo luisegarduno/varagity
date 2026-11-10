@@ -218,6 +218,56 @@ open, so a heal in `session()` would mistake that wipe for a crash and
 resurrect the pre-restore graph; and a lazy open (a status poll) during a
 restore's extraction would delete the staging folder being extracted.
 
+### As built: a restore hashes once, in its run (supersedes part of §7 and §12)
+
+§7 promised that everything able to refuse a bundle runs before the `202`,
+and §12 that a restore hashes every member before it touches a store. As
+built first, the restore route did that — and the run then read the whole
+bundle again to load it, hashing every member a second time on the way. A
+review counted the cost: every restore read the bundle twice, the `POST`
+blocked for the whole first pass with no progress (a multi-GB RAG bundle
+held it for minutes, long enough for a proxy to time it out), and the corpus
+gate wasn't held meanwhile, so an ingest could start and turn minutes of
+hashing into a `409`.
+
+The second pass was the one that mattered. The run's verifying streams
+already guarantee §12's real goal — a damaged bundle can never restore —
+because nothing takes effect until every member checked out: the RAG load
+is one transaction that commits only after the last member's digest
+matched, and the graph's files are extracted into a staging folder that is
+swapped in only after the last one did. So the route now runs the cheap
+verdict alone (the list's own check), plus a damage an earlier restore of
+the same file found, and the run's single read does all the hashing, with
+progress. The price is §7's other promise: a bundle damaged *inside* an
+intact zip — the one defect the cheap verdict can't see — now fails its
+first **run** (the corpus untouched) instead of answering `422`. The runner
+remembers that failure by name, size and mtime, exactly as the route did,
+so the list shows the bundle as damaged and the route refuses it with `422
+bundle_invalid` from then on.
+
+### As built: the stale flag follows the rows (refines §8)
+
+§8 wrote either flag "only once the restore completed". A RAG restore whose
+BM25 rebuild fails after its commit did not complete — but its rows are the
+bundle's by then, so leaving the previous corpus's flag would misdescribe
+them until the next restore. The `rag-restore` flow therefore also writes
+the derived flag when only the rebuild failed (`BM25RebuildFailed` carries
+the restored bundle's manifest), and still writes nothing after a restore
+that rolled back.
+
+### As built: reads of the tables answer 503 during a RAG restore
+
+The restore's `TRUNCATE` holds `documents` and `chunks` until it commits —
+through the whole binary `COPY` and the HNSW build. Only chat and the
+deletes refused during that window at first; the document list, the page
+previews and a settings change's emptiness count queued behind the lock for
+the length of the load, each parking a worker thread. Every route that
+queries the tables now answers `503 corpus_restoring` while a restore holds
+the corpus (`require_rag_readable`), and a settings change made during a
+restore flags the corpus stale without counting it: the restore ends by
+writing the flag its bundle implies against the settings current then, and
+a restore that rolls back leaves rows the change does make stale.
+
 ## Consequences
 
 - **A wiped stack comes back in minutes.** A RAG restore costs one `COPY`

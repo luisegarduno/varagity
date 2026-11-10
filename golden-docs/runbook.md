@@ -636,11 +636,13 @@ curl -sN localhost:8000/api/backups/rag/status
 - **Strict compatibility.** A bundle made with another embedding model or
   dimension is refused (`422 bundle_incompatible`), never restored: neither
   store would notice, and retrieval would quietly return the wrong passages.
-  A damaged bundle (`422 bundle_invalid`) is refused before anything is
-  touched — a restore hashes every member first. The list itself never
-  hashes, so a bundle damaged *inside* an intact zip lists as restorable
-  until its first restore refuses it; from then on (until the file changes
-  or the API restarts) the list shows it as damaged.
+  A damaged bundle never restores: the restore checks every member's
+  sha256 as it loads it, and nothing takes effect until all of them checked
+  out. Neither the list nor the restore button hashes, so a bundle damaged
+  *inside* an intact zip lists as restorable until its first restore run
+  fails on it — with the corpus untouched; from then on (until the file
+  changes or the API restarts) the list shows it as damaged and a restore
+  of it is refused (`422 bundle_invalid`).
 - **The stale flag and drift.** Restoring a bundle made under other
   reingest-affecting settings (`CHUNKING_STRATEGY`, `CHUNK_SIZE`,
   `CHUNK_OVERLAP`, `CONTEXTUALIZE`, `OCR_ENGINE`) flags the corpus stale, as
