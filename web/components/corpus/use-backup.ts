@@ -37,9 +37,10 @@ export interface BackupRunHandle {
   startExport: () => Promise<void>;
   /**
    * Start restoring one bundle; follows its stream on success. Resolves to
-   * `null` once the run started, or to why it was refused — in which case
-   * the bundle list is re-read, so a bundle the restore found damaged now
-   * says so.
+   * `null` once the run started, or to why it was refused (the bundle list
+   * is re-read either way: a run that fails on a damaged bundle is
+   * remembered by the server, and its terminal frame re-reads the list, so
+   * the row then says so).
    */
   startRestore: (name: string) => Promise<string | null>;
 }
@@ -145,8 +146,8 @@ export function useBackupRun(
             ? failure.message
             : "Could not start the restore — is the stack up?";
         setError(message);
-        // A refusal may have taught the server something (a damaged bundle
-        // is remembered): re-read the list so the row says so.
+        // The server may know more than the row shows (a damage a restore
+        // run found, remembered): re-read the list so the row says so.
         void queryClient.invalidateQueries({ queryKey: queryKeys.backups(corpus) });
         return message;
       }

@@ -1064,10 +1064,13 @@ export interface paths {
          *     and the BM25 index is rebuilt from the restored rows. For the graph, the
          *     engine's working directory becomes the bundle's — extracted beside the
          *     live one and swapped in, the previous graph put back if the restored one
-         *     won't open — and nothing is re-extracted. Everything that can refuse the
-         *     bundle runs first, so a bad bundle answers ``422`` and never becomes a
-         *     failed run — including the sha256 of every member, which only this
-         *     check (not the list) reads.
+         *     won't open — and nothing is re-extracted. Everything a cheap look can
+         *     see refuses the bundle here, before the ``202``: the list's verdict, and
+         *     a damage an earlier restore of this very file found. The sha256 of every
+         *     member is the run's job — it reads the bundle once, to load it, and
+         *     nothing takes effect until every member checked out — so a bundle
+         *     damaged inside an intact zip fails its first run (the corpus untouched)
+         *     and is refused here from then on.
          *
          *     Args:
          *         corpus: The corpus to restore.
@@ -1075,8 +1078,8 @@ export interface paths {
          *         runners: The process-wide backup runners.
          *         preflight: The awaitable reachability check (structured 503).
          *         store: The per-request vector store (the RAG corpus-lock check).
-         *         damaged: The process's remembered restore failures (a damaged
-         *             bundle is recorded here, so the list then shows it damaged).
+         *         damaged: The process's remembered restore failures (a bundle an
+         *             earlier restore found damaged is refused here, before the run).
          *
          *     Returns:
          *         The new run's snapshot (state ``running``).
@@ -1088,8 +1091,9 @@ export interface paths {
          *             ``404 bundle_not_found`` for a name that is not a bundle in the
          *             folder; ``409 corpus_busy`` while another operation holds the
          *             corpus, or (RAG) an ingest in another process holds the corpus
-         *             lock; ``422 bundle_invalid`` for an unsound or damaged bundle;
-         *             ``422 bundle_incompatible`` for one from another embedding model
+         *             lock; ``422 bundle_invalid`` for an unsound bundle, or one an
+         *             earlier restore found damaged; ``422 bundle_incompatible`` for
+         *             one from another embedding model
          *             or dimension, corpus, or format version — or, for the graph,
          *             another engine or engine major.minor version.
          */
@@ -1388,10 +1392,11 @@ export interface components {
          * @description One bundle file in ``GET /api/backups/{corpus}`` (ADR-019).
          *
          *     The verdict fields are the *cheap* check — the zip's directory and its
-         *     manifest, never a hash (a restore hashes every member before it touches
-         *     a store). A bundle damaged inside an intact zip therefore lists as
-         *     restorable until a restore refuses it; from then on, until its size or
-         *     mtime changes, it lists as damaged.
+         *     manifest, never a hash (a restore hashes every member as it loads it,
+         *     before anything takes effect). A bundle damaged inside an intact zip
+         *     therefore lists as restorable until a restore fails on it; from then
+         *     on, until its size or mtime changes, it lists as damaged (and a
+         *     restore of it is refused up front).
          *
          *     Attributes:
          *         name: The bundle's file name in the corpus's ``varagity-exports/``

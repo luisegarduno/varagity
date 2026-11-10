@@ -410,14 +410,13 @@ def restore_graph(
     No model is called and nothing is re-extracted — the bundle *is* a
     workdir:
 
-    1. ``validate`` — the cheap verdict again (the route verified the
-       bundle, every member's sha256 included, before the run; this guards a
-       direct call and a file swapped since);
+    1. ``validate`` — the cheap verdict (the route checked it before the
+       run; this guards a direct call and a file swapped since);
     2. ``extract`` — every file into a fresh staging folder beside the
        workdir (:meth:`~varagity.graph.service.GraphService.staging_dir`, on
-       the same volume), each member's sha256 checked again as it is read
-       and each file synced to disk, so a bundle that changed after
-       verification can't go live;
+       the same volume), each member's sha256 checked as it is read — the
+       restore's one read of the bundle, and its only hash — and each file
+       synced to disk, so a damaged bundle can never go live;
     3. ``swap`` and ``open`` —
        :meth:`~varagity.graph.service.GraphService.replace_workdir` closes
        the session, swaps the folders under the service's write and open

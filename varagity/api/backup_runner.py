@@ -20,6 +20,10 @@ run is — the same contract ingest and the graph build already keep, so the
 * **Replay + live fan-out.** Events accumulate per run; a subscriber gets
   the full backlog first, then live events until the terminal ``status``
   frame — connecting mid-run or after completion renders the same picture.
+* **A refused bundle is remembered.** A restore verifies every member as
+  it loads it; when that finds the bundle unsound or damaged, the run
+  records it in :class:`DamagedBundles`, so the list shows it as such and
+  the next restore of it is refused up front.
 
 The terminal transition is one critical section: the run turns terminal,
 its last frame joins the backlog, live subscribers are detached, and the
@@ -35,6 +39,7 @@ import logging
 import threading
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
@@ -49,7 +54,13 @@ from varagity.api.schemas import (
     BackupStatusEvent,
     BackupSummaryOut,
 )
-from varagity.backup.bundle import Corpus, display_path, exports_dir
+from varagity.backup.bundle import (
+    BundleInvalid,
+    BundleListing,
+    Corpus,
+    display_path,
+    exports_dir,
+)
 from varagity.backup.graph import (
     GraphExportReport,
     GraphExportStage,
@@ -118,6 +129,90 @@ def current_ingest_settings() -> dict[str, str]:
     """
     settings = get_settings()
     return {name: to_env_value(getattr(settings, name)) for name in sorted(REINGEST_AFFECTING)}
+
+
+class DamagedBundles:
+    """Bundles a restore refused for their contents, remembered in-process.
+
+    A restore verifies every member as it loads it — the only check that
+    sees a bundle damaged *inside* an intact zip, or a line no row can be
+    made from — and the list's verdict is deliberately cheap, so what a
+    restore found is remembered here: the list then shows the bundle as
+    not restorable, with that reason, and the restore route refuses it up
+    front instead of loading it again.
+
+    Keyed by corpus, name, size and mtime: a bundle whose bytes were
+    replaced (copied over, re-exported under the same name) is a new file
+    and is judged afresh. In-process only — the next API start forgets, and
+    the next restore of that bundle fails (and is remembered) again.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing remembered."""
+        self._lock = threading.Lock()
+        self._reasons: dict[tuple[str, str, int, int], str] = {}
+
+    def remember(self, corpus: str, name: str, path: Path, reason: str) -> None:
+        """Remember that a restore refused this bundle.
+
+        Args:
+            corpus: The bundle's corpus.
+            name: Its file name in the exports folder.
+            path: The file (stat'ed for its size and mtime).
+            reason: What the restore found.
+        """
+        try:
+            info = path.stat()
+        except OSError:
+            return  # gone already: nothing left to mislist
+        with self._lock:
+            self._reasons[(corpus, name, info.st_size, info.st_mtime_ns)] = reason
+
+    def reason(self, corpus: str, listing: BundleListing) -> str | None:
+        """Report why a listed bundle was refused, if it was.
+
+        Args:
+            corpus: The listing's corpus.
+            listing: The bundle as the folder lists it now.
+
+        Returns:
+            The remembered reason, or ``None`` when this exact file (name,
+            size, mtime) was never refused.
+        """
+        with self._lock:
+            return self._reasons.get((corpus, listing.name, listing.size_bytes, listing.mtime_ns))
+
+    def reason_for(self, corpus: str, name: str, path: Path) -> str | None:
+        """Report why a bundle file was refused, if it was (the restore route's check).
+
+        Args:
+            corpus: The bundle's corpus.
+            name: Its file name in the exports folder.
+            path: The file (stat'ed for its size and mtime).
+
+        Returns:
+            The remembered reason, or ``None`` when this exact file was never
+            refused (or can't be stat'ed).
+        """
+        try:
+            info = path.stat()
+        except OSError:
+            return None
+        with self._lock:
+            return self._reasons.get((corpus, name, info.st_size, info.st_mtime_ns))
+
+
+_damaged_bundles = DamagedBundles()
+
+
+def get_damaged_bundles() -> DamagedBundles:
+    """Provide the process's refused-bundle memory (FastAPI dependency, override seam).
+
+    Returns:
+        The one :class:`DamagedBundles` for the life of the process — the
+        runners record into it, the backup routes read it.
+    """
+    return _damaged_bundles
 
 
 @dataclasses.dataclass
@@ -230,6 +325,7 @@ class BackupRunner:
         export_flow: Callable[..., ExportResult] | None = None,
         restore_flow: Callable[..., RestoreResult] | None = None,
         ingest_settings: Callable[[], dict[str, str]] | None = None,
+        damaged: DamagedBundles | None = None,
     ) -> None:
         """Wire the runner's collaborators (all injectable for tests).
 
@@ -247,6 +343,9 @@ class BackupRunner:
                 what a RAG export's bundle records and what a RAG restore's
                 stale flag is judged against; :func:`current_ingest_settings`
                 by default (never called for the graph, which has none).
+            damaged: Where a restore records a bundle it refused for its
+                contents; the process-wide memory the backup routes read
+                when omitted.
 
         Raises:
             KeyError: If no export or restore flow exists for ``corpus`` and
@@ -259,6 +358,7 @@ class BackupRunner:
         self._ingest_settings = (
             ingest_settings if ingest_settings is not None else current_ingest_settings
         )
+        self._damaged = damaged if damaged is not None else get_damaged_bundles()
         self._lock = threading.Lock()
         self._run: _RunState | None = None
         self._events: list[Feed] = []
@@ -336,8 +436,8 @@ class BackupRunner:
     def ensure_free(self) -> None:
         """Refuse at once if any operation holds the corpus (without claiming it).
 
-        The restore route's cheap pre-check: a busy corpus answers ``409``
-        before the bundle is hashed.
+        The restore route's first check: a busy corpus answers ``409``
+        before the bundle is even opened.
 
         Raises:
             CorpusBusy: If the corpus is held.
@@ -425,10 +525,31 @@ class BackupRunner:
         except Exception as error:
             logger.exception("backup run %s (%s %s) failed", run.run_id, self.corpus, run.operation)
             failure = f"{type(error).__name__}: {error}"
+            if run.operation == "restore" and isinstance(error, BundleInvalid):
+                self._remember_refused(run, error)
         finally:
             backup_logger.removeHandler(relay)
             backup_logger.setLevel(previous_level)
             self._finish(run, result=result, error=failure)
+
+    def _remember_refused(self, run: _RunState, error: BundleInvalid) -> None:
+        """Record a bundle the restore refused for its contents.
+
+        What the run's verifying read found — a member whose bytes don't
+        match their sha256 (or the zip's CRC), a line no row can be made
+        from — is a property of the file, so the list shows it from now on
+        and the route refuses it before loading it again. Nothing was
+        restored: the RAG transaction rolled back, the graph's staged copy
+        was never swapped in.
+
+        Args:
+            run: The failed restore run.
+            error: What the restore found wrong with the bundle.
+        """
+        assert run.bundle is not None  # start() requires one for a restore
+        self._damaged.remember(
+            self.corpus, run.bundle, exports_dir(self.corpus) / run.bundle, str(error)
+        )
 
     def _export(self, run: _RunState) -> ExportResult:
         """Run the corpus's export flow into its exports folder.

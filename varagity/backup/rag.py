@@ -798,12 +798,13 @@ def restore_rag(
     BM25 rebuild ends (so no ingest in any process can write rows the
     rebuild would miss, or touch the index while it is gone):
 
-    1. ``validate`` — the cheap verdict again (the route verified the bundle
-       before the run; this guards a direct call and a file swapped since).
+    1. ``validate`` — the cheap verdict (the route checked it before the
+       run; this guards a direct call and a file swapped since).
     2. ``load`` — one transaction empties both tables and streams the
        bundle's lines into binary ``COPY``, re-rooting each ``source``;
-       every member's sha256 is checked as it is read, so a bundle that
-       changed after verification still can't commit.
+       every member's sha256 is checked as it is read — the restore's one
+       read of the bundle, and its only hash — so a damaged bundle (or one
+       a line of which no row can be made from) can never commit.
     3. ``index`` — the HNSW index is rebuilt and the transaction commits:
        the restore has taken effect. Any failure before this rolled back,
        leaving the previous corpus untouched.
@@ -823,7 +824,7 @@ def restore_rag(
 
     Raises:
         BundleInvalid: If the bundle is unsound or damaged (nothing was
-            replaced).
+            replaced — the transaction rolled back).
         BundleIncompatible: If this stack must not restore it (nothing was
             replaced).
         varagity.stores.vector_store.CorpusLocked: If an ingest holds the

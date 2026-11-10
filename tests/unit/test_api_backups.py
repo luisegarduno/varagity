@@ -797,10 +797,10 @@ class TestRestoreRoute:
         )
         assert runner.snapshot() is None  # refused before any run existed
 
-    async def test_a_damaged_bundle_is_422_invalid_and_then_lists_as_damaged(
+    async def test_a_damaged_bundle_fails_its_run_untouched_and_is_then_refused(
         self, docs_root: Path
     ) -> None:
-        """★ The list never hashes; the restore does — and remembers what it found."""
+        """★ Neither the list nor the route hashes; the run does — once — and remembers it."""
         bundle = exported_bundle(docs_root)
         with zipfile.ZipFile(bundle) as archive:
             chunks = archive.read(CHUNKS_MEMBER)
@@ -808,25 +808,44 @@ class TestRestoreRoute:
             bundle, {CHUNKS_MEMBER: chunks.replace(b"chunk 1", b"chunk 7")}, reseal=False
         )
         bundle.unlink()
-        runner = make_runner(docs_root)
-        app = make_app(runner)
+        memory = DamagedBundles()
+        store = FakeRestoreStore([document("doc-before", str(docs_root / "before.pdf"))])
+        runner = make_runner(
+            docs_root, damaged=memory, restore_flow=scripted_restore_flow(docs_root, store=store)
+        )
+        app = make_app(runner, damaged=memory)
 
         (entry,) = (await request(app, "GET", "/api/backups/rag")).json()
         assert entry["name"] == damaged.name
         assert entry["restorable"] is True  # the cheap verdict can't see it
 
-        response = await restore(app, damaged.name)
-        assert response.status_code == 422
-        error = response.json()["error"]
-        assert error["code"] == "bundle_invalid"
-        assert "chunks.jsonl does not match its recorded sha256" in error["message"]
-        assert runner.snapshot() is None
+        started = await restore(app, damaged.name)
+        assert started.status_code == 202  # nor can the route's: it never hashes
+        await wait_terminal(runner)
+        final = runner.snapshot()
+        assert final is not None and final.state == "failed"
+        assert final.error is not None
+        assert "chunks.jsonl does not match its recorded sha256" in final.error
+        # Found while loading, before the commit: the previous rows stand.
+        assert [row.doc_id for row in store.documents] == ["doc-before"]
+        assert "commit" not in store.log
 
         (entry,) = (await request(app, "GET", "/api/backups/rag")).json()
         assert entry["restorable"] is False
         assert entry["reason"] == (
             "chunks.jsonl does not match its recorded sha256 — the bundle is damaged."
         )
+
+        # Remembered: the next restore of this very file is refused up front.
+        refused = await restore(app, damaged.name)
+        assert refused.status_code == 422
+        error = refused.json()["error"]
+        assert error["code"] == "bundle_invalid"
+        assert error["message"] == (
+            f"cannot restore {damaged.name}: chunks.jsonl does not match its recorded "
+            "sha256 — the bundle is damaged."
+        )
+        assert runner.snapshot() == final  # no second run
 
         # A changed file is a new file: judged afresh by the cheap verdict.
         os.utime(damaged, (3_000_000, 3_000_000))
@@ -846,13 +865,13 @@ class TestRestoreRoute:
             error["message"] == "cannot restore photos.zip: No bundle.json — not a Varagity backup."
         )
 
-    async def test_a_busy_corpus_is_409_before_the_bundle_is_hashed(
+    async def test_a_busy_corpus_is_409_before_the_bundle_is_opened(
         self, docs_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bundle = exported_bundle(docs_root)
-        hashed: list[str] = []
+        opened: list[str] = []
         monkeypatch.setattr(
-            backups_routes, "verify_bundle", lambda path, corpus: hashed.append(path.name)
+            backups_routes, "_restorable_manifest", lambda path, corpus: opened.append(path.name)
         )
         gate = CorpusGate("rag")
         gate.claim("ingest")
@@ -861,7 +880,31 @@ class TestRestoreRoute:
         error = response.json()["error"]
         assert error["code"] == "corpus_busy"
         assert "an ingest is running" in error["message"]
-        assert hashed == []
+        assert opened == []
+
+    async def test_the_route_never_hashes_a_member(
+        self, docs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The run reads the bundle once; the route only reads its manifest."""
+        bundle = exported_bundle(docs_root)
+        opened: list[str] = []
+        real_open = zipfile.ZipFile.open
+
+        def spy(archive: zipfile.ZipFile, name: Any, *args: Any, **kwargs: Any) -> Any:
+            opened.append(name if isinstance(name, str) else name.filename)
+            return real_open(archive, name, *args, **kwargs)
+
+        hold = threading.Event()
+        runner = make_runner(docs_root, restore_flow=scripted_restore_flow(docs_root, hold=hold))
+        monkeypatch.setattr(zipfile.ZipFile, "open", spy)
+        try:
+            started = await restore(make_app(runner), bundle.name)
+            assert started.status_code == 202
+            assert opened == ["bundle.json"]  # the cheap verdict's one member
+        finally:
+            monkeypatch.undo()
+            hold.set()
+        await wait_terminal(runner)
 
     async def test_an_ingest_in_another_process_is_409(self, docs_root: Path) -> None:
         bundle = exported_bundle(docs_root)
@@ -993,6 +1036,14 @@ class TestListedVerdicts:
         assert memory.reason("graph", listing) is None  # per corpus
         memory.remember("rag", "gone.zip", docs_root / "gone.zip", "never stat-able")  # no-op
         assert get_damaged_bundles() is get_damaged_bundles()  # one per process
+        # The restore route's lookup: by the file as it is now.
+        assert memory.reason_for("rag", bundle.name, bundle) == "broken"
+        assert memory.reason_for("graph", bundle.name, bundle) is None
+        assert memory.reason_for("rag", "gone.zip", docs_root / "gone.zip") is None
+        os.utime(bundle, (3_000_000, 3_000_000))  # a changed file is a new file
+        assert memory.reason_for("rag", bundle.name, bundle) is None
+        # The runners and the routes share the process's one memory.
+        assert BackupRunner("rag")._damaged is get_damaged_bundles()
 
 
 # ── the graph export (phase 3) ────────────────────────────────────────────
@@ -1427,32 +1478,42 @@ class TestGraphRestore:
         assert error["message"] == f"cannot restore {bundle.name}: {reason}"
         assert runner.snapshot() is None  # refused before any run existed
 
-    async def test_a_damaged_graph_bundle_is_422_invalid_and_then_lists_as_damaged(
+    async def test_a_damaged_graph_bundle_fails_its_run_untouched_and_is_then_refused(
         self, docs_root: Path, graph_stack: GraphService, tmp_path: Path
     ) -> None:
         bundle = graph_bundle(graph_stack, tmp_path)
+        live = workdir_bytes(graph_stack)
         name = "lightrag/kv_store_doc_status.json"
         with zipfile.ZipFile(bundle) as archive:
             original = archive.read(name)
         damaged = rezip(bundle, {name: original.replace(b"processed", b"PROCESSED")}, reseal=False)
         bundle.unlink()
-        runner = make_graph_runner(graph_stack)
-        app = graph_app(docs_root, runner)
+        memory = DamagedBundles()
+        runner = make_graph_runner(graph_stack, damaged=memory)
+        app = graph_app(docs_root, runner, damaged=memory)
 
         (entry,) = (await request(app, "GET", "/api/backups/graph")).json()
         assert entry["restorable"] is True  # the cheap verdict can't see it
 
-        response = await graph_restore(app, damaged.name)
-        assert response.status_code == 422
-        error = response.json()["error"]
-        assert error["code"] == "bundle_invalid"
-        assert "kv_store_doc_status.json does not match its recorded sha256" in error["message"]
+        started = await graph_restore(app, damaged.name)
+        assert started.status_code == 202  # nor can the route's: it never hashes
+        await wait_terminal(runner)
+        final = runner.snapshot()
+        assert final is not None and final.state == "failed"
+        assert final.error is not None
+        assert "kv_store_doc_status.json does not match its recorded sha256" in final.error
+        # Found while extracting, before the swap: the live graph stands.
+        assert workdir_bytes(graph_stack) == live
 
         (entry,) = (await request(app, "GET", "/api/backups/graph")).json()
         assert entry["restorable"] is False
         assert entry["reason"].endswith("— the bundle is damaged.")
 
-    async def test_a_busy_graph_is_409_before_the_bundle_is_hashed(
+        refused = await graph_restore(app, damaged.name)
+        assert refused.status_code == 422
+        assert refused.json()["error"]["code"] == "bundle_invalid"
+
+    async def test_a_busy_graph_is_409_before_the_bundle_is_opened(
         self,
         docs_root: Path,
         graph_stack: GraphService,
@@ -1460,9 +1521,9 @@ class TestGraphRestore:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         bundle = graph_bundle(graph_stack, tmp_path)
-        hashed: list[str] = []
+        opened: list[str] = []
         monkeypatch.setattr(
-            backups_routes, "verify_bundle", lambda path, corpus: hashed.append(path.name)
+            backups_routes, "_restorable_manifest", lambda path, corpus: opened.append(path.name)
         )
         gate = CorpusGate("graph")
         gate.claim("build")
@@ -1473,7 +1534,7 @@ class TestGraphRestore:
         error = response.json()["error"]
         assert error["code"] == "corpus_busy"
         assert "a build is running" in error["message"]
-        assert hashed == []
+        assert opened == []
 
     async def test_a_restore_holds_the_graph_until_it_ends(
         self, docs_root: Path, graph_stack: GraphService, tmp_path: Path

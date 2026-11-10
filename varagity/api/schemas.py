@@ -1255,10 +1255,11 @@ class BundleOut(BaseModel):
     """One bundle file in ``GET /api/backups/{corpus}`` (ADR-019).
 
     The verdict fields are the *cheap* check — the zip's directory and its
-    manifest, never a hash (a restore hashes every member before it touches
-    a store). A bundle damaged inside an intact zip therefore lists as
-    restorable until a restore refuses it; from then on, until its size or
-    mtime changes, it lists as damaged.
+    manifest, never a hash (a restore hashes every member as it loads it,
+    before anything takes effect). A bundle damaged inside an intact zip
+    therefore lists as restorable until a restore fails on it; from then
+    on, until its size or mtime changes, it lists as damaged (and a
+    restore of it is refused up front).
 
     Attributes:
         name: The bundle's file name in the corpus's ``varagity-exports/``
