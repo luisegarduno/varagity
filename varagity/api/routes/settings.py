@@ -19,6 +19,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import ValidationError
 
+from varagity.api.corpus_gate import CorpusGate, get_corpus_gates
 from varagity.api.deps import get_app_settings_store, get_vector_store
 from varagity.api.runtime_settings import (
     OVERRIDABLE,
@@ -38,6 +39,7 @@ router = APIRouter(tags=["settings"])
 
 SettingsStoreDep = Annotated[AppSettingsStore, Depends(get_app_settings_store)]
 VectorStoreDep = Annotated[ContextualVectorDB, Depends(get_vector_store)]
+GatesDep = Annotated[dict[str, CorpusGate], Depends(get_corpus_gates)]
 
 
 def _catalog(
@@ -91,7 +93,10 @@ def read_settings(store: SettingsStoreDep) -> SettingsResponse:
 
 @router.patch("/api/settings")
 def patch_settings(
-    payload: SettingsPatchRequest, store: SettingsStoreDep, vector_store: VectorStoreDep
+    payload: SettingsPatchRequest,
+    store: SettingsStoreDep,
+    vector_store: VectorStoreDep,
+    gates: GatesDep,
 ) -> SettingsResponse:
     """Apply, validate, and persist runtime setting overrides.
 
@@ -104,6 +109,8 @@ def patch_settings(
         payload: The overrides to set or clear.
         store: The per-request app-settings store (persistence + flag).
         vector_store: The vector store (the corpus-emptiness check).
+        gates: The process's per-corpus write gates — during a backup
+            restore the emptiness check is skipped (see below).
 
     Returns:
         The full post-patch catalog; ``corpus_stale`` reports whether a
@@ -159,7 +166,18 @@ def patch_settings(
         )
         corpus_stale = store.is_corpus_stale()
         graph_stale = store.is_graph_stale()
-        if changed_reingest and not corpus_stale and vector_store.document_count() > 0:
+        # During a backup restore the tables are held by its TRUNCATE until it
+        # commits, so counting them would hang this request for the whole
+        # load — and the answer is moot: the restore ends by writing the flag
+        # its bundle implies, judged against the settings current *then*
+        # (ADR-019), so this change is accounted for either way. Flagging now
+        # covers a restore that rolls back and leaves the previous rows.
+        restoring = gates["rag"].holder == "restore"
+        if (
+            changed_reingest
+            and not corpus_stale
+            and (restoring or vector_store.document_count() > 0)
+        ):
             store.set_corpus_stale(True)
             corpus_stale = True
             logger.info(

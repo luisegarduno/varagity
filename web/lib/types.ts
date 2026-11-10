@@ -302,6 +302,8 @@ export interface paths {
          *         payload: The overrides to set or clear.
          *         store: The per-request app-settings store (persistence + flag).
          *         vector_store: The vector store (the corpus-emptiness check).
+         *         gates: The process's per-corpus write gates — during a backup
+         *             restore the emptiness check is skipped (see below).
          *
          *     Returns:
          *         The full post-patch catalog; ``corpus_stale`` reports whether a
@@ -339,6 +341,11 @@ export interface paths {
          *
          *     Returns:
          *         One entry per document, newest ingest first.
+         *
+         *     Raises:
+         *         HTTPException: ``503 corpus_restoring`` while a backup restore
+         *             replaces the corpus (its ``TRUNCATE`` holds the table until it
+         *             commits).
          */
         get: operations["list_documents_api_documents_get"];
         put?: never;
@@ -522,7 +529,9 @@ export interface paths {
          *     Raises:
          *         HTTPException: ``404 document_not_found`` for an unknown id (the
          *             one non-degradable condition: there is nothing to fall back
-         *             *to* — the GUI shows full text without asking again).
+         *             *to* — the GUI shows full text without asking again); ``503
+         *             corpus_restoring`` while a backup restore replaces the corpus
+         *             (the GUI falls back to full text, as for any failed locate).
          */
         post: operations["locate_preview_api_documents__doc_id__preview_locate_post"];
         delete?: never;
@@ -564,7 +573,8 @@ export interface paths {
          *             ``unsupported_type`` | ``file_missing`` | ``file_changed`` |
          *             ``conversion_unavailable`` | ``conversion_failed``) when the
          *             document can't resolve; ``404 page_out_of_range`` beyond the
-         *             last page.
+         *             last page; ``503 corpus_restoring`` while a backup restore
+         *             replaces the corpus.
          */
         get: operations["preview_page_api_documents__doc_id__preview_page__page__get"];
         put?: never;
@@ -3640,6 +3650,15 @@ export interface operations {
                     "application/json": components["schemas"]["DocumentOut"][];
                 };
             };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     upload_documents_api_documents_post: {
@@ -3803,6 +3822,15 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     preview_page_api_documents__doc_id__preview_page__page__get: {
@@ -3833,6 +3861,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

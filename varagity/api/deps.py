@@ -6,16 +6,24 @@ injectable ``retriever``/``llm`` parameters. The health probes back both
 ``GET /api/health`` (report) and the chat preflight (clean ``503`` with a
 machine-readable code *before* the SSE stream opens — once the 200 headers
 flush, status can't change; spec_v2 plan decision #7).
+
+It is also where a corpus's write gate turns into HTTP (ADR-019): the one
+``409 corpus_busy`` envelope every start and delete route answers with, and
+the ``503 corpus_restoring`` a reader gets while a backup restore replaces
+the corpus it reads — :func:`require_rag_readable` is that refusal as a
+dependency, for every route that queries ``documents``/``chunks``.
 """
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Collection, Iterator
+from typing import Annotated
 
 import httpx
 import psycopg
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 
+from varagity.api.corpus_gate import CorpusBusy, CorpusGate, Operation, get_corpus_gates
 from varagity.api.schemas import ServiceHealth
 from varagity.chat import get_chat_engine
 from varagity.chat.base import ChatEngine
@@ -430,3 +438,90 @@ def get_backup_preflight() -> Callable[[str, str], Awaitable[None]]:
         :func:`require_backup_services`, called with ``(corpus, operation)``.
     """
     return require_backup_services
+
+
+# How a refusal names each corpus to the person asking.
+_CORPUS_NOUNS = {"rag": "document corpus", "graph": "message graph"}
+
+
+def corpus_busy_error(error: CorpusBusy) -> HTTPException:
+    """Build the structured ``409 corpus_busy`` for a corpus another operation holds.
+
+    The one envelope every route uses — an ingest or build start, a backup
+    start, a document or graph-source delete — so the code and the message
+    (which names the holder) never drift between them.
+
+    Args:
+        error: The gate's refusal.
+
+    Returns:
+        The ``409 corpus_busy`` to raise.
+    """
+    return HTTPException(status_code=409, detail={"code": "corpus_busy", "message": str(error)})
+
+
+def refuse_corpus_busy(gate: CorpusGate, operations: Collection[Operation]) -> None:
+    """Answer ``409 corpus_busy`` while one of ``operations`` holds the corpus.
+
+    For routes that write outside any run (the deletes) and so conflict
+    with only some of the gate's holders; checked before any store is
+    touched, without claiming the corpus.
+
+    Args:
+        gate: The corpus's write gate.
+        operations: The holders that refuse the request.
+
+    Raises:
+        HTTPException: ``409 corpus_busy``, naming the holder.
+    """
+    try:
+        gate.ensure_not_held_by(operations)
+    except CorpusBusy as error:
+        raise corpus_busy_error(error) from error
+
+
+def refuse_corpus_restoring(gate: CorpusGate) -> None:
+    """Answer ``503 corpus_restoring`` while a backup restore holds the corpus.
+
+    A wait, not a fault: until the restore commits (RAG) or swaps the graph
+    in, the corpus is empty, half-loaded, or about to be replaced — and a
+    RAG restore's ``TRUNCATE`` holds both tables, so a query would hang for
+    the whole load instead of answering.
+
+    Args:
+        gate: The write gate of the corpus the request would read.
+
+    Raises:
+        HTTPException: ``503 corpus_restoring``, naming the corpus.
+    """
+    if gate.holder == "restore":
+        noun = _CORPUS_NOUNS.get(gate.corpus, gate.corpus)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "corpus_restoring",
+                "message": (
+                    f"the {noun} is being restored from a backup — "
+                    "ask again when the restore finishes"
+                ),
+            },
+        )
+
+
+def require_rag_readable(
+    gates: Annotated[dict[str, CorpusGate], Depends(get_corpus_gates)],
+) -> None:
+    """Dependency: refuse a ``documents``/``chunks`` read while a RAG restore runs.
+
+    Attached to every route that queries those tables (the document list,
+    the page previews), so none of them parks a worker thread on the
+    restore's table lock for the length of the load.
+
+    Args:
+        gates: The process's per-corpus write gates.
+
+    Raises:
+        HTTPException: ``503 corpus_restoring`` while a restore holds the
+            document corpus.
+    """
+    refuse_corpus_restoring(gates["rag"])

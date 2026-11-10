@@ -22,7 +22,9 @@ is the same operation over a set (the corpus table's multi-select): the
 same ordering applied set-wise, in one round trip per store instead of one
 per document. Both deletes answer ``409 corpus_busy`` while a backup export
 or restore holds the corpus (ADR-019) — a restore is replacing the very
-rows a delete would remove.
+rows a delete would remove — and every route that reads the tables (the
+list, the previews) answers ``503 corpus_restoring`` during a restore
+rather than wait out its ``TRUNCATE`` for the length of the load.
 
 The ``…/preview/locate`` + ``…/preview/page/{page}`` pair (ADR-010) backs
 the evidence panel's page preview: locate scores the source document's
@@ -45,8 +47,13 @@ import pypdfium2 as pdfium
 from elastic_transport import TransportError
 from fastapi import APIRouter, Depends, Form, HTTPException, Response, UploadFile
 
-from varagity.api.corpus_gate import CorpusBusy, CorpusGate, get_corpus_gates
-from varagity.api.deps import get_bm25_store, get_vector_store
+from varagity.api.corpus_gate import CorpusGate, Operation, get_corpus_gates
+from varagity.api.deps import (
+    get_bm25_store,
+    get_vector_store,
+    refuse_corpus_busy,
+    require_rag_readable,
+)
 from varagity.api.schemas import (
     DocumentBulkDeleteRequest,
     DocumentBulkDeleteResponse,
@@ -77,7 +84,7 @@ GatesDep = Annotated[dict[str, CorpusGate], Depends(get_corpus_gates)]
 # The operations whose hold on the corpus refuses a delete: a backup's. An
 # ingest holding the gate does not — deletes beside an ingest are as they
 # always were.
-_DELETE_BLOCKING = frozenset({"export", "restore"})
+_DELETE_BLOCKING: frozenset[Operation] = frozenset({"export", "restore"})
 
 # Uploads stream to disk in slices so an oversized file aborts at the cap
 # instead of buffering whole.
@@ -495,7 +502,11 @@ def upload_documents(
     return UploadResponse(files=results)
 
 
-@router.get("/api/documents")
+@router.get(
+    "/api/documents",
+    dependencies=[Depends(require_rag_readable)],
+    responses={503: {"model": ErrorResponse}},
+)
 def list_documents(store: VectorStoreDep) -> list[DocumentOut]:
     """List every ingested document (the corpus-management table).
 
@@ -510,6 +521,11 @@ def list_documents(store: VectorStoreDep) -> list[DocumentOut]:
 
     Returns:
         One entry per document, newest ingest first.
+
+    Raises:
+        HTTPException: ``503 corpus_restoring`` while a backup restore
+            replaces the corpus (its ``TRUNCATE`` holds the table until it
+            commits).
     """
     docs_root = Path(get_settings().DOCS_PATH).resolve()
     return [
@@ -579,26 +595,6 @@ def _remove_source_file(info: DocumentInfo) -> bool:
     return True
 
 
-def _refuse_during_backup(gates: dict[str, CorpusGate]) -> None:
-    """Answer ``409`` while a backup export or restore holds the corpus.
-
-    Checked before any store is touched — a restore's ``TRUNCATE`` holds the
-    tables, so even the existence lookup would wait for it.
-
-    Args:
-        gates: The process's per-corpus write gates.
-
-    Raises:
-        HTTPException: ``409 corpus_busy``, naming the backup.
-    """
-    holder = gates["rag"].holder
-    if holder in _DELETE_BLOCKING:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "corpus_busy", "message": str(CorpusBusy("rag", holder))},
-        )
-
-
 def _es_unreachable(error: TransportError) -> HTTPException:
     """Build the structured 503 for a downed Elasticsearch.
 
@@ -654,7 +650,9 @@ def delete_document(
             ``503 es_unreachable`` when Elasticsearch is down (nothing
             deleted — retry when it returns).
     """
-    _refuse_during_backup(gates)
+    # Before any store is touched: a restore's TRUNCATE holds the tables, so
+    # even the existence lookup below would wait for it.
+    refuse_corpus_busy(gates["rag"], _DELETE_BLOCKING)
     documents = {info.doc_id: info for info in store.list_documents()}
     info = documents.get(doc_id)
     if info is None:
@@ -722,7 +720,9 @@ def delete_documents(
             holds the corpus; ``503 es_unreachable`` when Elasticsearch is
             down (nothing deleted — retry when it returns).
     """
-    _refuse_during_backup(gates)
+    # Before any store is touched: a restore's TRUNCATE holds the tables, so
+    # even the existence lookup below would wait for it.
+    refuse_corpus_busy(gates["rag"], _DELETE_BLOCKING)
     documents = {info.doc_id: info for info in store.list_documents()}
     requested = list(dict.fromkeys(payload.doc_ids))  # collapse dupes, keep order
     targets = [documents[doc_id] for doc_id in requested if doc_id in documents]
@@ -775,7 +775,11 @@ def _get_document_or_404(store: ContextualVectorDB, doc_id: str) -> DocumentInfo
     return info
 
 
-@router.post("/api/documents/{doc_id}/preview/locate")
+@router.post(
+    "/api/documents/{doc_id}/preview/locate",
+    dependencies=[Depends(require_rag_readable)],
+    responses={503: {"model": ErrorResponse}},
+)
 def locate_preview(
     doc_id: str, payload: PreviewLocateRequest, store: VectorStoreDep
 ) -> PreviewLocateResponse:
@@ -800,7 +804,9 @@ def locate_preview(
     Raises:
         HTTPException: ``404 document_not_found`` for an unknown id (the
             one non-degradable condition: there is nothing to fall back
-            *to* — the GUI shows full text without asking again).
+            *to* — the GUI shows full text without asking again); ``503
+            corpus_restoring`` while a backup restore replaces the corpus
+            (the GUI falls back to full text, as for any failed locate).
     """
     info = _get_document_or_404(store, doc_id)
     settings = get_settings()
@@ -830,7 +836,11 @@ def locate_preview(
     )
 
 
-@router.get("/api/documents/{doc_id}/preview/page/{page}")
+@router.get(
+    "/api/documents/{doc_id}/preview/page/{page}",
+    dependencies=[Depends(require_rag_readable)],
+    responses={503: {"model": ErrorResponse}},
+)
 def preview_page(doc_id: str, page: int, store: VectorStoreDep) -> Response:
     """Serve one rendered page of a source document as a PNG.
 
@@ -856,7 +866,8 @@ def preview_page(doc_id: str, page: int, store: VectorStoreDep) -> Response:
             ``unsupported_type`` | ``file_missing`` | ``file_changed`` |
             ``conversion_unavailable`` | ``conversion_failed``) when the
             document can't resolve; ``404 page_out_of_range`` beyond the
-            last page.
+            last page; ``503 corpus_restoring`` while a backup restore
+            replaces the corpus.
     """
     info = _get_document_or_404(store, doc_id)
     settings = get_settings()

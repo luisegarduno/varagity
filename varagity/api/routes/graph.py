@@ -61,8 +61,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
-from varagity.api.corpus_gate import CorpusBusy, CorpusGate, get_corpus_gates
-from varagity.api.deps import get_app_settings_store, get_graph_build_preflight
+from varagity.api.corpus_gate import CorpusBusy, CorpusGate, Operation, get_corpus_gates
+from varagity.api.deps import (
+    corpus_busy_error,
+    get_app_settings_store,
+    get_graph_build_preflight,
+    refuse_corpus_busy,
+)
 from varagity.api.graph_runner import (
     GraphBuildAlreadyRunning,
     GraphBuildRunner,
@@ -117,6 +122,11 @@ RunnerDep = Annotated[GraphBuildRunner, Depends(get_graph_build_runner)]
 ServiceDep = Annotated[GraphService, Depends(get_graph_service)]
 SettingsStoreDep = Annotated[AppSettingsStore, Depends(get_app_settings_store)]
 GatesDep = Annotated[dict[str, CorpusGate], Depends(get_corpus_gates)]
+
+# The hold on the graph that refuses a source delete: a restore's. It ends by
+# writing the flag its bundle recorded, which would silently undo the delete's
+# stale flag; an export, a build or an upload beside a delete are fine.
+_DELETE_BLOCKING: frozenset[Operation] = frozenset({"restore"})
 
 # Sidecars a live SQLite database keeps beside itself. They carry the most
 # recent messages, so they must be uploadable — but they are not databases
@@ -374,11 +384,7 @@ def delete_graph_document(
             anything in the reserved ``varagity-exports/`` folder (a backup
             bundle is not a graph source, whatever path reaches it).
     """
-    if gates["graph"].holder == "restore":
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "corpus_busy", "message": str(CorpusBusy("graph", "restore"))},
-        )
+    refuse_corpus_busy(gates["graph"], _DELETE_BLOCKING)
     graph_root = Path(get_settings().GRAPH_DOCS_PATH).resolve()
     target = resolve_contained(graph_root / name, graph_root)
     if target is None or not target.is_file() or is_exports_path(target.relative_to(graph_root)):
@@ -452,10 +458,7 @@ async def start_graph_build(
             detail={"code": "graph_build_running", "message": str(error)},
         ) from error
     except CorpusBusy as error:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "corpus_busy", "message": str(error)},
-        ) from error
+        raise corpus_busy_error(error) from error
 
 
 @router.get("/api/graph/build/status", response_class=EventSourceResponse)

@@ -3699,7 +3699,7 @@
     },
     "/api/documents": {
       "get": {
-        "description": "List every ingested document (the corpus-management table).\n\nFiles uploaded but not yet ingested don't appear here \u2014 the ``documents``\ntable records ingests; the GUI pairs this list with the upload outcomes\nit already holds. Each entry carries its ``relative_path`` under\n``DOCS_PATH`` (``None`` for sources living elsewhere) so the GUI can\ngroup the table by the folders a folder upload created.\n\nArgs:\n    store: The per-request vector store.\n\nReturns:\n    One entry per document, newest ingest first.",
+        "description": "List every ingested document (the corpus-management table).\n\nFiles uploaded but not yet ingested don't appear here \u2014 the ``documents``\ntable records ingests; the GUI pairs this list with the upload outcomes\nit already holds. Each entry carries its ``relative_path`` under\n``DOCS_PATH`` (``None`` for sources living elsewhere) so the GUI can\ngroup the table by the folders a folder upload created.\n\nArgs:\n    store: The per-request vector store.\n\nReturns:\n    One entry per document, newest ingest first.\n\nRaises:\n    HTTPException: ``503 corpus_restoring`` while a backup restore\n        replaces the corpus (its ``TRUNCATE`` holds the table until it\n        commits).",
         "operationId": "list_documents_api_documents_get",
         "responses": {
           "200": {
@@ -3715,6 +3715,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "List Documents",
@@ -3902,7 +3912,7 @@
     },
     "/api/documents/{doc_id}/preview/locate": {
       "post": {
-        "description": "Find the source page containing a chunk's text, with highlight rects.\n\nThe evidence panel's locate step (ADR-010): resolve the document to an\nopenable PDF (containment + content-hash verified; PPTX via the cached\nconversion), score its pages by word coverage, and return the best page\nplus normalized highlight rectangles. Every degradable condition \u2014 kill\nswitch, unsupported format, missing/edited file, unavailable converter,\nno textual match \u2014 answers ``200 available:false`` with its reason; the\nGUI falls back to the full-text view.\n\nArgs:\n    doc_id: The chunk's parent document.\n    payload: The chunk text to locate.\n    store: The per-request vector store.\n\nReturns:\n    The located page, rects, and coverage \u2014 or the degrade reason.\n\nRaises:\n    HTTPException: ``404 document_not_found`` for an unknown id (the\n        one non-degradable condition: there is nothing to fall back\n        *to* \u2014 the GUI shows full text without asking again).",
+        "description": "Find the source page containing a chunk's text, with highlight rects.\n\nThe evidence panel's locate step (ADR-010): resolve the document to an\nopenable PDF (containment + content-hash verified; PPTX via the cached\nconversion), score its pages by word coverage, and return the best page\nplus normalized highlight rectangles. Every degradable condition \u2014 kill\nswitch, unsupported format, missing/edited file, unavailable converter,\nno textual match \u2014 answers ``200 available:false`` with its reason; the\nGUI falls back to the full-text view.\n\nArgs:\n    doc_id: The chunk's parent document.\n    payload: The chunk text to locate.\n    store: The per-request vector store.\n\nReturns:\n    The located page, rects, and coverage \u2014 or the degrade reason.\n\nRaises:\n    HTTPException: ``404 document_not_found`` for an unknown id (the\n        one non-degradable condition: there is nothing to fall back\n        *to* \u2014 the GUI shows full text without asking again); ``503\n        corpus_restoring`` while a backup restore replaces the corpus\n        (the GUI falls back to full text, as for any failed locate).",
         "operationId": "locate_preview_api_documents__doc_id__preview_locate_post",
         "parameters": [
           {
@@ -3945,6 +3955,16 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Locate Preview",
@@ -3955,7 +3975,7 @@
     },
     "/api/documents/{doc_id}/preview/page/{page}": {
       "get": {
-        "description": "Serve one rendered page of a source document as a PNG.\n\nThe image half of the preview pair (ADR-010), immutable-cacheable:\n``doc_id`` is content-hashed and the resolution step re-verifies the\non-disk ``content_hash`` before rendering, so a drifted file 404s\n(``file_changed``) rather than serving a lying image. Degradable\nreasons are 404 codes here \u2014 an ``<img>`` can't read a JSON envelope,\nand the client only requests pages a successful locate named.\n\nArgs:\n    doc_id: The document to render.\n    page: 1-based page number (a locate response's ``page``).\n    store: The per-request vector store.\n\nReturns:\n    The PNG at ``PREVIEW_RENDER_WIDTH`` pixels wide, marked\n    ``Cache-Control: public, max-age=31536000, immutable``.\n\nRaises:\n    HTTPException: ``404 document_not_found`` for an unknown id; ``404``\n        with the degrade reason as its code (``preview_disabled`` |\n        ``unsupported_type`` | ``file_missing`` | ``file_changed`` |\n        ``conversion_unavailable`` | ``conversion_failed``) when the\n        document can't resolve; ``404 page_out_of_range`` beyond the\n        last page.",
+        "description": "Serve one rendered page of a source document as a PNG.\n\nThe image half of the preview pair (ADR-010), immutable-cacheable:\n``doc_id`` is content-hashed and the resolution step re-verifies the\non-disk ``content_hash`` before rendering, so a drifted file 404s\n(``file_changed``) rather than serving a lying image. Degradable\nreasons are 404 codes here \u2014 an ``<img>`` can't read a JSON envelope,\nand the client only requests pages a successful locate named.\n\nArgs:\n    doc_id: The document to render.\n    page: 1-based page number (a locate response's ``page``).\n    store: The per-request vector store.\n\nReturns:\n    The PNG at ``PREVIEW_RENDER_WIDTH`` pixels wide, marked\n    ``Cache-Control: public, max-age=31536000, immutable``.\n\nRaises:\n    HTTPException: ``404 document_not_found`` for an unknown id; ``404``\n        with the degrade reason as its code (``preview_disabled`` |\n        ``unsupported_type`` | ``file_missing`` | ``file_changed`` |\n        ``conversion_unavailable`` | ``conversion_failed``) when the\n        document can't resolve; ``404 page_out_of_range`` beyond the\n        last page; ``503 corpus_restoring`` while a backup restore\n        replaces the corpus.",
         "operationId": "preview_page_api_documents__doc_id__preview_page__page__get",
         "parameters": [
           {
@@ -3995,6 +4015,16 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Preview Page",
@@ -4659,7 +4689,7 @@
         ]
       },
       "patch": {
-        "description": "Apply, validate, and persist runtime setting overrides.\n\nA ``None`` value clears that override (reverting to the env value).\nValidation runs on the *merged whole* through every config validator,\nso linked constraints (the fusion weight pair, the rerank bounds) hold\nexactly as they do for ``.env`` \u2014 an invalid patch changes nothing.\n\nArgs:\n    payload: The overrides to set or clear.\n    store: The per-request app-settings store (persistence + flag).\n    vector_store: The vector store (the corpus-emptiness check).\n\nReturns:\n    The full post-patch catalog; ``corpus_stale`` reports whether a\n    reingest is now needed.\n\nRaises:\n    HTTPException: ``422 unknown_setting`` for a name outside the\n        catalog; ``422 invalid_settings`` when the merged settings fail\n        validation; ``503 postgres_unreachable`` if persistence fails\n        (the overrides are rolled back \u2014 the process never diverges\n        from the table).",
+        "description": "Apply, validate, and persist runtime setting overrides.\n\nA ``None`` value clears that override (reverting to the env value).\nValidation runs on the *merged whole* through every config validator,\nso linked constraints (the fusion weight pair, the rerank bounds) hold\nexactly as they do for ``.env`` \u2014 an invalid patch changes nothing.\n\nArgs:\n    payload: The overrides to set or clear.\n    store: The per-request app-settings store (persistence + flag).\n    vector_store: The vector store (the corpus-emptiness check).\n    gates: The process's per-corpus write gates \u2014 during a backup\n        restore the emptiness check is skipped (see below).\n\nReturns:\n    The full post-patch catalog; ``corpus_stale`` reports whether a\n    reingest is now needed.\n\nRaises:\n    HTTPException: ``422 unknown_setting`` for a name outside the\n        catalog; ``422 invalid_settings`` when the merged settings fail\n        validation; ``503 postgres_unreachable`` if persistence fails\n        (the overrides are rolled back \u2014 the process never diverges\n        from the table).",
         "operationId": "patch_settings_api_settings_patch",
         "requestBody": {
           "content": {

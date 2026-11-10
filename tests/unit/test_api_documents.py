@@ -685,6 +685,50 @@ class TestDeleteDuringABackup:
         assert vector.deleted == ["d1"]
 
 
+class UntouchableVectorStore(FakeVectorStore):
+    """A store any query on would fail the test — the restore's TRUNCATE would hang it."""
+
+    def list_documents(self) -> list[DocumentInfo]:
+        raise AssertionError("queried the tables during a restore")
+
+    def get_document(self, doc_id: str) -> DocumentInfo | None:
+        raise AssertionError("queried the tables during a restore")
+
+
+class TestReadsDuringARestore:
+    """Reads of the tables answer 503 corpus_restoring during a RAG restore (ADR-019)."""
+
+    READS = [
+        ("GET", "/api/documents", None),
+        ("POST", "/api/documents/d1/preview/locate", {"text": "some chunk"}),
+        ("GET", "/api/documents/d1/preview/page/1", None),
+    ]
+
+    @pytest.mark.parametrize(("method", "path", "body"), READS)
+    async def test_a_restore_refuses_every_read_before_any_query(
+        self, docs_root: Path, method: str, path: str, body: dict[str, str] | None
+    ) -> None:
+        """★ Its TRUNCATE holds the tables for the whole load: a query would hang there."""
+        app = make_app(
+            vector=UntouchableVectorStore([make_info("d1", str(docs_root / "a.pdf"))]),
+            holder="restore",
+        )
+        response = await request(app, method, path, json=body)
+        assert response.status_code == 503
+        error = response.json()["error"]
+        assert error["code"] == "corpus_restoring"
+        assert "the document corpus is being restored" in error["message"]
+
+    @pytest.mark.parametrize("holder", ["export", "ingest"])
+    async def test_other_holders_leave_the_list_readable(
+        self, docs_root: Path, holder: str
+    ) -> None:
+        vector = FakeVectorStore([make_info("d1", str(docs_root / "a.txt"))])
+        response = await request(make_app(vector=vector, holder=holder), "GET", "/api/documents")
+        assert response.status_code == 200
+        assert [entry["doc_id"] for entry in response.json()] == ["d1"]
+
+
 class TestBulkDelete:
     async def test_deletes_the_whole_set_from_both_stores(self, docs_root: Path) -> None:
         vector = FakeVectorStore(

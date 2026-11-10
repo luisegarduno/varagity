@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 
 from varagity.api import runtime_settings
+from varagity.api.corpus_gate import CorpusGate, get_corpus_gates
 from varagity.api.deps import get_app_settings_store, get_vector_store
 from varagity.api.main import create_app
 from varagity.api.runtime_settings import OVERRIDABLE
@@ -237,6 +238,34 @@ class TestCorpusStale:
         response = await patch_settings(app, {"CHUNKING_STRATEGY": current})
         assert response.json()["corpus_stale"] is False
         assert store_state["stale"] is False
+
+    async def test_a_change_during_a_restore_flags_stale_without_counting(
+        self, store_state: dict[str, Any]
+    ) -> None:
+        """★ The restore's TRUNCATE holds the table: counting it would hang the PATCH.
+
+        The flag is set without the count — the restore then writes the flag
+        its bundle implies against the settings current at its end, and a
+        restore that rolls back leaves the previous rows, which this change
+        does make stale.
+        """
+
+        class UncountableStore:
+            def document_count(self) -> int:
+                raise AssertionError("counted the documents table during a restore")
+
+        gates = {"rag": CorpusGate("rag"), "graph": CorpusGate("graph")}
+        gates["rag"].claim("restore")
+        application = create_app()
+        application.dependency_overrides[get_app_settings_store] = lambda: FakeAppSettingsStore(
+            store_state
+        )
+        application.dependency_overrides[get_vector_store] = lambda: UncountableStore()
+        application.dependency_overrides[get_corpus_gates] = lambda: gates
+        response = await patch_settings(application, {"CHUNKING_STRATEGY": "token_based"})
+        assert response.status_code == 200
+        assert response.json()["corpus_stale"] is True
+        assert store_state["stale"] is True
 
     async def test_empty_corpus_never_goes_stale(self, store_state: dict[str, Any]) -> None:
         application = create_app()

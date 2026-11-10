@@ -27,6 +27,7 @@ apart. The graph needs no such half — its single writer *is* this process.
 """
 
 import threading
+from collections.abc import Collection
 from typing import Literal
 
 Operation = Literal["ingest", "build", "export", "restore"]
@@ -110,6 +111,23 @@ class CorpusGate:
         """
         holder = self.holder
         if holder is not None:
+            raise CorpusBusy(self.corpus, holder)
+
+    def ensure_not_held_by(self, operations: Collection[Operation]) -> None:
+        """Refuse at once if one of ``operations`` holds the corpus — without claiming it.
+
+        :meth:`ensure_free` narrowed to the operations a caller actually
+        conflicts with: a document delete is fine beside an ingest but not
+        beside a backup, a graph source delete only clashes with a restore.
+
+        Args:
+            operations: The holders that refuse the caller.
+
+        Raises:
+            CorpusBusy: If one of them holds the corpus.
+        """
+        holder = self.holder
+        if holder is not None and holder in operations:
             raise CorpusBusy(self.corpus, holder)
 
     @property
