@@ -59,6 +59,7 @@ from varagity.graph.records import (
     GraphStats,
 )
 from varagity.graph.sources.base import MessageBatch
+from varagity.paths import fsync_directory
 
 logger = logging.getLogger(__name__)
 
@@ -463,7 +464,7 @@ class GraphService:
             except Exception:
                 self._swap_back(staged, previous, had_previous=had_previous)
                 raise
-            _sync_directory(self._workdir.parent)
+            fsync_directory(self._workdir.parent)
             shutil.rmtree(replaced, ignore_errors=True)
             if replaced.exists(follow_symlinks=False):
                 logger.warning(
@@ -506,7 +507,7 @@ class GraphService:
         Raises:
             OSError: If a rename fails.
         """
-        _sync_directory(staged)  # the extracted names are durable before they go live
+        fsync_directory(staged)  # the extracted names are durable before they go live
         with self._open_lock:
             self._close_locked()
             had_previous = self._workdir.exists(follow_symlinks=False)
@@ -518,7 +519,7 @@ class GraphService:
                 if had_previous:
                     os.replace(previous, self._workdir)
                 raise
-        _sync_directory(self._workdir.parent)
+        fsync_directory(self._workdir.parent)
         return had_previous
 
     def _swap_back(self, staged: Path, previous: Path, *, had_previous: bool) -> None:
@@ -683,28 +684,6 @@ class _WriteLock:
             *exc_info: Ignored — the lock is released either way.
         """
         self._lock.release()
-
-
-def _sync_directory(directory: Path) -> None:
-    """Make the renames inside a directory durable by syncing it (best-effort).
-
-    A restore deletes the graph it replaced only after the swap; a rename
-    that a power loss could still undo after that delete would leave no
-    graph at all.
-
-    Args:
-        directory: The directory whose entries just changed.
-    """
-    try:
-        descriptor = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
 
 
 _default_service: GraphService | None = None
