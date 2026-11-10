@@ -11,8 +11,13 @@ corpus: :data:`EXPORTS_DIRNAME`, where backup bundles live (ADR-019).
 Discovery and the upload routes consult :func:`is_exports_path` rather than
 importing the backup package, so the rule "a bundle is never a source" has
 one definition for every reader of a corpus folder to share.
+
+And it holds :func:`fsync_directory`, the one durability helper both a
+bundle's publish and a graph restore's swap need: a rename only survives a
+power loss once its directory is synced.
 """
 
+import os
 from pathlib import Path, PurePath
 
 EXPORTS_DIRNAME = "varagity-exports"
@@ -96,3 +101,27 @@ def is_exports_path(relative: str | PurePath) -> bool:
     """
     parts = PurePath(relative).parts
     return bool(parts) and parts[0].casefold() == EXPORTS_DIRNAME
+
+
+def fsync_directory(directory: Path) -> None:
+    """Make the renames inside a directory durable by syncing it (best-effort).
+
+    A rename lands in the directory's own entries, so a file synced and then
+    renamed into place can still vanish after a power loss until the
+    directory is synced too. A bundle's publish and a graph restore's swap
+    both rely on it; a filesystem that refuses a directory sync is simply
+    skipped (the rename itself already happened).
+
+    Args:
+        directory: The directory whose entries just changed.
+    """
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)

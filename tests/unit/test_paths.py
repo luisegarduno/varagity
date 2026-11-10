@@ -5,11 +5,18 @@ corpus-list, delete, and preview sites share, so it carries dedicated tests
 for each branch of "resolve a path and confirm it stays under the root".
 """
 
+import os
 from pathlib import Path, PurePath, PurePosixPath
 
 import pytest
 
-from varagity.paths import EXPORTS_DIRNAME, is_exports_path, relative_to_root, resolve_contained
+from varagity.paths import (
+    EXPORTS_DIRNAME,
+    fsync_directory,
+    is_exports_path,
+    relative_to_root,
+    resolve_contained,
+)
 
 
 def test_contained_file_returns_the_resolved_path(tmp_path: Path) -> None:
@@ -110,3 +117,22 @@ class TestIsExportsPath:
 
 def test_the_reserved_folder_name() -> None:
     assert EXPORTS_DIRNAME == "varagity-exports"
+
+
+class TestFsyncDirectory:
+    def test_syncs_a_directory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        synced: list[int] = []
+        real_fsync = os.fsync
+        monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd))[1])
+        fsync_directory(tmp_path)
+        assert len(synced) == 1
+
+    def test_is_best_effort(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A rename already happened: a directory that can't be synced is no failure."""
+        fsync_directory(tmp_path / "missing")  # can't be opened
+
+        def refuse(fd: int) -> None:
+            raise OSError("EINVAL")
+
+        monkeypatch.setattr(os, "fsync", refuse)
+        fsync_directory(tmp_path)  # opened, refuses the sync

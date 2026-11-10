@@ -66,7 +66,7 @@ from pydantic import BaseModel, ValidationError
 
 from varagity.config import get_settings
 from varagity.graph.records import EngineFormat
-from varagity.paths import EXPORTS_DIRNAME, resolve_contained
+from varagity.paths import EXPORTS_DIRNAME, fsync_directory, resolve_contained
 
 logger = logging.getLogger(__name__)
 
@@ -721,7 +721,7 @@ def write_bundle(
     except BaseException:
         partial.unlink(missing_ok=True)
         raise
-    _fsync_directory(directory)
+    fsync_directory(directory)
     size = final.stat().st_size
     writer._publish(WrittenBundle(name=final.name, path=final, size_bytes=size, manifest=manifest))
     # DEBUG: the corpus export logs its own one-line summary at INFO.
@@ -739,24 +739,6 @@ def _fsync(path: Path) -> None:
     """
     with path.open("rb") as handle:
         os.fsync(handle.fileno())
-
-
-def _fsync_directory(directory: Path) -> None:
-    """Make a rename durable by syncing its directory (best-effort).
-
-    Args:
-        directory: The directory the rename happened in.
-    """
-    try:
-        descriptor = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
 
 
 def _unreadable(error: BaseException) -> BundleInvalid:
