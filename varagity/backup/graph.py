@@ -151,7 +151,13 @@ def _workdir_entries(workdir: Path) -> tuple[list[Path], list[tuple[str, str]]]:
     skipped: list[tuple[str, str]] = []
     if not workdir.is_dir():
         return files, skipped
-    for entry in sorted(workdir.iterdir(), key=lambda path: path.name):
+    try:
+        entries = sorted(workdir.iterdir(), key=lambda path: path.name)
+    except FileNotFoundError:
+        # Moved away since the check — a restore's swap renames the workdir
+        # aside for an instant, and the status poll lists it unlocked.
+        return files, skipped
+    for entry in entries:
         name = entry.name
         if is_temp_file(name):
             continue

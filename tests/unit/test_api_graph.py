@@ -1177,6 +1177,7 @@ class TestStatusRoute:
             "entities": None,
             "relations": None,
             "message_guids": None,
+            "workdir_files": 0,
             "last_build": None,
         }
 
@@ -1200,6 +1201,7 @@ class TestStatusRoute:
         body = response.json()
         assert (body["entities"], body["relations"], body["message_guids"]) == (347, 812, 2)
         assert body["documents"] == {"processed": 9, "failed": 1}
+        assert body["workdir_files"] == 1  # the summary sidecar save_summary wrote
 
     async def test_an_unopenable_engine_degrades_instead_of_500ing(
         self, graph_root: Path, tmp_path: Path, store: FakeSettingsStore
@@ -1213,6 +1215,31 @@ class TestStatusRoute:
         )
         assert response.status_code == 200
         assert response.json()["documents"] == {}
+
+    async def test_a_silent_graph_still_counts_its_files(
+        self, graph_root: Path, tmp_path: Path, store: FakeSettingsStore
+    ) -> None:
+        """★ No statuses and no summary, yet files to back up — and to replace.
+
+        The count follows the export's own rule (temp files and anything a
+        bundle can't carry are left out), so the panel's "nothing built yet"
+        and the export route's ``nothing_to_export`` can't disagree.
+        """
+        workdir = tmp_path / "lightrag"
+        workdir.mkdir()
+        (workdir / "kv_store_doc_status.json").write_text("{}")
+        (workdir / "graph_chunk_entity_relation.graphml").write_text("<graphml/>")
+        # An engine's in-flight write — never part of the graph, never counted.
+        (workdir / "kv_store_full_docs.json.tmp.1.2.3").write_text("{")
+        service = FakeService(workdir, statuses_raise=GraphUnavailable("storage is locked"))
+        runner, _ = make_runner(tmp_path)
+        body = (
+            await request(
+                make_app(runner=runner, service=service, store=store), "GET", "/api/graph/status"
+            )
+        ).json()
+        assert (body["documents"], body["entities"], body["message_guids"]) == ({}, None, None)
+        assert body["workdir_files"] == 2
 
     async def test_the_kill_switch_and_stale_flag_are_reported_honestly(
         self, graph_root: Path, tmp_path: Path, settings_env: Callable[..., None]

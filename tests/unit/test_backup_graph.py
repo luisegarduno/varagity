@@ -362,6 +362,20 @@ class TestWorkdirListing:
         ):
             assert f"not exporting {name} from the graph workdir — {why}" in warned
 
+    def test_a_workdir_moved_away_mid_listing_lists_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A restore's swap renames the workdir aside for an instant; a poll must not 500."""
+        workdir = tmp_path / "lightrag"
+        workdir.mkdir()
+        (workdir / "kv_store_doc_status.json").write_text("{}")
+
+        def vanished(self: Path) -> Any:
+            raise FileNotFoundError(str(self))
+
+        monkeypatch.setattr(Path, "iterdir", vanished)  # gone after the is_dir() check
+        assert workdir_files(workdir) == []
+
     def test_workdir_files_lists_what_the_export_packs(self, built: GraphService) -> None:
         names = [path.name for path in workdir_files(built.workdir)]
         assert names == sorted([*ENGINE_FILES, *SIDECARS])

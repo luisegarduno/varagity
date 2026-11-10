@@ -1709,7 +1709,7 @@
         "type": "object"
       },
       "GraphStatusOut": {
-        "description": "Response of ``GET /api/graph/status`` \u2014 the graph tab's poll surface.\n\nEvery size field is optional because \"nothing has been built here yet\"\nand \"the engine would not say\" are both real states, and reporting them\nas ``0`` would read like an empty graph (the honesty rule\n:class:`~varagity.graph.records.GraphStats` sets).\n\nAttributes:\n    enabled: The ``GRAPH_ENABLED`` kill switch.\n    stale: Whether a source file was deleted since the last rebuild.\n    building: Whether a build is running in this API process.\n    documents: The engine's document counts by status (its own\n        vocabulary: ``pending``, ``processing``, ``processed``,\n        ``failed``, \u2026); empty when nothing has been indexed.\n    entities: Entity count from the workdir's summary sidecar.\n    relations: Relation count from the same.\n    message_guids: Messages the workdir's manifest accounts for.\n    last_build: The current (or last) build run in this API process.",
+        "description": "Response of ``GET /api/graph/status`` \u2014 the graph tab's poll surface.\n\nEvery size field is optional because \"nothing has been built here yet\"\nand \"the engine would not say\" are both real states, and reporting them\nas ``0`` would read like an empty graph (the honesty rule\n:class:`~varagity.graph.records.GraphStats` sets).\n\nAttributes:\n    enabled: The ``GRAPH_ENABLED`` kill switch.\n    stale: Whether a source file was deleted since the last rebuild.\n    building: Whether a build is running in this API process.\n    documents: The engine's document counts by status (its own\n        vocabulary: ``pending``, ``processing``, ``processed``,\n        ``failed``, \u2026); empty when nothing has been indexed.\n    entities: Entity count from the workdir's summary sidecar.\n    relations: Relation count from the same.\n    message_guids: Messages the workdir's manifest accounts for.\n    workdir_files: Files in the engine's working directory that a\n        backup would copy (ADR-019) \u2014 ``0`` when nothing has been built.\n        The backup panel's \"nothing built yet\": the export route's own\n        ``nothing_to_export`` rule, so the two can never disagree (an\n        unopenable graph, or a first build killed before its summary,\n        still has files to back up and to replace).\n    last_build: The current (or last) build run in this API process.",
         "properties": {
           "building": {
             "title": "Building",
@@ -1773,6 +1773,11 @@
           "stale": {
             "title": "Stale",
             "type": "boolean"
+          },
+          "workdir_files": {
+            "default": 0,
+            "title": "Workdir Files",
+            "type": "integer"
           }
         },
         "required": [
@@ -4424,7 +4429,7 @@
     },
     "/api/graph/status": {
       "get": {
-        "description": "Report the graph's size, staleness, and build state (the tab's poll).\n\nReads the workdir's summary sidecar rather than the graph itself, so a\npoll never walks a multi-megabyte graphml (stage-2 decision #18), and\nskips the engine entirely when nothing has been built here \u2014 an\nunbuilt graph must not make a status poll open a session and pay an\nengine's startup.\n\nArgs:\n    runner: The process-wide graph build runner (build state).\n    service: The process-wide graph service (document statuses).\n    store: The per-request app-settings store (the stale flag).\n\nReturns:\n    The status snapshot; every size field is ``None``/empty when\n    nothing has been indexed, never a zero that would read like an\n    empty graph.",
+        "description": "Report the graph's size, staleness, and build state (the tab's poll).\n\nReads the workdir's summary sidecar rather than the graph itself, so a\npoll never walks a multi-megabyte graphml (stage-2 decision #18), and\nskips the engine entirely when nothing has been built here \u2014 an\nunbuilt graph must not make a status poll open a session and pay an\nengine's startup. ``workdir_files`` lists the workdir (a directory\nread, no file opened) by the graph export's own rule, so the backup\npanel's \"nothing built yet\" can never disagree with the export route's\n``nothing_to_export``.\n\nArgs:\n    runner: The process-wide graph build runner (build state).\n    service: The process-wide graph service (document statuses).\n    store: The per-request app-settings store (the stale flag).\n\nReturns:\n    The status snapshot; every size field is ``None``/empty when\n    nothing has been indexed, never a zero that would read like an\n    empty graph.",
         "operationId": "graph_status_api_graph_status_get",
         "responses": {
           "200": {

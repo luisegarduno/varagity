@@ -437,9 +437,12 @@ export function describeGraphHolding(status: GraphStatus): string | null {
 }
 
 /**
- * Whether the graph is confirmed unbuilt — nothing counted anywhere, so
- * there is nothing to export (the server would answer `nothing_to_export`).
+ * Whether the graph is confirmed unbuilt — no file in its working directory,
+ * so nothing to export and nothing a restore would replace. The server's
+ * own `nothing_to_export` rule (`workdir_files`), not the size figures: a
+ * graph that won't open, or a first build killed before it wrote its
+ * summary, reports no sizes but still has files to back up — and to replace.
  */
 export function graphIsEmpty(status: GraphStatus): boolean {
-  return describeGraphHolding(status) === null;
+  return status.workdir_files === 0;
 }
