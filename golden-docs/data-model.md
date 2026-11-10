@@ -759,9 +759,11 @@ reads the bundle back:
   bundle the engine that wrote its files: it must be the engine
   `GRAPH_ENGINE` selects, from the same package, at the same major.minor
   version as this stack's (`running_engine_format()`, the engine's own
-  report). A restore then adds the sha256 of every member (`verify_bundle`)
-  and checks the digests again while it reads the members — into `COPY`,
-  or onto disk — so even a file swapped after verification can't go live.
+  report). A restore then checks the sha256 of every member while it reads
+  them — into `COPY`, or onto disk — its one read of the bundle; nothing
+  takes effect until every digest matched (the transaction commits, the
+  staged graph is swapped in), so a damaged bundle can never go live.
+  `verify_bundle` runs the same checks standalone, without restoring.
   A mismatch in the model, dimension, engine, corpus or version is
   **refused, never converted** (`bundle_incompatible`); anything unsound or
   damaged is `bundle_invalid`.

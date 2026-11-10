@@ -308,9 +308,11 @@ never point a host process at the live graph while the api container is up). See
   never a source), the graph source listing hides it, uploads refuse it (`reserved_path`),
   and the graph delete 404s it. Never
   put corpus files there, and never edit a bundle by hand — `bundle.json` records every
-  member's sha256, so Restore refuses a damaged bundle (`422 bundle_invalid`), and one from
-  another embedding model/dim, graph engine or engine major.minor is refused
-  (`422 bundle_incompatible`), never converted.
+  member's sha256, which the restore run checks as it loads (one read; nothing takes effect
+  until every member matched), so a damaged bundle fails its run with the corpus untouched
+  and is refused from then on (`422 bundle_invalid`); one from another embedding model/dim,
+  graph engine or engine major.minor is refused up front (`422 bundle_incompatible`),
+  never converted.
 - **Restore replaces, never merges**, and calls no model. RAG truncates and reloads both
   tables in one transaction, then rebuilds BM25 from the restored rows; the graph swaps its
   whole workdir, so `graphdata` needs room for two graphs mid-swap (an interrupted swap is

@@ -536,11 +536,19 @@ and a RAG restore run side by side.
   one-at-a-time rule *inside* the API process; for RAG, the advisory corpus
   lock (above) is its cross-process half — the graph needs none, since the
   API is its only writer.
-- **A restore refuses before it starts.** The route checks the gate, hashes
-  every member of the bundle (`verify_bundle` — for a graph bundle the
-  engine's format is judged too), and for RAG checks the corpus lock before
-  the `202`, so a bad bundle or a busy corpus is a clean `422`/`409`, never a
-  failed run.
+- **A restore refuses what it can see before it starts.** The route checks
+  the gate, the bundle's cheap verdict (for a graph bundle the engine's
+  format is judged too) and any damage an earlier restore of the file found,
+  and for RAG the corpus lock, before the `202` — a busy corpus or an
+  unsound bundle is a clean `409`/`422`. The member hashes are the run's:
+  it verifies every member as it loads it (one read of the bundle), so a
+  bundle damaged inside an intact zip fails its first run with the corpus
+  untouched — and the runner remembers it, so the list shows it damaged and
+  the route refuses it from then on.
+- **Each run relays only its own lines.** Both corpora's runs log to the one
+  `varagity.backup` namespace and may run side by side; a context variable
+  marks the worker's records so each feed carries its own run's, and the
+  namespace's INFO pin is shared by count.
 - **What the runner hands the flow.** For RAG it captures the
   reingest-affecting settings at start (in `app_settings`' env-string form)
   and passes them in — a *provider* of them to a restore — so

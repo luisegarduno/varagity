@@ -38,7 +38,7 @@ The code vocabulary, as built:
 | `modified_mismatch` | 422 | `POST /api/documents` when the `modified` form field (per-file last-modified epoch-ms; restamps each stored file's mtime so `file_modified_at` provenance survives the upload) doesn't pair 1:1 with `files`. Malformed *entries* are ignored per file, not errors. |
 | `too_many_files` / `batch_too_large` | 422 | `POST /api/documents` when the batch busts `UPLOAD_MAX_FILES` / `UPLOAD_MAX_TOTAL_MB` — rejected before any byte is written. Per-file problems (`invalid_path`, `path_too_deep`, `extension_not_allowed`, `file_too_large`, `reserved_path` — a path under, or a flat file named, the reserved `varagity-exports` backup folder — …) are **not** errors: they ride `UploadedFileOut.reason` inside the 201. |
 | `nothing_to_export` | 422 | `POST /api/backups/{corpus}/export` when the corpus holds no documents — or, for the graph, nothing has been built — an empty bundle is not a backup. |
-| `bundle_invalid` | 422 | `POST /api/backups/{corpus}/restore` for a bundle that isn't sound: no readable `bundle.json`, an unsafe member (`..`, an absolute path, a symlink), an unexpected, missing or unrecorded member, a member whose recorded size differs from the zip's, a vector matrix that disagrees with the chunk count, a graph bundle with no files — or a member whose bytes don't match their recorded sha256 (*damaged*: the list then shows that bundle as damaged until the file changes). Nothing was touched. |
+| `bundle_invalid` | 422 | `POST /api/backups/{corpus}/restore` for a bundle that isn't sound: no readable `bundle.json`, an unsafe member (`..`, an absolute path, a symlink), an unexpected, missing or unrecorded member, a member whose recorded size differs from the zip's, a vector matrix that disagrees with the chunk count, a graph bundle with no files — or one an earlier restore found *damaged* (a member whose bytes don't match their recorded sha256, or a line no row can be made from: the restore run checks those as it loads, fails with the corpus untouched, and the list then shows that bundle as damaged until the file changes). Nothing was touched. |
 | `bundle_incompatible` | 422 | `POST /api/backups/{corpus}/restore` for a sound bundle this stack must not restore: another bundle format version, another corpus, vectors from another embedding model or dimension — or a graph bundle another graph engine, package or **major.minor** version wrote (`Written by lightrag-hku 1.4.9 — this stack runs 1.5.4, whose files differ.`). Refused, never converted — neither store checks the model, so a mismatch would restore cleanly and then retrieve the wrong passages, and a graph's files are copied verbatim. |
 | `bundle_not_found` | 404 | `GET /api/backups/{corpus}/files/{name}` and `POST /api/backups/{corpus}/restore` for any name that is not a bundle file inside the corpus's `varagity-exports/` folder — hidden and in-flight `.partial` files, non-`.zip` names, and names (or symlinks) leading out of the folder included. |
 | `conversation_not_found` | 404 | `POST /api/chat` (pre-stream) and the conversation routes. |
@@ -179,21 +179,32 @@ Its refusals, in order, again all before the 202:
    (both for `rag`; postgres alone for `graph`, for its stale flag).
 3. `404 bundle_not_found` — no such bundle in the folder.
 4. `409 corpus_busy` — another operation holds the corpus. Checked before the
-   expensive step below.
-5. `422 bundle_invalid` / `bundle_incompatible` — the bundle's verdict (for a
-   graph bundle, the engine's file format included), plus the sha256 of
-   **every member** (the list never hashes; only this does). A sha256
-   mismatch is remembered in-process by name, size and mtime, so the list
-   then reports that bundle as damaged.
+   bundle is even opened.
+5. `422 bundle_invalid` / `bundle_incompatible` — the bundle's cheap verdict
+   (the list's own: its central directory and `bundle.json`, for a graph
+   bundle the engine's file format included), or a damage an earlier
+   restore of this very file found.
 6. `409 corpus_busy` — for `rag`, an ingest in another process holds the
    corpus's advisory lock.
 
+Neither the list nor this route hashes a member. The **run** checks the
+sha256 of every member as it loads the bundle — the restore's one read of
+it, with progress — and nothing takes effect until every member checked out
+(the RAG transaction commits after the load, the graph's staged copy is
+swapped in after the extraction). A bundle damaged inside an intact zip
+therefore fails its first run with the corpus untouched; that failure is
+remembered in-process by name, size and mtime, so the list then reports the
+bundle as damaged and the route refuses it with `422 bundle_invalid`.
+
 While a restore runs, `POST /api/chat` against that corpus answers `503
 corpus_restoring` — a graph turn before the graph's session is opened. For
-`rag`, `GET /api/documents` waits for the restore's commit and the document
-deletes answer `409 corpus_busy`; for `graph`, the source delete answers
-`409 corpus_busy`, and the status poll and the `/graph` reads that arrive
-mid-swap wait for it (seconds), then read the restored graph.
+`rag`, every route that reads the tables — `GET /api/documents` and the two
+preview routes — answers `503 corpus_restoring` too (the restore's
+`TRUNCATE` holds them until it commits, so a query would hang for the whole
+load), and the document deletes answer `409 corpus_busy`; for `graph`, the
+source delete answers `409 corpus_busy`, and the status poll and the
+`/graph` reads that arrive mid-swap wait for it (seconds), then read the
+restored graph.
 
 `GET /api/backups/{corpus}/status` has the ingest stream's **replay-from-frame-one**
 semantics. A subscriber gets the run's whole backlog, then live events until
