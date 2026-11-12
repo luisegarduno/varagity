@@ -84,6 +84,19 @@ discovery/parse/chunk are local and deterministic, so they carry none (below).
   `markdown_aware` additionally stamps each chunk's `heading_path`
   breadcrumb (e.g. `Harbor Operations > Dredging`) into its metadata,
   carried by `ChunkRecord` into both stores.
+- **One preamble per document.** `contextualize_chunks` fits the document
+  into the situating prompt's budget once, before its first chunk
+  (`fit_document_preamble` in `varagity/context/contextual.py`), and hands
+  that one preamble to every chunk: byte-identical prompt prefixes for
+  llama.cpp's cache, and the served token count is paid per document, not
+  per chunk. The budget is held in the **served model's** tokens. A document
+  of at most budget-many UTF-8 bytes fits as-is, uncounted. Otherwise
+  cl100k cuts first, then llama.cpp's `/tokenize` (server root, not `/v1`)
+  counts the cut and re-cuts it in proportion while it is over — typically
+  one re-cut for digit-dense text, which the served model splits one digit
+  per token. With no served count (server unreachable, not llama.cpp) the
+  preamble is the document's first budget-many UTF-8 bytes, which fits any
+  tokenizer: a shorter context, never a failed file.
 - **Retries in two layers, different scopes.** The model/store clients retry
   transient HTTP failures *within* one call (`tenacity`); the
   contextualize/embed/store **tasks** carry `retries=2` with exponential

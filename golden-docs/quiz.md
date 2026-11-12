@@ -334,14 +334,19 @@ out of scope for now; it gets its own set later.
       prompt see. So the BM25 index is contextual from its first document.
     - A document's chunks are contextualized sequentially so every call shares
       an identical prompt prefix and llama.cpp reuses its KV/prompt cache — a
-      throughput concern with a local server, not a billing one. A fixed chunk
-      allowance keeps the truncated document preamble byte-identical across a
-      document's chunks.
+      throughput concern with a local server, not a billing one. The preamble
+      is fitted **once per document** (`fit_document_preamble`) against a fixed
+      chunk allowance, so it is byte-identical across the document's chunks.
     - The preamble is budgeted at `LLM_CONTEXT_TOKENS − CONTEXTUALIZE_MAX_TOKENS
-      − 2048 − 640` tokens (≈11.6k on the shipped config); longer documents are
-      truncated with a warning. Generation runs under `CONTEXTUALIZE_MAX_TOKENS`
-      (2048), not the chat-sized cap, and an overrun cleans to an empty blurb —
-      degraded context, never a failed file.
+      − 2048 − 640` tokens (≈11.6k on the shipped config), counted in the
+      **served model's** tokens: cl100k makes the first cut, then llama.cpp's
+      `/tokenize` checks it and re-cuts while it is over. The served model gives
+      every digit its own token, so a digit-dense export counts ~1.45× its
+      cl100k estimate — a cl100k-sized cut once overflowed the window by
+      itself. With no served count, the preamble is the document's first
+      budget-many UTF-8 bytes (every token spans at least one). Generation runs
+      under `CONTEXTUALIZE_MAX_TOKENS` (2048), not the chat-sized cap, and an
+      overrun cleans to an empty blurb — degraded context, never a failed file.
     - `CONTEXTUALIZE=false` keeps the identity path (`context = None`,
       `contextualized_content = content`): the measured non-contextual baseline
       and a throughput knob. Toggling it does not change content hashes.

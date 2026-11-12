@@ -140,7 +140,11 @@ Concretely, per chunk at ingest time
   (pgvector) **and BM25-indexed** (Elasticsearch); the original `content` is
   preserved alongside;
 - a document's chunks are contextualized sequentially so llama.cpp reuses its
-  prompt cache across the shared document preamble (throughput, not billing).
+  prompt cache across the shared document preamble (throughput, not billing);
+- that preamble is fitted once per document, in the **served model's** tokens:
+  a cl100k first cut, then llama.cpp's `/tokenize` has the last word — cl100k
+  undercounts digit-dense text, which the served model splits one digit per
+  token ([ADR-003's amendment](adr/ADR-003-vertical-build-and-ops-choices.md#amendment-2026-11-11-the-served-tokenizer-fits-the-preamble)).
 
 `CONTEXTUALIZE=false` keeps the identity path (`contextualized_content =
 content`) — the measured non-contextual baseline of the
