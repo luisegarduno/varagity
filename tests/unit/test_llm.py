@@ -27,6 +27,8 @@ from varagity.tokens import count_tokens
 
 BASE_URL = "http://fake-llamacpp/v1"
 ENDPOINT = f"{BASE_URL}/chat/completions"
+# llama.cpp's own route lives at the server root, not under /v1.
+TOKENIZE = "http://fake-llamacpp/tokenize"
 
 
 def _client(**overrides: object) -> LLMClient:
@@ -101,6 +103,7 @@ def no_retry_wait() -> Iterator[None]:
     retryings = [
         LLMClient._create.retry,  # type: ignore[attr-defined]
         LLMClient._create_stream.retry,  # type: ignore[attr-defined]
+        LLMClient._post_tokenize.retry,  # type: ignore[attr-defined]
     ]
     originals = [retrying.wait for retrying in retryings]
     for retrying in retryings:
@@ -214,6 +217,79 @@ class TestRetries:
         with pytest.raises(openai.AuthenticationError):
             _client().generate([{"role": "user", "content": "q"}], verbose=0)
         assert route.call_count == 1
+
+
+class TestCountServedTokens:
+    """llama.cpp's /tokenize: the served model's own count, or None — never a raise."""
+
+    @respx.mock
+    def test_counts_at_the_server_root_with_the_api_key(self) -> None:
+        route = respx.post(TOKENIZE).mock(
+            return_value=httpx.Response(200, json={"tokens": [17, 15, 17, 19]})
+        )
+        assert _client(api_key="secret-token").count_served_tokens("2024") == 4
+        request = route.calls[0].request
+        assert json.loads(request.content) == {"content": "2024"}
+        assert request.headers["authorization"] == "Bearer secret-token"
+
+    @respx.mock
+    def test_trailing_slash_base_url_still_reaches_the_root(self) -> None:
+        route = respx.post(TOKENIZE).mock(return_value=httpx.Response(200, json={"tokens": [1]}))
+        assert _client(base_url=f"{BASE_URL}/").count_served_tokens("x") == 1
+        assert route.call_count == 1
+
+    @respx.mock
+    def test_transient_failure_is_retried(self, no_retry_wait: None) -> None:
+        route = respx.post(TOKENIZE)
+        route.side_effect = [
+            httpx.Response(503, json={"error": "loading model"}),
+            httpx.Response(200, json={"tokens": [1, 2]}),
+        ]
+        assert _client().count_served_tokens("ab") == 2
+        assert route.call_count == 2
+
+    @respx.mock
+    def test_unreachable_server_answers_none_and_asks_again_next_time(
+        self, no_retry_wait: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        route = respx.post(TOKENIZE).mock(side_effect=httpx.ConnectError("refused"))
+        client = _client()
+        assert client.count_served_tokens("x") is None
+        assert route.call_count == 4  # stop_after_attempt(4)
+        assert any("unreachable" in r.message for r in caplog.records)
+        # Transient trouble is not latched: the next count tries again.
+        assert client.count_served_tokens("x") is None
+        assert route.call_count == 8
+
+    @respx.mock
+    def test_5xx_exhaustion_answers_none(self, no_retry_wait: None) -> None:
+        route = respx.post(TOKENIZE).mock(return_value=httpx.Response(500, json={"error": "x"}))
+        assert _client().count_served_tokens("x") is None
+        assert route.call_count == 4
+
+    @respx.mock
+    def test_unserved_route_is_latched_off(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A backend that is not llama.cpp 404s /tokenize: ask once, then stop."""
+        route = respx.post(TOKENIZE).mock(return_value=httpx.Response(404))
+        client = _client()
+        assert client.count_served_tokens("x") is None
+        assert client.count_served_tokens("y") is None
+        assert route.call_count == 1
+        assert sum("not a llama.cpp server" in r.message for r in caplog.records) == 1
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "response",
+        [
+            httpx.Response(200, json={"count": 3}),
+            httpx.Response(200, json=[1, 2, 3]),
+            httpx.Response(200, text="not json"),
+        ],
+        ids=["no-token-list", "not-an-object", "not-json"],
+    )
+    def test_unexpected_body_answers_none(self, response: httpx.Response) -> None:
+        respx.post(TOKENIZE).mock(return_value=response)
+        assert _client().count_served_tokens("x") is None
 
 
 class TestVerbose:

@@ -54,7 +54,7 @@ from rich.progress import Progress, TaskID
 
 from varagity.chunking import get_chunker
 from varagity.config import Settings, get_settings
-from varagity.context import situate_context
+from varagity.context import fit_document_preamble, situate_context
 from varagity.debug import show
 from varagity.debug.show import check_verbose
 from varagity.ingest.discovery import Buckets, discover_documents
@@ -214,9 +214,12 @@ def contextualize_chunks(
 ) -> list[str | None]:
     """Generate one situating blurb per chunk, or the identity path (spec §9.4).
 
-    Chunks are processed sequentially, in document order, so every call
-    shares the same document preamble and llama.cpp reuses its prompt cache.
-    Progress is a per-chunk sub-bar under the run's file bar.
+    The document is fitted into its prompt budget once
+    (:func:`~varagity.context.contextual.fit_document_preamble` — a served
+    token count per document, not per chunk), then chunks are processed
+    sequentially, in document order: every call shares the byte-identical
+    preamble and llama.cpp reuses its prompt cache. Progress is a per-chunk
+    sub-bar under the run's file bar.
 
     Args:
         document_text: The parent document's full extracted text.
@@ -233,11 +236,12 @@ def contextualize_chunks(
     """
     if llm is None:
         return [None] * len(chunk_texts)
+    preamble = fit_document_preamble(document_text, llm=llm)
     contexts: list[str | None] = []
     sub_task: TaskID = progress.add_task(f"  ↳ contextualizing {file_name}", total=len(chunk_texts))
     try:
         for chunk_text in chunk_texts:
-            contexts.append(situate_context(document_text, chunk_text, llm=llm, verbose=verbose))
+            contexts.append(situate_context(preamble, chunk_text, llm=llm, verbose=verbose))
             progress.advance(sub_task)
     finally:
         progress.remove_task(sub_task)

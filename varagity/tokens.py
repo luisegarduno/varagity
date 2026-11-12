@@ -7,6 +7,13 @@ for the two consumers here — the ``n_tokens`` provenance field on
 :class:`~varagity.stores.records.ChunkRecord` and the near-512-token ingest
 warning in :class:`~varagity.models.embeddings.EmbeddingsClient`.
 
+It is **not** the served chat model's count. That model gives every digit
+its own token where cl100k packs up to three, so digit-dense text runs far
+over its cl100k estimate — 1.45× on a timestamp-and-coordinate export, 3×
+on bare digit runs. Anything that must fit the llama.cpp window exactly
+asks the server instead
+(:meth:`varagity.models.llm.LLMClient.count_served_tokens`).
+
 tiktoken downloads its BPE ranks file on first use (cached afterwards). If
 that download fails (offline host), counting falls back to a chars/4 estimate
 with a one-time warning instead of failing ingestion.
@@ -63,8 +70,9 @@ def count_tokens(text: str) -> int:
 def truncate_to_tokens(text: str, max_tokens: int) -> str:
     """Truncate ``text`` to at most ``max_tokens`` tokens (approximate).
 
-    Used by the contextualizer to keep an oversized document preamble inside
-    the llama.cpp context budget instead of crashing ingest.
+    The contextualizer's cheap first cut of an oversized document preamble;
+    the served tokenizer then has the last word on whether the cut fits
+    (:func:`varagity.context.contextual.fit_document_preamble`).
 
     Args:
         text: The text to truncate.
