@@ -1116,6 +1116,8 @@ context):
 | `localhost:8081` unreachable | infinity binds a specific interface — `docker compose port infinity-embeddings 8081` |
 | infinity crashes at warmup after GPU/engine changes | torch has no `sm_120` kernels — keep `INFINITY_ENGINE=optimum`; reranker OOM → keep the `32;4` batch cap |
 | Config change didn't take effect on ingest | Content hashes unchanged — run `ingest --reingest` (or the GUI's stale-banner action) |
+| Ingest warns `no served token count — cutting the document preamble…` | llama.cpp's `/tokenize` (at the server root, not under `/v1`) didn't answer, or `BASE_MODEL_API_URL` names a server that isn't llama.cpp. The file still ingests, situated in a shorter byte-safe head. Check with `curl -sX POST <server root>/tokenize -d '{"content":"x"}'` |
+| A file fails contextualization with `exceed_context_size_error` (HTTP 400) | The prompt alone overflows `LLM_CONTEXT_TOKENS`. The document preamble is fitted with the served tokenizer, so this means a chunk far past its 2048-token allowance — a token-based `CHUNK_SIZE` set very high; lower it |
 | GUI upload fails; `EACCES` in `api` logs | uid mismatch on the `./docs` mount — rebuild with the `APP_UID`/`APP_GID` build args ([above](#containers-file-permissions)) |
 | Ingestion dashboard stays empty after a CLI ingest | Metrics are per-process — run the ingest through the GUI/API ([above](#observability-operations)) |
 | Changed `NEXT_PUBLIC_API_URL`, browser still calls the old origin | Build-time constant — `docker compose build web && docker compose up -d web` |

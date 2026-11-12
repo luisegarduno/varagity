@@ -1,6 +1,6 @@
 # ADR-003: Vertical-slice build order and v1 operational choices
 
-**Status:** Accepted (implementation plan, 2026-07-09)
+**Status:** Accepted (implementation plan, 2026-07-09) · Amended (2026-11-11 — [below](#amendment-2026-11-11-the-served-tokenizer-fits-the-preamble))
 
 One record for the cluster of build/ops decisions made when the v1
 implementation plan was drawn up. Each was small alone; together they shaped
@@ -103,3 +103,58 @@ instead; see [ADR-009](ADR-009-modality-expansion.md).)*
 - **Unique index on `(doc_id, original_index)`** — the fusion identity is
   load-bearing; corrupt it loudly at write time, not silently at query time.
 - **Coverage floor 80%**, ratcheting up as the suite grows.
+
+## Amendment (2026-11-11): the served tokenizer fits the preamble
+
+The cl100k approximation above had also been sizing one thing it cannot
+see: the contextualizer's document preamble against the llama.cpp window.
+That is a choice of *content*, and on digit-dense text cl100k misses by
+more than the window's slack.
+
+- **The failure.** `Snapchat/html/location_history.html` (186k
+  characters, 27% digits: timestamps and coordinates) failed
+  contextualization on every ingest from August on. The served model
+  (Qwythos-9B on llama.cpp) gives every digit its own token where cl100k
+  packs up to three, so the cl100k-sized preamble — the full 11,648-token
+  budget — counted **16,921** on the server (1.45×). Every chunk's prompt
+  (17,084 tokens) drew a 400 `exceed_context_size_error` from the
+  16,384-token window. A failed file is non-fatal by design, so it stayed
+  out of the corpus with only the logs to say so.
+- **Decision: hold the preamble to the served model's own count.**
+  `LLMClient.count_served_tokens()` asks llama.cpp's `/tokenize` (at the
+  server root — `/v1/tokenize` is a 404). `fit_document_preamble` runs
+  once per document. A document of at most budget-many UTF-8 bytes is
+  taken whole, uncounted, because every token spans at least one byte.
+  Otherwise cl100k cuts first (cheap, and it bounds the request), then the
+  served count checks the cut and re-cuts it in proportion while it is
+  over. One re-cut landed the export at 11,363 served tokens: two
+  `/tokenize` calls, ~25 ms each. The budget arithmetic is unchanged;
+  its unit is now the served token.
+- **Once per document, never per chunk.** The preamble must stay
+  byte-identical across a document's chunks (llama.cpp's prompt cache,
+  spec §9.4), so `situate_context` sends the fitted preamble as given.
+  Re-fitting per chunk would re-pay the count hundreds of times, and a
+  count failing mid-document would hand chunks different preambles.
+- **No served count → the byte bound.** If `/tokenize` stays
+  unreachable through its retries, or the backend is not llama.cpp (a
+  4xx latches counting off for that client), the preamble is the
+  document's first budget-many UTF-8 bytes: a fit under any tokenizer.
+  The cost is a shorter context, never a failed file, and a warning
+  says so.
+- **`_fit_max_tokens` keeps cl100k, deliberately.** Measured on the
+  served build (b9935, `--parallel 1`): a generation that reaches the
+  window stops there with `finish_reason=length`, no mid-decode 500.
+  And a prompt that alone overflows fails either way, as the client's
+  `ValueError` or the server's 400 (both reach the chat stream as the same
+  `pipeline_error`). An exact count there would change no outcome and add a
+  round trip to every chat call, so it is spent only where it changes what
+  is sent.
+- **Consequences.** Of the 16 corpus documents only the export is cut;
+  the served model counts this corpus's prose 2–9% over cl100k, and its
+  digit-dense contact list 1.80×, but both stay inside the budget whole.
+  A prose document *over* the budget now gets a preamble a few percent
+  shorter than before: the 640-token overhead reserve was sized to absorb
+  that drift and is now mostly slack. The graph paths still budget the
+  window by approximation (the LightRAG adapter's `fit_max_tokens`: cl100k;
+  the graph answer context: 3 characters per token), so digit-dense
+  transcripts are their open risk.

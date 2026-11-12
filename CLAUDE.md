@@ -229,6 +229,12 @@ never point a host process at the live graph while the api container is up). See
 - `CHUNK_SIZE`'s unit is **per-strategy**: characters for `recursive_character` /
   `markdown_aware`, tokens for `token_based` / `docling_hybrid` (`semantic` splits on
   embedding-similarity boundaries instead).
+- **cl100k (`varagity/tokens.py`) is not the served model's count**: the served model
+  gives every digit its own token where cl100k packs up to three, so digit-dense text
+  (timestamps, coordinates, phone numbers) counts 1.4–1.8× its cl100k estimate. Size
+  *content* against the llama.cpp window with `LLMClient.count_served_tokens()` (llama.cpp
+  `/tokenize`, at the server root, not under `/v1`), as `fit_document_preamble` does
+  once per document. `_fit_max_tokens` stays on cl100k on purpose (ADR-003 amendment).
 - `RERANK_ENABLED=false` is a kill switch, not a method: `RETRIEVAL_METHOD=reranked` then
   degrades to its base method (and logs it). Method selection and the toggle are
   deliberately orthogonal. `HYDE_ENABLED=false` is the same shape for `hyde`
