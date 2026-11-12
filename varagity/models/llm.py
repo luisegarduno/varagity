@@ -6,6 +6,10 @@ models carry ``<think>…</think>`` blocks; callers strip them with
 :func:`clean_response` (answers and context blurbs) or,
 on the streaming path (spec_v2 §4.3), classify them delta-by-delta with
 :class:`varagity.models.stream.ThinkStreamSplitter`.
+
+The served model's own tokenizer is reachable too, through llama.cpp's
+non-OpenAI ``/tokenize`` route (:meth:`LLMClient.count_served_tokens`) — for
+the callers whose *content* has to fit the window exactly.
 """
 
 import logging
@@ -13,6 +17,7 @@ import re
 from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 
+import httpx
 import openai
 from openai import Stream
 from openai.types import CompletionUsage
@@ -20,6 +25,7 @@ from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
 from tenacity import (
     before_sleep_log,
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -33,8 +39,51 @@ logger = logging.getLogger(__name__)
 
 # Headroom subtracted when fitting a generation cap into the context window:
 # the chat template's scaffolding tokens plus the cl100k approximation's
-# drift vs the served model's own tokenizer (~2% measured; plan decision #8).
+# drift vs the served model's own tokenizer (~2% measured on prose; plan
+# decision #8 — digit-dense text drifts far more, see count_served_tokens).
 _CTX_HEADROOM_TOKENS = 512
+
+# llama.cpp serves its tokenizer at the server root, beside the OpenAI
+# surface rather than under it (`/v1/tokenize` is a 404 on build b9935).
+_TOKENIZE_PATH = "/tokenize"
+# A tokenize is a vocabulary pass on the server's HTTP thread, not a slot
+# task: ~25 ms for a 27k-character preamble, measured. The timeout only
+# bounds a wedged server.
+_TOKENIZE_TIMEOUT_SECONDS = 30.0
+
+
+def _server_root(base_url: str) -> str:
+    """Return the llama.cpp server root behind an OpenAI-style base URL.
+
+    Args:
+        base_url: The OpenAI-compatible base URL (``BASE_MODEL_API_URL``,
+            conventionally ending in ``/v1``).
+
+    Returns:
+        The URL without a trailing slash or ``/v1`` suffix — where
+        llama.cpp's own routes (``/tokenize``) live.
+    """
+    return base_url.rstrip("/").removesuffix("/v1")
+
+
+def _is_retryable_http(error: BaseException) -> bool:
+    """Whether a raw ``httpx`` failure is transient (the ``/tokenize`` call).
+
+    The same policy as :data:`_RETRYABLE_ERRORS` applies to the SDK calls —
+    connection/timeout trouble, 5xx, and 429 — for the one route the
+    ``openai`` SDK cannot reach.
+
+    Args:
+        error: The exception raised by one request attempt.
+
+    Returns:
+        ``True`` for transport errors and retryable HTTP statuses.
+    """
+    if isinstance(error, httpx.TransportError):
+        return True
+    return isinstance(error, httpx.HTTPStatusError) and (
+        error.response.status_code >= 500 or error.response.status_code == 429
+    )
 
 
 @dataclass(frozen=True)
@@ -105,13 +154,23 @@ def _parse_timings(chunk: ChatCompletionChunk) -> GenerationTimings | None:
 def _fit_max_tokens(messages: Sequence[ChatCompletionMessageParam], max_tokens: int) -> int:
     """Clamp a generation cap so prompt + generation fits the context window.
 
-    llama.cpp with context shift disabled (its default) fails a request
-    mid-decode with a hard 500 ("Context size has been exceeded") once
-    prompt + generated tokens reach ``--ctx-size`` — it does not stop
-    gracefully at the boundary. Guarantee ``prompt + cap + headroom ≤
+    llama.cpp builds have failed a request mid-decode with a hard 500
+    ("Context size has been exceeded") once prompt + generated tokens
+    reached ``--ctx-size``. Guarantee ``prompt + cap + headroom ≤
     LLM_CONTEXT_TOKENS`` instead: a clamped generation stops with
     ``finish_reason=length``, which callers already handle (an unclosed
     ``<think>`` cleans to an empty response, a cut answer stays an answer).
+
+    The prompt is counted with the cl100k approximation, deliberately — not
+    :meth:`LLMClient.count_served_tokens`, although cl100k undercounts
+    digit-dense prompts. On the served build an exact count changes neither
+    outcome: a generation that reaches the window stops there with
+    ``finish_reason=length`` exactly as a clamped one would (b9935 with
+    ``--parallel 1``, measured), and a prompt that alone overflows fails
+    either way — the ``ValueError`` below, or the server's
+    ``exceed_context_size_error`` 400. An exact count earns its round trip
+    only where it changes *what is sent*: the contextualizer's document
+    preamble (:func:`varagity.context.contextual.fit_document_preamble`).
 
     Args:
         messages: The chat messages about to be sent (string contents are
@@ -234,11 +293,18 @@ class LLMClient:
         self.model = model or settings.BASE_MODEL
         self.max_tokens = max_tokens if max_tokens is not None else settings.MAX_TOKENS
         self.temperature = temperature if temperature is not None else settings.LLM_TEMPERATURE
+        resolved_base_url = base_url or settings.BASE_MODEL_API_URL
+        self._api_key = api_key or settings.BASE_MODEL_API_KEY
         self._client = openai.OpenAI(
-            base_url=base_url or settings.BASE_MODEL_API_URL,
-            api_key=api_key or settings.BASE_MODEL_API_KEY,
+            base_url=resolved_base_url,
+            api_key=self._api_key,
             max_retries=0,  # tenacity owns retries (see class docstring)
         )
+        self._tokenize_url = f"{_server_root(resolved_base_url)}{_TOKENIZE_PATH}"
+        # Latched when the server permanently rejects /tokenize (a backend
+        # other than llama.cpp): later counts answer None without a request,
+        # so one warning stands for the client's lifetime.
+        self._tokenize_unsupported = False
 
     def generate(
         self,
@@ -352,6 +418,94 @@ class LLMClient:
             temperature=self.temperature if temperature is None else temperature,
         )
         return _iter_stream_deltas(stream, on_usage, on_timings)
+
+    def count_served_tokens(self, text: str) -> int | None:
+        """Count ``text`` with the served model's own tokenizer.
+
+        The cl100k approximation (:mod:`varagity.tokens`) undercounts what
+        the served model sees whenever text is digit-dense: this model gives
+        every digit its own token where cl100k packs up to three, so a
+        timestamp-and-coordinate export measured 1.45× its cl100k estimate.
+        llama.cpp exposes its tokenizer at ``/tokenize`` (server root, not
+        under ``/v1``); the request is ``{"content": text}`` and the
+        response ``{"tokens": [...]}``, special tokens not added. Transient
+        failures retry like the chat calls.
+
+        Args:
+            text: The text to count.
+
+        Returns:
+            The served token count, or ``None`` when the server cannot give
+            one: the route is not served (a non-llama.cpp backend — latched,
+            so later calls answer ``None`` without a request), the server
+            stayed unreachable through the retries, or the body was not the
+            expected shape. Each case logs a warning; callers fall back to a
+            bound of their own. Never raises for a server-side reason.
+        """
+        if self._tokenize_unsupported:
+            return None
+        try:
+            body = self._post_tokenize(text)
+        except httpx.HTTPStatusError as error:
+            status = error.response.status_code
+            if _is_retryable_http(error):
+                logger.warning(
+                    "served tokenizer at %s failed (HTTP %d) after retries",
+                    self._tokenize_url,
+                    status,
+                )
+            else:
+                self._tokenize_unsupported = True
+                logger.warning(
+                    "served tokenizer at %s rejected the request (HTTP %d) — not a llama.cpp "
+                    "server? Served token counts are off for this client",
+                    self._tokenize_url,
+                    status,
+                )
+            return None
+        except (httpx.HTTPError, ValueError) as error:  # ValueError: a body that is not JSON
+            logger.warning("served tokenizer at %s unreachable: %s", self._tokenize_url, error)
+            return None
+        tokens = body.get("tokens") if isinstance(body, dict) else None
+        if not isinstance(tokens, list):
+            logger.warning(
+                "served tokenizer at %s answered without a token list", self._tokenize_url
+            )
+            return None
+        return len(tokens)
+
+    @retry(
+        retry=retry_if_exception(_is_retryable_http),
+        wait=wait_exponential(multiplier=0.5, max=10),
+        stop=stop_after_attempt(4),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _post_tokenize(self, text: str) -> object:
+        """Send one ``/tokenize`` request, retrying transient failures.
+
+        Args:
+            text: The text to tokenize.
+
+        Returns:
+            The parsed response body (shape-checked by the caller).
+
+        Raises:
+            httpx.HTTPStatusError: On a non-2xx response (retried for
+                5xx/429, then reraised).
+            httpx.TransportError: On connection/timeout trouble after
+                retries.
+            ValueError: If the body is not JSON.
+        """
+        response = httpx.post(
+            self._tokenize_url,
+            json={"content": text},
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=_TOKENIZE_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        body: object = response.json()
+        return body
 
     @retry(
         retry=retry_if_exception_type(_RETRYABLE_ERRORS),

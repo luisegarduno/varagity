@@ -10,6 +10,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.test_contextual import DIGIT_ROW, digit_split_count
+from varagity.config import get_settings
+from varagity.context.contextual import doc_token_budget
 from varagity.ingest import loader as loader_module
 from varagity.ingest.loader import MIN_EXTRACTED_CHARS, file_timestamps, ingest_corpus
 from varagity.stores.records import ChunkRecord
@@ -175,6 +178,18 @@ class FakeContextLLM:
         self.prompts.append(messages[0]["content"])
         blurb = f"Situating blurb #{len(self.prompts)}."
         return f"<think>placing the chunk…</think>{blurb}" if self.think else blurb
+
+
+class CountingContextLLM(FakeContextLLM):
+    """FakeContextLLM whose served tokenizer splits digits, as the served model does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.counted: list[str] = []
+
+    def count_served_tokens(self, text: str) -> int:
+        self.counted.append(text)
+        return digit_split_count(text)
 
 
 # The identity path (plan decision #2): pin CONTEXTUALIZE off so these tests
@@ -602,6 +617,34 @@ class TestContextualization:
             document = prompt.split("</document>")[0]
             assert marker in document
             assert other not in document
+
+    def test_preamble_is_fitted_once_per_document_and_shared_by_its_chunks(
+        self, contextual_settings: None, settings_env: Callable[..., None], tmp_path: Path
+    ) -> None:
+        """One served count per document, and one preamble for all of its chunks.
+
+        The location-history shape: a digit-dense export whose cl100k cut
+        overflows the served window. The fit is paid per document — doing it
+        per chunk would re-pay it hundreds of times and could hand chunks
+        different preambles, defeating llama.cpp's shared-prefix cache.
+        """
+        settings_env(LLM_CONTEXT_TOKENS=16384, CONTEXTUALIZE_MAX_TOKENS=2048, MAX_TOKENS=8192)
+        root = tmp_path / "docs"
+        root.mkdir()
+        (root / "location_history.txt").write_text(DIGIT_ROW * 700)
+        store = FakeStore()
+        llm = CountingContextLLM()
+        summary = ingest_corpus(
+            str(root), store=store, embeddings=FakeEmbeddings(), llm=llm, verbose=0
+        )
+
+        assert summary.ingested == 1
+        assert len(llm.prompts) == len(store.records) > 1
+        preambles = {prompt.split("\n</document>")[0] for prompt in llm.prompts}
+        assert len(preambles) == 1  # byte-identical across every chunk
+        preamble = preambles.pop().removeprefix("<document>\n")
+        assert digit_split_count(preamble) <= doc_token_budget(get_settings())
+        assert len(llm.counted) == 2  # the cl100k cut, then the re-cut that lands
 
     def test_contextualize_off_keeps_identity_and_never_calls_llm(
         self, pinned_settings: None, corpus: Path
