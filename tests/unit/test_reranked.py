@@ -7,27 +7,36 @@ import pytest
 
 from varagity.models.rerank import RerankResult
 from varagity.retrieval import RETRIEVER_REGISTRY, get_retriever
-from varagity.retrieval.reranked import RerankedRetriever, apply_rerank
+from varagity.retrieval.reranked import RerankedRetriever, apply_rerank, rerank_document
 from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
 
-def _chunk(i: int, score: float, *, trace: RetrievalTrace | None = None) -> RetrievedChunk:
+def _chunk(
+    i: int,
+    score: float,
+    *,
+    trace: RetrievalTrace | None = None,
+    context: str | None = None,
+) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=f"doc0000000000aaa::{i}",
         doc_id="doc0000000000aaa",
         original_index=i,
         content=f"chunk content {i}",
-        context=None,
+        context=context,
         metadata={"source": "/abs/corpus/a.md", "file_name": "a.md", "page": None},
         score=score,
         trace=trace,
     )
 
 
-def _traced_chunk(i: int, score: float, fused_rank: int) -> RetrievedChunk:
+def _traced_chunk(
+    i: int, score: float, fused_rank: int, *, context: str | None = None
+) -> RetrievedChunk:
     return _chunk(
         i,
         score,
+        context=context,
         trace=RetrievalTrace(
             semantic_rank=fused_rank,
             semantic_score=score,
@@ -105,6 +114,24 @@ class TestRegistry:
         assert isinstance(get_retriever("reranked"), RerankedRetriever)
 
 
+class TestRerankDocument:
+    def test_appends_the_blurb_in_the_cookbook_format(self) -> None:
+        """Content first, then the blurb behind a ``Context:`` label."""
+        chunk = _chunk(0, 0.5, context="From the Aurora power section.")
+        assert rerank_document(chunk) == (
+            "chunk content 0\n\nContext: From the Aurora power section."
+        )
+
+    @pytest.mark.parametrize("context", [None, ""])
+    def test_blurbless_chunk_is_its_content(self, context: str | None) -> None:
+        """CONTEXTUALIZE off (None) or an empty blurb: nothing to append."""
+        assert rerank_document(_chunk(0, 0.5, context=context)) == "chunk content 0"
+
+    def test_include_context_off_is_the_bare_content(self) -> None:
+        chunk = _chunk(0, 0.5, context="From the Aurora power section.")
+        assert rerank_document(chunk, include_context=False) == "chunk content 0"
+
+
 class TestApplyRerank:
     def test_reorders_and_records_deltas(self) -> None:
         """Item at pre-rerank rank 5 promoted to rank 1 ⇒ delta +4."""
@@ -178,11 +205,39 @@ class TestRerankedRetriever:
 
         # The base was asked for the widened pool, not the caller's k.
         assert base.retrieve_calls == [{"query": "q", "k": 5, "query_vector": None}]
-        # The cross-encoder saw the original chunk text (content, not blurbs).
+        # Blurbless candidates: the cross-encoder saw each chunk's content.
         assert client.calls == [("q", [f"chunk content {i}" for i in range(5)])]
         # RERANK_TOP_N=3 cut applied after reranking.
         assert len(result) == 3
         assert all(chunk.trace is not None and chunk.trace.rerank_score for chunk in result)
+
+    def test_cross_encodes_content_with_its_blurb(
+        self, rerank_settings: Callable[..., None]
+    ) -> None:
+        """Contextual candidates reach the cross-encoder with their blurbs."""
+        rerank_settings()
+        base = FakeBase(
+            [_traced_chunk(i, 0.5, fused_rank=i + 1, context=f"blurb {i}") for i in range(2)]
+        )
+        client = FakeRerank([RerankResult(index=i, relevance_score=1.0) for i in range(2)])
+        RerankedRetriever(base=base, rerank=client).retrieve("q", k=2, verbose=0)
+        assert client.calls == [
+            ("q", [f"chunk content {i}\n\nContext: blurb {i}" for i in range(2)])
+        ]
+
+    def test_include_context_off_cross_encodes_bare_content(
+        self, rerank_settings: Callable[..., None]
+    ) -> None:
+        """The eval's plain-content baseline drops the blurbs."""
+        rerank_settings()
+        base = FakeBase(
+            [_traced_chunk(i, 0.5, fused_rank=i + 1, context=f"blurb {i}") for i in range(2)]
+        )
+        client = FakeRerank([RerankResult(index=i, relevance_score=1.0) for i in range(2)])
+        RerankedRetriever(base=base, rerank=client, include_context=False).retrieve(
+            "q", k=2, verbose=0
+        )
+        assert client.calls == [("q", [f"chunk content {i}" for i in range(2)])]
 
     def test_pool_widens_to_k_when_k_exceeds_candidates(
         self, rerank_settings: Callable[..., None]

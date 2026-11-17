@@ -1,11 +1,15 @@
-"""Cross-encoder re-ranking over a base retriever (spec_v2 §5 — the ≈67% tier).
+r"""Cross-encoder re-ranking over a base retriever (spec_v2 §5 — the ≈67% tier).
 
 Re-ranking *composes* an existing retrieval method rather than replacing
 fusion: over-fetch a wide candidate pool (``RERANK_CANDIDATES``) from the
-configured ``RERANK_BASE_METHOD``, cross-encode every candidate's original
-``content`` against the query (the contextual blurb already did its job at
-the embedding/BM25 stage), and keep the ``RERANK_TOP_N`` most relevant —
-the Anthropic cookbook's 150→20 over-fetch, scaled to this corpus.
+configured ``RERANK_BASE_METHOD``, cross-encode every candidate against the
+query, and keep the ``RERANK_TOP_N`` most relevant — the Anthropic
+cookbook's 150→20 over-fetch, scaled to this corpus. Each candidate is
+judged as its original ``content`` **plus** its situating blurb
+(:func:`rerank_document`, the cookbook's ``"{content}\n\nContext: {blurb}"``
+format): the blurb carries document-level facts (file, section, what the
+chunk belongs to) that a query may name and the bare chunk lacks — the same
+reason it is in the embedded and BM25-indexed text.
 
 ``RERANK_ENABLED`` is a kill switch orthogonal to method selection: when
 ``false`` the retriever degrades to its base method's ranking (logged), so
@@ -24,6 +28,30 @@ from varagity.retrieval.base import Retriever, get_retriever, register
 from varagity.stores.records import RetrievalTrace, RetrievedChunk
 
 logger = logging.getLogger(__name__)
+
+
+def rerank_document(chunk: RetrievedChunk, *, include_context: bool = True) -> str:
+    r"""Build the text the cross-encoder judges for one candidate.
+
+    The Anthropic cookbook's format: the original chunk first, then its
+    situating blurb behind a ``Context:`` label
+    (``f"{content}\n\nContext: {context}"``), so the cross-encoder judges
+    the chunk *and* where it sits in its document. Content leads so that a
+    model truncating a long pair cuts the blurb, never the chunk.
+
+    Args:
+        chunk: A candidate from the base retriever.
+        include_context: Append the blurb when the chunk has one. ``False``
+            scores the bare ``content`` (the eval's plain-rerank baseline).
+
+    Returns:
+        The document text to cross-encode. ``content`` unchanged when the
+        chunk has no blurb (ingested with ``CONTEXTUALIZE`` off, or an
+        empty blurb) or ``include_context`` is off.
+    """
+    if include_context and chunk.context:
+        return f"{chunk.content}\n\nContext: {chunk.context}"
+    return chunk.content
 
 
 def apply_rerank(
@@ -87,6 +115,7 @@ class RerankedRetriever:
         *,
         base: Retriever | None = None,
         rerank: RerankClient | None = None,
+        include_context: bool = True,
     ) -> None:
         """Create the retriever.
 
@@ -95,9 +124,13 @@ class RerankedRetriever:
                 ``settings.RERANK_BASE_METHOD`` per call when omitted.
             rerank: Cross-encoder client; resolved via the model registry
                 (``get_model("rerank")``) per call when omitted.
+            include_context: Cross-encode each candidate's blurb alongside
+                its content (:func:`rerank_document`). ``False`` exists for
+                the eval's plain-content baseline.
         """
         self._base = base
         self._rerank = rerank
+        self._include_context = include_context
 
     def _base_retriever(self) -> Retriever:
         """Resolve the composed base retriever (injected or from settings).
@@ -185,7 +218,11 @@ class RerankedRetriever:
         else:
             client = self._rerank if self._rerank is not None else get_model("rerank")
             rerank_started = time.perf_counter()
-            scored = client.rerank(query, [chunk.content for chunk in candidates], verbose=0)
+            documents = [
+                rerank_document(chunk, include_context=self._include_context)
+                for chunk in candidates
+            ]
+            scored = client.rerank(query, documents, verbose=0)
             chunks = apply_rerank(candidates, scored)[:top_n]
             # The rerank sub-stage's share of retrieval (spec_v2 §6.2 —
             # "is it earning its latency?"); the flow's `retrieve`

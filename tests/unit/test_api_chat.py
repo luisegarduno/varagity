@@ -206,7 +206,9 @@ def store_state() -> dict[str, Any]:
 
 
 @pytest.fixture
-def app(store_state: dict[str, Any]) -> FastAPI:
+def app(store_state: dict[str, Any], settings_env: Callable[..., None]) -> FastAPI:
+    # settings_env holds RETRIEVAL_METHOD at its default: the method-asserting
+    # tests below must not read a developer .env.
     application = create_app()
     retriever = FakeRetriever()
 
