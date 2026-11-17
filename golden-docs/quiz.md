@@ -563,8 +563,9 @@ out of scope for now; it gets its own set later.
        cookbook's 150→20 over-fetch scaled to this corpus) from
        `RERANK_BASE_METHOD` (default `hybrid`; `semantic`/`bm25`/`hybrid`/`hyde`,
        never `reranked`);
-    2. cross-encode every candidate's **original `content`** (the blurb already
-       did its job at the embedding/BM25 stage) against the query at infinity's
+    2. cross-encode every candidate — its **original `content` plus its
+       situating blurb**, in the cookbook's `"{content}\n\nContext: {blurb}"`
+       format — against the query at infinity's
        `POST /v1/rerank` with `bge-reranker-v2-m3` — a dedicated `httpx`
        `RerankClient`, since the endpoint is not an OpenAI-SDK method, with the
        same `tenacity` posture as the other clients;

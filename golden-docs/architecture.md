@@ -311,9 +311,10 @@ rather than forking fusion:
 
 1. over-fetch a wide candidate pool from `RERANK_BASE_METHOD` (default
    `hybrid`) — `max(RERANK_CANDIDATES, k)` chunks, default pool 40;
-2. cross-encode every candidate's original `content` against the query with
-   `bge-reranker-v2-m3` at infinity's `/v1/rerank` (the contextual blurb
-   already did its job at the embedding/BM25 stage);
+2. cross-encode every candidate against the query with `bge-reranker-v2-m3`
+   at infinity's `/v1/rerank`, each judged as its original `content` plus its
+   situating blurb — the cookbook's `"{content}\n\nContext: {blurb}"` format
+   (`rerank_document`);
 3. keep the `min(k, RERANK_TOP_N)` most relevant, recording `rerank_score` and
    `rerank_delta` on each chunk's trace.
 
